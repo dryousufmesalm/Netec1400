@@ -1,0 +1,14 @@
+# MQL4/MQL5 compiled and cache
+*.ex4
+*.ex5
+*.log
+*.tlc
+
+# MetaEditor / IDE
+*.ini
+*.bak
+*.tmp
+
+# Optional: uncomment to ignore PDF/zips if you prefer repo without binaries
+# *.pdf
+# *.zip
