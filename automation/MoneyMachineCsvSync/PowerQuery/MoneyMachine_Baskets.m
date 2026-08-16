@@ -6,7 +6,7 @@ let
     },
     Files = Folder.Files(OneDriveRoot & "\\MoneyMachine"),
     BasketFiles = Table.SelectRows(Files, each [Name] = "Baskets.csv" and Text.Contains([Folder Path], "\\Account_")),
-    WithFolderLogin = Table.AddColumn(BasketFiles, "FolderAccountNumber", each Text.BetweenDelimiters(Text.TrimEnd([Folder Path], "\\"), "Account_", "\\"), type text),
+    WithFolderLogin = Table.AddColumn(BasketFiles, "FolderAccountNumber", each List.Last(Text.Split(Text.TrimEnd([Folder Path], "\\"), "Account_")), type text),
     WithCsv = Table.AddColumn(WithFolderLogin, "Data", each Table.SelectColumns(Table.PromoteHeaders(Csv.Document([Content], [Delimiter=",", Encoding=65001, QuoteStyle=QuoteStyle.Csv]), [PromoteAllScalars=true]), ExpectedColumns, MissingField.UseNull)),
     Keep = Table.SelectColumns(WithCsv, {"FolderAccountNumber","Data"}),
     Expanded = Table.ExpandTableColumn(Keep, "Data", ExpectedColumns, ExpectedColumns),
