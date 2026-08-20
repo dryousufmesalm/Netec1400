@@ -1,12 +1,12 @@
 # Windows Test Worker Design
 
-**Status:** Approved in chat on 2026-08-20; written version awaiting final review  
+**Status:** Approved in chat on 2026-08-20; updated for a shared all-project worker and awaiting final review
 **Date:** 2026-08-20  
 **Related design:** `docs/superpowers/specs/2026-08-20-onedrive-csv-production-readiness-design.md`
 
 ## Goal
 
-Keep the Git repository and all authoritative edits on the always-on Linux VPS while using a home Windows 11 computer as an on-demand worker for PowerShell, Task Scheduler, MetaEditor/MT4, OneDrive, and Excel acceptance tests.
+Keep every Git repository and all authoritative edits on the always-on Linux VPS while using one home Windows 11 computer as an on-demand worker for PowerShell, Task Scheduler, MetaEditor/MT4, OneDrive, Excel, and other explicitly allowlisted project checks.
 
 ## Selected architecture
 
@@ -15,7 +15,8 @@ Phone
   |
   | Codex Remote
   v
-Linux VPS / authoritative repository
+Linux VPS / authoritative repositories
+  |- shared `codex-win` client and tunnel configuration
   |
   | SSH to 127.0.0.1:22022 on the VPS
   | through a Windows-originated reverse tunnel
@@ -33,12 +34,14 @@ Cloudflare is not part of the required path. An existing Cloudflare Tunnel can b
 
 ## Authority and data ownership
 
-- The Linux checkout is the only authoritative repository.
+- Each Linux checkout is authoritative for its own project; the worker owns no source repository.
 - Windows never receives a Git clone, Git credentials, or a persistent working copy.
-- Each run receives an allowlisted job bundle under `C:\CodexWorker\jobs\<JobId>`.
+- The shared Linux client is installed once under `/opt/codex-windows-worker` and exposed as `/usr/local/bin/codex-win`; it is not part of, nor coupled to, a project repository.
+- Every project opts in with `.codex/windows-job-manifest.txt` plus an optional ignored `.codex/windows-worker.local.psd1` configuration file.
+- Each run receives an allowlisted job bundle under `C:\CodexWorker\jobs\<ProjectSlug>\<JobId>`.
 - Windows returns a result bundle containing JSON, logs, hashes, and explicitly requested build artifacts.
-- Result bundles are stored under `audit/windows-worker/<JobId>` on Linux.
-- The current Linux working tree, including selected uncommitted files, is the source of a job bundle. `git archive` alone is not used because it would omit relevant working-tree changes.
+- Result bundles are stored under `<project>/audit/windows-worker/<JobId>` on Linux.
+- The calling project's current Linux working tree, including selected uncommitted files, is the source of its job bundle. `git archive` alone is not used because it would omit relevant working-tree changes.
 - A successful collection deletes the remote job only when the caller passes an explicit cleanup option. The default retains the latest three jobs for diagnosis.
 
 ## Identities and keys
@@ -90,7 +93,7 @@ If the home connection drops, the wrapper waits ten seconds and reconnects. If W
 
 ## Job protocol
 
-The Linux orchestrator accepts a mode, an allowlisted manifest, and optional tool paths. It creates a unique sortable job ID, records SHA-256 hashes, packages only manifest entries, sends the bundle, invokes the Windows runner, collects the result, and verifies returned hashes.
+The shared Linux `codex-win` client accepts a project root, mode, an allowlisted project manifest, and optional per-project tool paths. It derives a stable project slug from the project root, creates a unique sortable job ID, records SHA-256 hashes, packages only manifest entries, sends the bundle, invokes the Windows runner, collects the result, and verifies returned hashes.
 
 Supported modes are:
 
@@ -105,6 +108,7 @@ Every Windows run writes `result.json` with this stable shape:
 ```json
 {
   "schemaVersion": 1,
+  "projectSlug": "ammar-trading-a1b2c3d4",
   "jobId": "20260820T180000Z-abcdef12",
   "mode": "smoke",
   "startedAtUtc": "2026-08-20T18:00:00Z",
@@ -129,7 +133,7 @@ Computer name and local paths are redacted by default. Exit code `0` means every
 
 ## Windows command boundaries
 
-The worker runner accepts only known modes and scripts present in the hash-verified job manifest. It does not accept an arbitrary command string from a job JSON file. The Linux operator can still use an interactive SSH shell for diagnosis, but routine automation uses the bounded runner and produces auditable results.
+The worker runner accepts only known modes and scripts present in the hash-verified job manifest. It does not accept an arbitrary command string from a job JSON file. Each job has an independent project slug and workspace, so artifacts cannot collide across projects. The Linux operator can still use an interactive SSH shell for diagnosis, but routine automation uses the bounded runner and produces auditable results.
 
 Administrative changes are excluded from routine jobs. Registering production tasks, changing OneDrive configuration, installing MetaTrader, or changing Excel settings requires an explicit user-approved elevated step on Windows.
 
@@ -153,21 +157,26 @@ The eight-character pairing flow connects a trusted phone or supported desktop a
 
 Codex Remote is not treated as an agent-to-agent API and is not used for Linux-to-Windows shell automation. Its only role in this design is the occasional interactive MetaTrader, OneDrive, or Excel step.
 
-## Repository files
+## Shared tool and project integration files
 
-The implementation will add:
+The shared Linux tool will be installed from a dedicated source directory under `/opt/codex-windows-worker` and exposed as `/usr/local/bin/codex-win`. It includes:
 
-- `automation/WindowsTestWorker/Invoke-WindowsWorker.sh` — Linux job packaging, transport, invocation, collection, and hash verification.
-- `automation/WindowsTestWorker/Bootstrap-WindowsWorker.ps1` — idempotent elevated Windows setup.
-- `automation/WindowsTestWorker/Run-ReverseTunnel.ps1` — reconnect loop installed by bootstrap.
-- `automation/WindowsTestWorker/Run-WindowsJob.ps1` — bounded Windows job dispatcher and result writer.
-- `automation/WindowsTestWorker/job-manifest.txt` — default allowlist for production-readiness tests.
-- `automation/WindowsTestWorker/worker.local.psd1.example` — non-secret configuration schema.
-- `tests/Test-WindowsWorkerPackaging.sh` — Linux-side packaging and result validation checks.
-- `tests/Test-WindowsWorkerScripts.ps1` — Windows idempotency, input rejection, result schema, and smoke checks.
-- `WINDOWS_TEST_WORKER_SETUP.md` — setup, use, troubleshooting, key rotation, and removal guide.
+- `codex-win` — Linux job packaging, transport, invocation, collection, and hash verification.
+- `Bootstrap-WindowsWorker.ps1` — idempotent elevated Windows setup.
+- `Run-ReverseTunnel.ps1` — reconnect loop installed by bootstrap.
+- `Run-WindowsJob.ps1` — bounded Windows job dispatcher and result writer.
+- `shared-manifest.txt` — the small set of worker scripts required in every job.
+- `worker.local.psd1.example` — non-secret machine-level configuration schema.
+- `tests/Test-WindowsWorkerPackaging.sh` and `tests/Test-WindowsWorkerScripts.ps1` — Linux and Windows test suites.
+- `WINDOWS_TEST_WORKER_SETUP.md` — machine setup, any-project onboarding, use, troubleshooting, key rotation, and removal guide.
 
-The implementation will add `automation/WindowsTestWorker/worker.local.psd1` and `audit/windows-worker/` to `.gitignore`. The audit directory may contain machine-specific evidence; selected redacted acceptance reports can be copied deliberately into a tracked delivery location after review.
+Each project adds only:
+
+- `.codex/windows-job-manifest.txt` — project-relative allowlist of files that may leave Linux for a job.
+- `.codex/windows-worker.local.psd1.example` — optional non-secret project configuration, such as a MetaEditor path or a OneDrive staging folder name.
+- `audit/windows-worker/` — ignored machine-specific evidence; selected redacted reports can be copied deliberately into a tracked delivery location after review.
+
+The shared machine configuration and all project-local configuration files are ignored. They never contain private keys, passwords, or cloud credentials.
 
 ## Rollout sequence
 
@@ -184,14 +193,15 @@ The implementation will add `automation/WindowsTestWorker/worker.local.psd1` and
 
 ## Acceptance criteria
 
-- The repository remains only on Linux; Windows contains no `.git` directory.
+- Each project repository remains only on Linux; Windows contains no `.git` directory.
 - Windows exposes no SSH port through the home router or a public firewall rule.
 - The reverse listener is bound only to Linux `127.0.0.1:22022`.
 - The tunnel key cannot obtain a Linux shell or create another listener.
 - Linux logs into Windows only as the standard `CodexWorker` account.
 - Disconnecting and reconnecting home Internet restores the tunnel automatically.
 - An offline or sleeping Windows host is reported within five seconds.
-- A smoke job transfers only allowlisted files and returns a verified result bundle.
+- A smoke job transfers only the calling project's allowlisted files and returns a verified result bundle to that same project.
+- Two projects with the same file names receive separate Windows workspace directories and cannot overwrite each other's artifacts.
 - A malicious mode name, traversal path, or unexpected script is rejected with exit code `2`.
 - MetaEditor compilation returns the compiler log and EX4 without creating a persistent Windows repository.
 - Interactive OneDrive, Excel, and MT4 evidence can be completed through Codex Remote and collected into the same Linux audit tree.
