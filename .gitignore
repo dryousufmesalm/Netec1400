@@ -4,6 +4,9 @@
 *.log
 *.tlc
 
+# Local Git worktrees used for isolated development
+.worktrees/
+
 # MetaEditor / IDE
 *.ini
 *.bak
