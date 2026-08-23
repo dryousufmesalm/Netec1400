@@ -37,9 +37,18 @@ try {
 
     @([pscustomobject]@{ Enabled='true'; ExpectedMT4Login='999'; SourceCsv=$sourceCsv; OneDriveRoot=$oneDrive }) |
         Export-Csv -LiteralPath $testConfigPath -NoTypeInformation -Encoding utf8
-    $mismatch = @(Invoke-MoneyMachineCsvSync -ConfigPath $testConfigPath -StableCheckSeconds 0 -MaxRetries 1)
-    if($mismatch[0].Status -ne 'Skipped') { throw 'Account-login mismatch must be skipped.' }
+    $mismatchThrew = $false
+    try { Invoke-MoneyMachineCsvSync -ConfigPath $testConfigPath -StableCheckSeconds 0 -MaxRetries 1 | Out-Null }
+    catch { $mismatchThrew = $true }
+    if(-not $mismatchThrew) { throw 'Account-login mismatch must fail the invocation.' }
     if((Get-Content -LiteralPath $destination -Raw) -notmatch 'second copy replaces') { throw 'A mismatch overwrote a valid destination.' }
+
+    @([pscustomobject]@{ Enabled='true'; ExpectedMT4Login='892522910'; SourceCsv=(Join-Path $sourceDir 'missing.csv'); OneDriveRoot=$oneDrive }) |
+        Export-Csv -LiteralPath $testConfigPath -NoTypeInformation -Encoding utf8
+    $threw = $false
+    try { Invoke-MoneyMachineCsvSync -ConfigPath $testConfigPath -StableCheckSeconds 0 -MaxRetries 1 | Out-Null }
+    catch { $threw = $true }
+    if(-not $threw) { throw 'An enabled account that cannot synchronize must fail the invocation.' }
 
     Write-Host 'MoneyMachine CSV sync tests passed.'
 }

@@ -92,8 +92,8 @@ function Invoke-MoneyMachineCsvSync {
             continue
         }
         if([string]::IsNullOrWhiteSpace($expectedLogin) -or [string]::IsNullOrWhiteSpace([string]$account.SourceCsv) -or [string]::IsNullOrWhiteSpace([string]$account.OneDriveRoot)) {
-            $results.Add([pscustomobject]@{ AccountNumber=$expectedLogin; Status='Skipped'; Message='Missing required configuration value' })
-            Write-SyncLog 'WARN' "Skipped account '$expectedLogin': missing configuration value."
+            $results.Add([pscustomobject]@{ AccountNumber=$expectedLogin; Status='Error'; Message='Missing required configuration value' })
+            Write-SyncLog 'ERROR' "Account '$expectedLogin' not copied: missing configuration value."
             continue
         }
         if($StartupCatchup -and $successState[$expectedLogin] -eq $today) {
@@ -104,8 +104,8 @@ function Invoke-MoneyMachineCsvSync {
         $sourceCsv = [Environment]::ExpandEnvironmentVariables(([string]$account.SourceCsv).Trim())
         $oneDriveRoot = [Environment]::ExpandEnvironmentVariables(([string]$account.OneDriveRoot).Trim())
         if(-not (Test-Path -LiteralPath $sourceCsv)) {
-            $results.Add([pscustomobject]@{ AccountNumber=$expectedLogin; Status='Skipped'; Message="Source CSV not found: $sourceCsv" })
-            Write-SyncLog 'WARN' "Skipped account '$expectedLogin': source CSV not found."
+            $results.Add([pscustomobject]@{ AccountNumber=$expectedLogin; Status='Error'; Message="Source CSV not found: $sourceCsv" })
+            Write-SyncLog 'ERROR' "Account '$expectedLogin' not copied: source CSV not found."
             continue
         }
 
@@ -150,12 +150,16 @@ function Invoke-MoneyMachineCsvSync {
             Write-SyncLog 'INFO' "Copied account '$expectedLogin' successfully."
         }
         else {
-            $status = if($message -match 'does not match') { 'Skipped' } else { 'Error' }
-            $results.Add([pscustomobject]@{ AccountNumber=$expectedLogin; Status=$status; Message=$message })
-            Write-SyncLog 'WARN' "Account '$expectedLogin' not copied: $message"
+            $results.Add([pscustomobject]@{ AccountNumber=$expectedLogin; Status='Error'; Message=$message })
+            Write-SyncLog 'ERROR' "Account '$expectedLogin' not copied: $message"
         }
     }
     Save-SuccessState -State $successState
+    $failedAccounts = @($results | Where-Object { $_.Status -eq 'Error' })
+    if($failedAccounts.Count -gt 0) {
+        $summary = ($failedAccounts | ForEach-Object { "$($_.AccountNumber): $($_.Message)" }) -join '; '
+        throw "CSV synchronization failed for enabled account(s): $summary"
+    }
     return $results
 }
 
