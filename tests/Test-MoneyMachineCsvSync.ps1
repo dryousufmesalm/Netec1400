@@ -1,13 +1,24 @@
 [CmdletBinding()]
 param(
-    [string]$ScriptPath = (Join-Path $PSScriptRoot '..\automation\MoneyMachineCsvSync\Sync-BasketsToOneDrive.ps1')
+    [string]$ScriptPath
 )
 
 $ErrorActionPreference = 'Stop'
+if([string]::IsNullOrWhiteSpace($ScriptPath)) {
+    $ScriptPath = Join-Path $PSScriptRoot '..\automation\MoneyMachineCsvSync\Sync-BasketsToOneDrive.ps1'
+}
+$ScriptPath = (Resolve-Path -LiteralPath $ScriptPath).Path
+$windowsPowerShell = Join-Path $env:WINDIR 'System32\WindowsPowerShell\v1.0\powershell.exe'
 $tempRoot = Join-Path ([IO.Path]::GetTempPath()) ("MoneyMachineCsvSyncTest_" + [guid]::NewGuid().ToString('N'))
 New-Item -ItemType Directory -Path $tempRoot | Out-Null
 
 try {
+    $escapedScriptPath = $ScriptPath.Replace("'", "''")
+    $libraryProbe = ". '$escapedScriptPath' -AsLibrary"
+    $encodedProbe = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($libraryProbe))
+    $libraryProcess = Start-Process -FilePath $windowsPowerShell -ArgumentList @('-NoProfile','-NonInteractive','-EncodedCommand',$encodedProbe) -Wait -PassThru
+    if($libraryProcess.ExitCode -ne 0) { throw "Library import without ConfigPath exited $($libraryProcess.ExitCode)." }
+
     $sourceDir = Join-Path $tempRoot 'source'
     $oneDrive = Join-Path $tempRoot 'oneDrive'
     New-Item -ItemType Directory -Path $sourceDir,$oneDrive | Out-Null
@@ -62,6 +73,14 @@ try {
         Export-Csv -LiteralPath $missingConfig -NoTypeInformation -Encoding utf8
     $missing = @(Invoke-MoneyMachineCsvSync -ConfigPath $missingConfig -StableCheckSeconds 0 -MaxRetries 1)
     if($missing[0].Status -ne 'Error') { throw 'An enabled missing source must return Error.' }
+
+    $missingProcess = Start-Process -FilePath $windowsPowerShell -ArgumentList @(
+        '-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass',
+        '-File',('"{0}"' -f $ScriptPath),
+        '-ConfigPath',('"{0}"' -f $missingConfig),
+        '-StableCheckSeconds','0','-MaxRetries','1'
+    ) -Wait -PassThru
+    if($missingProcess.ExitCode -eq 0) { throw 'An enabled missing source must return a nonzero process exit code.' }
 
     Write-Host 'MoneyMachine CSV sync tests passed.'
 }

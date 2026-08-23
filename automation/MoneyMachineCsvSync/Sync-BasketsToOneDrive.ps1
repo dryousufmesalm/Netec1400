@@ -1,6 +1,6 @@
 [CmdletBinding()]
 param(
-    [string]$ConfigPath = (Join-Path $PSScriptRoot 'accounts.csv'),
+    [string]$ConfigPath,
     [switch]$StartupCatchup,
     [switch]$AsLibrary,
     [int]$StableCheckSeconds = 2,
@@ -10,8 +10,8 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 $ScriptRoot = Split-Path -Parent $PSCommandPath
-if([string]::IsNullOrWhiteSpace($ScriptRoot)) { $ScriptRoot = Split-Path -Parent $MyInvocation.MyCommand.Path }
 if([string]::IsNullOrWhiteSpace($ScriptRoot)) { throw 'Could not resolve the sync script directory.' }
+if([string]::IsNullOrWhiteSpace($ConfigPath)) { $ConfigPath = Join-Path $ScriptRoot 'accounts.csv' }
 
 $SchemaV3Columns = @(
     'AccountNumber','BrokerName','BasketID','Symbol','SymbolNormalized','Timeframe','StartTime','EndTime','DurationSeconds',
