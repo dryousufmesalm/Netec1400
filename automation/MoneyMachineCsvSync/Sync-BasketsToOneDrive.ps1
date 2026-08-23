@@ -5,6 +5,7 @@ param(
     [switch]$AsLibrary,
     [int]$StableCheckSeconds = 2,
     [int]$MaxRetries = 3,
+    [int]$MutexWaitMilliseconds = 30000,
     [string]$RuntimeRoot
 )
 
@@ -141,6 +142,7 @@ function Invoke-MoneyMachineCsvSync {
         [switch]$StartupCatchup,
         [int]$StableCheckSeconds = 2,
         [int]$MaxRetries = 3,
+        [int]$MutexWaitMilliseconds = 30000,
         [string]$RuntimeRoot
     )
 
@@ -148,13 +150,14 @@ function Invoke-MoneyMachineCsvSync {
     if([string]::IsNullOrWhiteSpace($RuntimeRoot)) { $RuntimeRoot = $ScriptRoot }
     if($StableCheckSeconds -lt 0) { throw 'StableCheckSeconds must be zero or greater.' }
     if($MaxRetries -lt 1) { throw 'MaxRetries must be at least one.' }
+    if($MutexWaitMilliseconds -lt 0) { throw 'MutexWaitMilliseconds must be zero or greater.' }
     if(-not (Test-Path -LiteralPath $ConfigPath)) { throw "Configuration file not found: $ConfigPath" }
 
     $startedUtc = [DateTime]::UtcNow.ToString('o')
     $mutex = New-Object System.Threading.Mutex($false, 'Global\MoneyMachineCsvSync')
     $hasLock = $false
     try {
-        $hasLock = $mutex.WaitOne(30000)
+        $hasLock = $mutex.WaitOne($MutexWaitMilliseconds)
         if(-not $hasLock) { throw 'Timed out waiting for the MoneyMachineCsvSync mutex.' }
 
         $today = (Get-Date).ToString('yyyy-MM-dd')
@@ -244,7 +247,7 @@ function Invoke-MoneyMachineCsvSync {
 
 if(-not $AsLibrary) {
     try {
-        $runResults = @(Invoke-MoneyMachineCsvSync -ConfigPath $ConfigPath -StartupCatchup:$StartupCatchup -StableCheckSeconds $StableCheckSeconds -MaxRetries $MaxRetries -RuntimeRoot $RuntimeRoot)
+        $runResults = @(Invoke-MoneyMachineCsvSync -ConfigPath $ConfigPath -StartupCatchup:$StartupCatchup -StableCheckSeconds $StableCheckSeconds -MaxRetries $MaxRetries -MutexWaitMilliseconds $MutexWaitMilliseconds -RuntimeRoot $RuntimeRoot)
         $runResults | Format-Table -AutoSize
         if(@($runResults | Where-Object { $_.Status -eq 'Error' }).Count -gt 0) { exit 1 }
     } catch {

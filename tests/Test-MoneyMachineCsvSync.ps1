@@ -36,6 +36,39 @@ try {
     }) | Export-Csv -LiteralPath $testConfigPath -NoTypeInformation -Encoding utf8
 
     . $ScriptPath -AsLibrary
+
+    $mutexReady = Join-Path $tempRoot 'mutex-ready.txt'
+    $mutexJob = Start-Job -ArgumentList $mutexReady -ScriptBlock {
+        param($readyPath)
+        $heldMutex = New-Object System.Threading.Mutex($false, 'Global\MoneyMachineCsvSync')
+        $held = $false
+        try {
+            $held = $heldMutex.WaitOne(5000)
+            if(-not $held) { throw 'Could not acquire the sync mutex for the contention test.' }
+            Set-Content -LiteralPath $readyPath -Value 'ready'
+            Start-Sleep -Seconds 10
+        } finally {
+            if($held) { $heldMutex.ReleaseMutex() }
+            $heldMutex.Dispose()
+        }
+    }
+    try {
+        $deadline = [DateTime]::UtcNow.AddSeconds(8)
+        while(-not (Test-Path -LiteralPath $mutexReady) -and [DateTime]::UtcNow -lt $deadline) { Start-Sleep -Milliseconds 100 }
+        if(-not (Test-Path -LiteralPath $mutexReady)) { throw 'Mutex contention test did not acquire the mutex in time.' }
+        $contentionFailed = $false
+        try {
+            Invoke-MoneyMachineCsvSync -ConfigPath $testConfigPath -StableCheckSeconds 0 -MaxRetries 1 -RuntimeRoot $runtimeRoot -MutexWaitMilliseconds 100 | Out-Null
+        } catch {
+            if($_.Exception.Message -notmatch 'Timed out waiting') { throw }
+            $contentionFailed = $true
+        }
+        if(-not $contentionFailed) { throw 'A contended sync mutex must fail after its configured wait.' }
+    } finally {
+        Stop-Job -Job $mutexJob -ErrorAction SilentlyContinue
+        Remove-Job -Job $mutexJob -Force -ErrorAction SilentlyContinue
+    }
+
     $logDir = Join-Path $runtimeRoot 'logs'
     New-Item -ItemType Directory -Path $logDir -Force | Out-Null
     [IO.File]::WriteAllBytes((Join-Path $logDir 'sync.log'), (New-Object byte[] (5MB - 5)))

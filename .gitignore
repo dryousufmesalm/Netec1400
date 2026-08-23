@@ -12,6 +12,9 @@
 *.bak
 *.tmp
 
+# Machine-local Windows acceptance evidence
+audit/windows-production-acceptance.json
+
 # Optional: uncomment to ignore PDF/zips if you prefer repo without binaries
 # *.pdf
 # *.zip
