@@ -1140,6 +1140,17 @@
          return value ? "1" : "0";
       }
 
+      string TelemetryCsvEscape(string value)
+      {
+         bool quote = StringFind(value, ",") >= 0 ||
+                      StringFind(value, "\"") >= 0 ||
+                      StringFind(value, "\r") >= 0 ||
+                      StringFind(value, "\n") >= 0;
+         if(!quote) return value;
+         StringReplace(value, "\"", "\"\"");
+         return "\"" + value + "\"";
+      }
+
       int TelemetryHeaderColumnIndex(string header, string columnName)
       {
          string columns[];
@@ -1619,13 +1630,13 @@
 
          // Build one CSV line (comma-separated)
          string line = "";
-         line = line + accountNumber + "," + brokerName + "," + IntegerToString(g_Telemetry_BasketID) + ",";
-         line = line + Symbol() + "," + symbolNormalized + "," + timeframe + "," + startStr + "," + endStr + ",";
-         line = line + IntegerToString(durationSeconds) + "," + dirStr + ",";
+         line = line + accountNumber + "," + TelemetryCsvEscape(brokerName) + "," + IntegerToString(g_Telemetry_BasketID) + ",";
+         line = line + TelemetryCsvEscape(Symbol()) + "," + TelemetryCsvEscape(symbolNormalized) + "," + timeframe + "," + startStr + "," + endStr + ",";
+         line = line + IntegerToString(durationSeconds) + "," + TelemetryCsvEscape(dirStr) + ",";
          line = line + IntegerToString(orders) + "," + DoubleToString(lots, 2) + "," + DoubleToString(g_Telemetry_FixedLotsSnap, 2) + ",";
          line = line + IntegerToString(g_Telemetry_MaxOrdersConcurrent) + "," + DoubleToString(g_Telemetry_MaxTotalLots, 2) + ",";
          line = line + DoubleToString(g_Telemetry_MaxFloatingDrawdownAbs, 2) + "," + DoubleToString(g_Telemetry_MaxFloatingProfit, 2) + ",";
-         line = line + DoubleToString(closePL, 2) + "," + closeReasonOut + "," + outcomeClass + ",";
+         line = line + DoubleToString(closePL, 2) + "," + TelemetryCsvEscape(closeReasonOut) + "," + TelemetryCsvEscape(outcomeClass) + ",";
          line = line + DoubleToString(g_Telemetry_SpreadAtEntry, 0) + ",";
          line = line + DoubleToString(equityAtEntry, 2) + ",";
          line = line + DoubleToString(headroomAtEntry, 2) + ",";
@@ -1635,18 +1646,16 @@
          line = line + IntegerToString(g_Telemetry_PipsStepSnap) + ",";
          line = line + DoubleToString(g_Telemetry_TakeProfitSnap, 2) + ",";
          line = line + DoubleToString(g_Telemetry_KillEquityLevelSnap, 2) + ",";
-         if(g_Telemetry_MaxOrdersInBasketSnap > 0)
-            line = line + IntegerToString(g_Telemetry_MaxOrdersInBasketSnap);
-         line = line + ",";
+         line = line + IntegerToString(g_Telemetry_MaxOrdersInBasketSnap) + ",";
          line = line + DoubleToString(g_Telemetry_MaxTotalLotsInBasketSnap, 2) + ",";
          line = line + DoubleToString(equityAtExit, 2) + ",";
          line = line + DoubleToString(balanceAfter, 2) + ",";
          line = line + FormatTradeDate(g_Telemetry_StartTime) + ",";
-         line = line + g_Telemetry_RunID + ",";
+         line = line + TelemetryCsvEscape(g_Telemetry_RunID) + ",";
          line = line + FormatServerTime(g_Telemetry_RunStartTime) + ",";
          line = line + DoubleToString(g_Telemetry_RunStartBalance, 2) + ",";
-         line = line + "AmmarTradingGoldEA,";
-         line = line + "3.00,";
+         line = line + TelemetryCsvEscape("AmmarTradingGoldEA") + ",";
+         line = line + TelemetryCsvEscape("3.00") + ",";
          line = line + IntegerToString(g_Telemetry_MagicSnap) + ",";
          line = line + IntegerToString(g_Telemetry_PointsPerPipSnap) + ",";
          line = line + IntegerToString(g_Telemetry_TralSnap) + ",";
