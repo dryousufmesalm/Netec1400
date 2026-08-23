@@ -30,7 +30,7 @@ Run a manual first copy:
 .\Sync-BasketsToOneDrive.ps1 -ConfigPath .\accounts.csv
 ```
 
-The script verifies a stable source, validates the header and login, copies to a temporary file, validates it again, and finally overwrites only the latest destination. It creates no daily archives. Logs contain only status/error information in `logs\sync.log`.
+The script verifies a stable source, validates every schema-v3 field and basket key, copies to a temporary file, validates it again, and atomically replaces only the latest destination. It creates no daily archives. Logs contain only status/error information in `logs\sync.log`; each log is capped at 5 MiB with five retained rotations. Per-account `SyncStatus.json` and local `state\last-run.json` provide machine-readable status without claiming cloud delivery.
 
 ## 3. Install the daily tasks
 
@@ -48,12 +48,25 @@ No development is needed. Install OneDrive and this same folder on the new VPS, 
 
 ## 5. Use the Excel workbook
 
-Open `MoneyMachine_Account_Analysis.xlsx`. It includes the supplied sample CSV as a working baseline and remains fully editable: no macros, locked cells, hidden calculations, or proprietary component.
+Open `MoneyMachine_Account_Analysis.xlsx`. It is prewired with `MoneyMachine_Baskets` and `MoneyMachine_SyncStatus` Power Query connections and remains fully editable: no macros, locked cells, hidden calculations, or proprietary component.
 
-1. On **Power Query Setup**, change `OneDrive root` and copy the displayed M code (also saved as `PowerQuery\MoneyMachine_Baskets.m`).
-2. In Excel, use **Data → Get Data → From Other Sources → Blank Query → Advanced Editor**, paste the code, change `OneDriveRoot`, and load the result into **Basket Data**.
-3. Refresh All whenever you want current data. The query normalizes v2/v3 columns, checks folder/account mismatches, and preserves all schema-v3 settings.
-4. Use **Manual Fields** for Name, Account Type, Server/VPS, MT4 label, and Notes. Those values are intentionally editable and separate from MT4 data.
-5. For an additional account/run, add its Account # and Run ID to the next row of **Account Analysis** and copy row 5 across/down. All KPI formulas use the CSV cumulatively for that run.
+1. On **Power Query Setup**, change cell `B4` (`OneDrive root`) to the reporting machine's local OneDrive folder.
+2. Use **Data → Refresh All**. Both queries refresh synchronously; background refresh is disabled so formulas do not calculate against half-refreshed data.
+3. **Basket Data** contains the 71 CSV columns followed by folder account, run key, mismatch flag, and the culture-invariant 37-field configuration fingerprint.
+4. **Sync Status** displays every received heartbeat, its age, and `IsFresh`. The freshness SLO is 26 hours.
+5. Use **Manual Fields** for Name, Account Type, Server/VPS, MT4 label, and Notes. Those values are intentionally editable and separate from MT4 data.
+6. For an additional account/run, add its Account # and Run ID to the next row of **Account Analysis** and copy row 5 across/down. All KPI formulas use the CSV cumulatively for that run.
 
 For a legacy v2 input only, the workbook labels the run `Legacy-v2`. Schema-v3 rows provide the automatic `RunStartBalance` liquidity value and distinguish each reset by `RunID`.
+
+If either connection must be recreated, run `Install-MoneyMachineWorkbookQueries.ps1` against a backup copy of the workbook, or create Blank Queries from `PowerQuery\MoneyMachine_Baskets.m` and `PowerQuery\MoneyMachine_SyncStatus.m`. Load them to `BasketDataTable` on **Basket Data** and `SyncStatusTable` on **Sync Status**, with refresh-on-open enabled and background refresh disabled.
+
+## 6. Verify delivery from the reporting machine
+
+Local publication on the VPS is not cloud proof. On the receiving Windows machine, run:
+
+```powershell
+.\Test-MoneyMachineSyncStatus.ps1 -OneDriveRoot $env:OneDrive -ExpectedAccount 36097370 -FreshnessHours 26
+```
+
+Exit code `0` means the heartbeat reached that receiver and is fresh. A missing, malformed, unsuccessful, future-dated, or stale heartbeat returns nonzero. Confirm the same account reports `IsFresh=true` after refreshing the workbook.
