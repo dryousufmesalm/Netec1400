@@ -70,3 +70,57 @@ Local publication on the VPS is not cloud proof. On the receiving Windows machin
 ```
 
 Exit code `0` means the heartbeat reached that receiver and is fresh. A missing, malformed, unsuccessful, future-dated, or stale heartbeat returns nonzero. Confirm the same account reports `IsFresh=true` after refreshing the workbook.
+
+## 7. Run production acceptance before declaring readiness
+
+Use a task-specific staging directory and require the installed Windows products that are part of the release:
+
+```powershell
+.\tests\Run-WindowsProductionAcceptance.ps1 `
+  -StagingRoot 'C:\CodexWorker\MoneyMachine-Acceptance' `
+  -MetaEditorPath 'C:\Program Files (x86)\MetaTrader 4\metaeditor.exe' `
+  -WorkbookPath '.\outputs\019fe209-a32e-7040-84de-fe9e289219a5\MoneyMachine_Account_Analysis.xlsx' `
+  -RequireMetaEditor `
+  -RequireExcel
+```
+
+The runner returns `0` only when every required check passes, `1` for a failed check, and `3` when a caller-required optional product is unavailable. It writes an atomic, redacted `audit\windows-production-acceptance.json` under the staging root. Review `OverallStatus`, every named check, and every artifact hash; do not treat the staging publication as production or cloud-delivery evidence.
+
+## 8. Deploy side-by-side and preserve rollback
+
+Before changing either scheduled task:
+
+1. Export both existing task XML definitions.
+2. Back up the current automation directory, `accounts.csv`, `state`, logs, destination `Baskets.csv`, `SyncStatus.json`, and any existing workbook.
+3. Create a SHA-256 manifest for the rollback bundle.
+4. Copy the reviewed automation into a versioned side-by-side directory; never overwrite the old automation in place.
+5. Copy the production `accounts.csv` without logging its contents, then verify the deployed scripts and queries against their reviewed hashes.
+6. Run the installer from the Windows user that owns OneDrive. Inspect the final principal, absolute executable/script/config paths, working directory, triggers, `IgnoreNew`, three retries, five-minute retry interval, and 15-minute execution limit.
+
+For rollback, disable the remediated tasks, restore the saved XML definitions and prior workbook, and verify that the last known-good destination CSV is unchanged. After the rollback check, reapply the remediated definitions. If no prior workbook existed, keep the new workbook but record that workbook restoration was not applicable.
+
+## 9. Interpret alerts and recover the workbook
+
+- `SyncStatus.json` missing: no successful local publication has reached that folder yet.
+- `Status` other than `Success`: the publisher rejected or could not copy the source.
+- `IsFresh=false` or receiver checker nonzero: treat reporting as stale; inspect the task result, `state\last-run.json`, and `logs\sync.log` before using the workbook.
+- `CloudDeliveryVerified=true` in a publisher heartbeat: treat it as invalid. Only a receiver-side check can establish delivery.
+- Source and destination hashes differ: preserve the current destination and investigate; do not replace it manually.
+- Workbook query/table missing or damaged: restore the rollback workbook or run `Install-MoneyMachineWorkbookQueries.ps1` against a backup copy, then refresh and recheck the account, run ID, fingerprint, heartbeat age, and freshness.
+
+Logs and state deliberately omit credentials. Do not paste `accounts.csv`, personal OneDrive paths, or task XML into shared acceptance reports.
+
+## 10. Production-ready decision rule
+
+Call the integration **production-ready** only when all of the following are true:
+
+1. The Windows acceptance JSON is `Pass`, including required MetaEditor and Excel checks.
+2. Both remediated tasks point to the reviewed side-by-side directory and a triggered positive run returns `0`.
+3. An isolated missing-source Scheduled Task returns nonzero, and rollback/reapply has preserved the known-good destination.
+4. Local source, destination, heartbeat, state, row count, account, and timestamps agree. Label this only `LocalPublished`.
+5. A separate receiver or OneDrive web observation confirms the same fresh heartbeat and hashes within 30 minutes.
+6. The receiver workbook refresh shows the expected account/run, 37-field fingerprint, matching row count, and `IsFresh=true`.
+7. The reporting-only V3 MQ4/EX4 has been installed in the live MT4 terminal and its future CSV rows use schema v3 with escaped text fields.
+8. The next scheduled 23:59 cycle returns `0`, remains receiver-fresh, and refreshes successfully in Excel.
+
+Until every item passes, report the rollout as **conditionally deployed**, retain the rollback bundle and previous automation, and do not remove rollback eligibility.
