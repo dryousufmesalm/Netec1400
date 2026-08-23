@@ -30,7 +30,9 @@ try {
     if(-not (Test-Path -LiteralPath $destination)) { throw 'Destination CSV was not created.' }
     if((Get-Content -LiteralPath $destination -Raw) -notmatch 'RunStartBalance') { throw 'Destination CSV does not contain schema-v3 header.' }
 
-    Add-Content -LiteralPath $sourceCsv -Value '# second copy replaces the existing destination'
+    $updatedRows = @(Import-Csv -LiteralPath $sourceCsv)
+    $updatedRows[0].BrokerName = 'second copy replaces the existing destination'
+    $updatedRows | Export-Csv -LiteralPath $sourceCsv -NoTypeInformation -Encoding utf8
     $second = @(Invoke-MoneyMachineCsvSync -ConfigPath $testConfigPath -StableCheckSeconds 0 -MaxRetries 1)
     if($second[0].Status -ne 'Success') { throw 'Second overwrite copy failed.' }
     if((Get-Content -LiteralPath $destination -Raw) -notmatch 'second copy replaces') { throw 'Destination was not overwritten.' }
@@ -38,8 +40,28 @@ try {
     @([pscustomobject]@{ Enabled='true'; ExpectedMT4Login='999'; SourceCsv=$sourceCsv; OneDriveRoot=$oneDrive }) |
         Export-Csv -LiteralPath $testConfigPath -NoTypeInformation -Encoding utf8
     $mismatch = @(Invoke-MoneyMachineCsvSync -ConfigPath $testConfigPath -StableCheckSeconds 0 -MaxRetries 1)
-    if($mismatch[0].Status -ne 'Skipped') { throw 'Account-login mismatch must be skipped.' }
+    if($mismatch[0].Status -ne 'Error') { throw 'Account-login mismatch must return Error.' }
     if((Get-Content -LiteralPath $destination -Raw) -notmatch 'second copy replaces') { throw 'A mismatch overwrote a valid destination.' }
+
+    @([pscustomobject]@{ Enabled='true'; ExpectedMT4Login='892522910'; SourceCsv=$sourceCsv; OneDriveRoot=$oneDrive }) |
+        Export-Csv -LiteralPath $testConfigPath -NoTypeInformation -Encoding utf8
+    $header = Get-Content -LiteralPath $sourceCsv -TotalCount 1
+    Set-Content -LiteralPath $sourceCsv -Value $header -Encoding utf8
+    $headerOnly = @(Invoke-MoneyMachineCsvSync -ConfigPath $testConfigPath -StableCheckSeconds 0 -MaxRetries 1)
+    if($headerOnly[0].Status -ne 'Success') { throw 'A valid schema-v3 header-only CSV must publish successfully.' }
+    if(@(Import-Csv -LiteralPath $destination).Count -ne 0) { throw 'Header-only publication must contain zero data rows.' }
+
+    Set-Content -LiteralPath $destination -Value 'known-good-destination' -Encoding utf8
+    Set-Content -LiteralPath $sourceCsv -Value @($header, 'bad,row') -Encoding utf8
+    $malformed = @(Invoke-MoneyMachineCsvSync -ConfigPath $testConfigPath -StableCheckSeconds 0 -MaxRetries 1)
+    if($malformed[0].Status -ne 'Error') { throw 'Malformed CSV must return Error.' }
+    if((Get-Content -LiteralPath $destination -Raw) -ne "known-good-destination`r`n") { throw 'Malformed CSV must preserve the previous destination.' }
+
+    $missingConfig = Join-Path $tempRoot 'missing.csv'
+    @([pscustomobject]@{ Enabled='true'; ExpectedMT4Login='892522910'; SourceCsv=(Join-Path $tempRoot 'does-not-exist.csv'); OneDriveRoot=$oneDrive }) |
+        Export-Csv -LiteralPath $missingConfig -NoTypeInformation -Encoding utf8
+    $missing = @(Invoke-MoneyMachineCsvSync -ConfigPath $missingConfig -StableCheckSeconds 0 -MaxRetries 1)
+    if($missing[0].Status -ne 'Error') { throw 'An enabled missing source must return Error.' }
 
     Write-Host 'MoneyMachine CSV sync tests passed.'
 }

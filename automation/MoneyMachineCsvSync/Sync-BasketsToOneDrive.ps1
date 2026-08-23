@@ -9,62 +9,138 @@ param(
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
+$ScriptRoot = Split-Path -Parent $PSCommandPath
+if([string]::IsNullOrWhiteSpace($ScriptRoot)) { $ScriptRoot = Split-Path -Parent $MyInvocation.MyCommand.Path }
+if([string]::IsNullOrWhiteSpace($ScriptRoot)) { throw 'Could not resolve the sync script directory.' }
+
+$SchemaV3Columns = @(
+    'AccountNumber','BrokerName','BasketID','Symbol','SymbolNormalized','Timeframe','StartTime','EndTime','DurationSeconds',
+    'Direction','OrdersCount','TotalLots','FixedLots','MaxOrdersConcurrent','MaxTotalLots','MaxFloatingDrawdownAbs','MaxFloatingProfit',
+    'ClosePL','CloseReason','OutcomeClass','SpreadAtEntry','EquityAtEntry','HeadroomAtEntry','MinHeadroom','TimesNearKill',
+    'ExposureBlocks','PipsStep','TakeProfit','KillEquityLevel','MaxOrdersInBasket','MaxTotalLotsInBasket','EquityAtExit','BalanceAfter',
+    'TradeDate','RunID','RunStartTime','RunStartBalance','EAName','EAVersion','Magic','PointsPerPip','Tral','TralStart','MaxSpread',
+    'TimeStart','TimeEnd','OpenTime','NewBasketDelaySeconds','SpeedEA','UseBasketTrailingTP','TrailingStart','TrailingStep',
+    'KillSwitchEnable','KillCooldownMinutes','RegimeEnable','RegimeAction','RegimeADXPeriod','RegimeADXLevel','RegimeADXBars',
+    'RegimeRangeBars','RegimeRecoveryBars','EnableTradingDaysFilter','TradeMonday','TradeTuesday','TradeWednesday','TradeThursday',
+    'TradeFriday','EnableRecoveryStepUp','RecoveryWaitMinutes','RecoveryMaxTotalLotsInBasket','CsvSchemaVersion'
+)
 
 function Write-SyncLog {
     param([string]$Level, [string]$Message)
-    $logDir = Join-Path $PSScriptRoot 'logs'
+    $logDir = Join-Path $ScriptRoot 'logs'
     if(-not (Test-Path -LiteralPath $logDir)) { New-Item -ItemType Directory -Path $logDir -Force | Out-Null }
     $line = '{0:yyyy-MM-dd HH:mm:ss} [{1}] {2}' -f (Get-Date), $Level, $Message
     Add-Content -LiteralPath (Join-Path $logDir 'sync.log') -Value $line -Encoding utf8
 }
 
+function Get-FileIdentity {
+    param([Parameter(Mandatory)][string]$Path)
+    $item = Get-Item -LiteralPath $Path -ErrorAction Stop
+    $hash = (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash.ToLowerInvariant()
+    return [pscustomobject]@{
+        Length = [int64]$item.Length
+        LastWriteUtc = $item.LastWriteTimeUtc.ToString('o')
+        Hash = $hash
+    }
+}
+
 function Test-StableFile {
     param([Parameter(Mandatory)][string]$Path, [int]$Seconds = 2)
-    $before = Get-Item -LiteralPath $Path -ErrorAction Stop
+    $before = Get-FileIdentity -Path $Path
     if($Seconds -gt 0) { Start-Sleep -Seconds $Seconds }
-    $after = Get-Item -LiteralPath $Path -ErrorAction Stop
-    return $before.Length -eq $after.Length -and $before.LastWriteTimeUtc -eq $after.LastWriteTimeUtc
+    $after = Get-FileIdentity -Path $Path
+    return $before.Length -eq $after.Length -and $before.LastWriteUtc -eq $after.LastWriteUtc -and $before.Hash -eq $after.Hash
 }
 
-function Test-BasketsCsvHeader {
+function Get-CsvHeader {
     param([Parameter(Mandatory)][string]$Path)
-    $header = Get-Content -LiteralPath $Path -TotalCount 1 -ErrorAction Stop
-    if([string]::IsNullOrWhiteSpace($header)) { throw 'CSV header is empty.' }
-    $columns = @($header.TrimStart([char]0xFEFF).Split(','))
-    foreach($required in 'AccountNumber','BasketID','ClosePL','CsvSchemaVersion') {
-        if($columns -notcontains $required) { throw "CSV is missing required column '$required'." }
+    $line = Get-Content -LiteralPath $Path -TotalCount 1 -ErrorAction Stop
+    if([string]::IsNullOrWhiteSpace($line)) { throw 'CSV header is empty.' }
+    return @($line.TrimStart([char]0xFEFF).Split(',') | ForEach-Object { $_.Trim().Trim('"') })
+}
+
+function Read-AndValidateBasketsCsv {
+    param(
+        [Parameter(Mandatory)][string]$Path,
+        [Parameter(Mandatory)][string]$ExpectedLogin
+    )
+    $header = @(Get-CsvHeader -Path $Path)
+    if($header.Count -ne $SchemaV3Columns.Count) { throw "CSV header has $($header.Count) columns; expected $($SchemaV3Columns.Count)." }
+    for($index = 0; $index -lt $SchemaV3Columns.Count; $index++) {
+        if($header[$index] -cne $SchemaV3Columns[$index]) { throw "CSV header column $($index + 1) is '$($header[$index])'; expected '$($SchemaV3Columns[$index])'." }
+    }
+
+    $rows = @(Import-Csv -LiteralPath $Path -ErrorAction Stop)
+    foreach($row in $rows) {
+        if(@($row.PSObject.Properties).Count -ne $SchemaV3Columns.Count) { throw 'CSV row field count does not match the schema-v3 contract.' }
+        if([string]::IsNullOrWhiteSpace([string]$row.AccountNumber)) { throw 'CSV row is missing AccountNumber.' }
+        if(([string]$row.AccountNumber).Trim() -ne $ExpectedLogin) { throw "CSV AccountNumber '$($row.AccountNumber)' does not match ExpectedMT4Login '$ExpectedLogin'." }
+        if(([string]$row.CsvSchemaVersion).Trim() -ne '3') { throw 'CSV row CsvSchemaVersion must be 3.' }
+        if([string]::IsNullOrWhiteSpace([string]$row.BasketID) -or [string]::IsNullOrWhiteSpace([string]$row.RunID)) { throw 'CSV row is missing BasketID or RunID.' }
+    }
+    return [pscustomobject]@{ Rows = $rows; RowCount = $rows.Count; Header = ($header -join ',') }
+}
+
+function Write-AtomicText {
+    param([Parameter(Mandatory)][string]$Path, [Parameter(Mandatory)][string]$Content)
+    $directory = Split-Path -Parent $Path
+    if(-not (Test-Path -LiteralPath $directory)) { New-Item -ItemType Directory -Path $directory -Force | Out-Null }
+    $temporary = "$Path.$([guid]::NewGuid().ToString('N')).tmp"
+    $backup = "$Path.$([guid]::NewGuid().ToString('N')).bak"
+    try {
+        [IO.File]::WriteAllText($temporary, $Content, (New-Object System.Text.UTF8Encoding($false)))
+        if(Test-Path -LiteralPath $Path) {
+            [IO.File]::Replace($temporary, $Path, $backup, $true)
+        } else {
+            [IO.File]::Move($temporary, $Path)
+        }
+    } finally {
+        if(Test-Path -LiteralPath $temporary) { Remove-Item -LiteralPath $temporary -Force -ErrorAction SilentlyContinue }
+        if(Test-Path -LiteralPath $backup) { Remove-Item -LiteralPath $backup -Force -ErrorAction SilentlyContinue }
     }
 }
 
-function Get-BasketsCsvLogin {
-    param([Parameter(Mandatory)][string]$Path)
-    Test-BasketsCsvHeader -Path $Path
-    $first = @(Import-Csv -LiteralPath $Path -ErrorAction Stop | Select-Object -First 1)[0]
-    if($null -eq $first -or [string]::IsNullOrWhiteSpace([string]$first.AccountNumber)) {
-        throw 'CSV contains no basket row with AccountNumber; it cannot be assigned safely.'
+function Publish-AtomicFile {
+    param([Parameter(Mandatory)][string]$Source, [Parameter(Mandatory)][string]$Destination)
+    $directory = Split-Path -Parent $Destination
+    if(-not (Test-Path -LiteralPath $directory)) { New-Item -ItemType Directory -Path $directory -Force | Out-Null }
+    $temporary = Join-Path $directory ("$([IO.Path]::GetFileName($Destination)).$([guid]::NewGuid().ToString('N')).tmp")
+    $backup = Join-Path $directory ("$([IO.Path]::GetFileName($Destination)).$([guid]::NewGuid().ToString('N')).bak")
+    try {
+        [IO.File]::Copy($Source, $temporary, $true)
+        if(Test-Path -LiteralPath $Destination) {
+            [IO.File]::Replace($temporary, $Destination, $backup, $true)
+        } else {
+            [IO.File]::Move($temporary, $Destination)
+        }
+    } finally {
+        if(Test-Path -LiteralPath $temporary) { Remove-Item -LiteralPath $temporary -Force -ErrorAction SilentlyContinue }
+        if(Test-Path -LiteralPath $backup) { Remove-Item -LiteralPath $backup -Force -ErrorAction SilentlyContinue }
     }
-    return ([string]$first.AccountNumber).Trim()
 }
 
-function Get-SuccessState {
-    $stateDir = Join-Path $PSScriptRoot 'state'
-    $statePath = Join-Path $stateDir 'last-success.csv'
-    if(-not (Test-Path -LiteralPath $statePath)) { return @{} }
+function Get-LastRunState {
+    $path = Join-Path $ScriptRoot 'state\last-run.json'
+    if(-not (Test-Path -LiteralPath $path)) { return @{} }
+    $content = Get-Content -LiteralPath $path -Raw -ErrorAction Stop
+    if([string]::IsNullOrWhiteSpace($content)) { return @{} }
+    $parsed = ConvertFrom-Json -InputObject $content
     $state = @{}
-    foreach($row in @(Import-Csv -LiteralPath $statePath)) {
-        if($row.AccountNumber -and $row.SuccessDate) { $state[[string]$row.AccountNumber] = [string]$row.SuccessDate }
-    }
+    foreach($property in $parsed.PSObject.Properties) { $state[$property.Name] = $property.Value }
     return $state
 }
 
-function Save-SuccessState {
+function Save-LastRunState {
     param([hashtable]$State)
-    $stateDir = Join-Path $PSScriptRoot 'state'
-    if(-not (Test-Path -LiteralPath $stateDir)) { New-Item -ItemType Directory -Path $stateDir -Force | Out-Null }
-    $rows = foreach($account in @($State.Keys | Sort-Object)) {
-        [pscustomobject]@{ AccountNumber = $account; SuccessDate = $State[$account] }
+    Write-AtomicText -Path (Join-Path $ScriptRoot 'state\last-run.json') -Content ($State | ConvertTo-Json -Depth 8)
+}
+
+function Write-FatalSyncError {
+    param([Parameter(Mandatory)][string]$Message)
+    $line = '{0:yyyy-MM-dd HH:mm:ss} [FATAL] {1}' -f (Get-Date), $Message
+    foreach($path in @((Join-Path $ScriptRoot 'task-error.log'), (Join-Path $env:TEMP 'MoneyMachineCsvSync-task-error.log'))) {
+        try { Add-Content -LiteralPath $path -Value $line -Encoding utf8 } catch { }
     }
-    $rows | Export-Csv -LiteralPath (Join-Path $stateDir 'last-success.csv') -NoTypeInformation -Encoding utf8
 }
 
 function Invoke-MoneyMachineCsvSync {
@@ -80,86 +156,104 @@ function Invoke-MoneyMachineCsvSync {
     if($MaxRetries -lt 1) { throw 'MaxRetries must be at least one.' }
     if(-not (Test-Path -LiteralPath $ConfigPath)) { throw "Configuration file not found: $ConfigPath" }
 
-    $today = (Get-Date).ToString('yyyy-MM-dd')
-    $successState = Get-SuccessState
-    $results = [System.Collections.Generic.List[object]]::new()
-    $accounts = @(Import-Csv -LiteralPath $ConfigPath)
-    foreach($account in $accounts) {
-        $expectedLogin = ([string]$account.ExpectedMT4Login).Trim()
-        $enabled = ([string]$account.Enabled).Trim().ToLowerInvariant() -in @('true','1','yes','y')
-        if(-not $enabled) {
-            $results.Add([pscustomobject]@{ AccountNumber=$expectedLogin; Status='Skipped'; Message='Disabled in accounts.csv' })
-            continue
-        }
-        if([string]::IsNullOrWhiteSpace($expectedLogin) -or [string]::IsNullOrWhiteSpace([string]$account.SourceCsv) -or [string]::IsNullOrWhiteSpace([string]$account.OneDriveRoot)) {
-            $results.Add([pscustomobject]@{ AccountNumber=$expectedLogin; Status='Skipped'; Message='Missing required configuration value' })
-            Write-SyncLog 'WARN' "Skipped account '$expectedLogin': missing configuration value."
-            continue
-        }
-        if($StartupCatchup -and $successState[$expectedLogin] -eq $today) {
-            $results.Add([pscustomobject]@{ AccountNumber=$expectedLogin; Status='Skipped'; Message='Already copied successfully today' })
-            continue
-        }
+    $mutex = New-Object System.Threading.Mutex($false, 'Global\MoneyMachineCsvSync')
+    $hasLock = $false
+    try {
+        $hasLock = $mutex.WaitOne(30000)
+        if(-not $hasLock) { throw 'Timed out waiting for the MoneyMachineCsvSync mutex.' }
 
-        $sourceCsv = [Environment]::ExpandEnvironmentVariables(([string]$account.SourceCsv).Trim())
-        $oneDriveRoot = [Environment]::ExpandEnvironmentVariables(([string]$account.OneDriveRoot).Trim())
-        if(-not (Test-Path -LiteralPath $sourceCsv)) {
-            $results.Add([pscustomobject]@{ AccountNumber=$expectedLogin; Status='Skipped'; Message="Source CSV not found: $sourceCsv" })
-            Write-SyncLog 'WARN' "Skipped account '$expectedLogin': source CSV not found."
-            continue
-        }
+        $today = (Get-Date).ToString('yyyy-MM-dd')
+        $state = Get-LastRunState
+        $results = [System.Collections.Generic.List[object]]::new()
+        foreach($account in @(Import-Csv -LiteralPath $ConfigPath -ErrorAction Stop)) {
+            $expectedLogin = ([string]$account.ExpectedMT4Login).Trim()
+            $enabled = ([string]$account.Enabled).Trim().ToLowerInvariant() -in @('true','1','yes','y')
+            if(-not $enabled) {
+                $results.Add([pscustomobject]@{ AccountNumber=$expectedLogin; Status='Skipped'; Message='Disabled in accounts.csv' })
+                continue
+            }
+            $sourceCsv = [Environment]::ExpandEnvironmentVariables(([string]$account.SourceCsv).Trim())
+            $oneDriveRoot = [Environment]::ExpandEnvironmentVariables(([string]$account.OneDriveRoot).Trim())
+            if([string]::IsNullOrWhiteSpace($expectedLogin) -or [string]::IsNullOrWhiteSpace($sourceCsv) -or [string]::IsNullOrWhiteSpace($oneDriveRoot)) {
+                $results.Add([pscustomobject]@{ AccountNumber=$expectedLogin; Status='Error'; Message='Missing required configuration value' })
+                continue
+            }
+            if($StartupCatchup -and $state.ContainsKey($expectedLogin) -and [string]$state[$expectedLogin].Status -eq 'Success' -and [string]$state[$expectedLogin].SuccessDate -eq $today) {
+                $results.Add([pscustomobject]@{ AccountNumber=$expectedLogin; Status='Skipped'; Message='Already copied successfully today' })
+                continue
+            }
 
-        $copied = $false
-        $message = ''
-        for($attempt = 1; $attempt -le $MaxRetries -and -not $copied; $attempt++) {
-            try {
-                if(-not (Test-StableFile -Path $sourceCsv -Seconds $StableCheckSeconds)) {
-                    $message = 'Source changed during stable-file check.'
-                    continue
-                }
-                $actualLogin = Get-BasketsCsvLogin -Path $sourceCsv
-                if($actualLogin -ne $expectedLogin) {
-                    $message = "CSV AccountNumber '$actualLogin' does not match ExpectedMT4Login '$expectedLogin'."
-                    break
-                }
-
-                $destinationDir = Join-Path $oneDriveRoot (Join-Path 'MoneyMachine' ("Account_{0}" -f $actualLogin))
-                if(-not (Test-Path -LiteralPath $destinationDir)) { New-Item -ItemType Directory -Path $destinationDir -Force | Out-Null }
-                $destination = Join-Path $destinationDir 'Baskets.csv'
-                $temporary = Join-Path $destinationDir ("Baskets.csv.{0}.tmp" -f [guid]::NewGuid().ToString('N'))
+            $published = $false
+            $message = ''
+            $result = $null
+            for($attempt = 1; $attempt -le $MaxRetries -and -not $published; $attempt++) {
                 try {
-                    Copy-Item -LiteralPath $sourceCsv -Destination $temporary -Force -ErrorAction Stop
-                    if(-not (Test-StableFile -Path $sourceCsv -Seconds 0)) { throw 'Source changed while temporary copy was being made.' }
-                    Test-BasketsCsvHeader -Path $temporary
-                    [IO.File]::Copy($temporary, $destination, $true)
-                    $copied = $true
-                }
-                finally {
-                    if(Test-Path -LiteralPath $temporary) { Remove-Item -LiteralPath $temporary -Force }
+                    if(-not (Test-Path -LiteralPath $sourceCsv)) { throw "Source CSV not found: $sourceCsv" }
+                    if(-not (Test-StableFile -Path $sourceCsv -Seconds $StableCheckSeconds)) { throw 'Source changed during stable-file check.' }
+                    $sourceBefore = Get-FileIdentity -Path $sourceCsv
+                    $validation = Read-AndValidateBasketsCsv -Path $sourceCsv -ExpectedLogin $expectedLogin
+                    $destinationDir = Join-Path $oneDriveRoot (Join-Path 'MoneyMachine' ("Account_{0}" -f $expectedLogin))
+                    $destination = Join-Path $destinationDir 'Baskets.csv'
+                    $temporary = Join-Path $destinationDir ("Baskets.csv.$([guid]::NewGuid().ToString('N')).source.tmp")
+                    try {
+                        if(-not (Test-Path -LiteralPath $destinationDir)) { New-Item -ItemType Directory -Path $destinationDir -Force | Out-Null }
+                        [IO.File]::Copy($sourceCsv, $temporary, $true)
+                        $sourceAfter = Get-FileIdentity -Path $sourceCsv
+                        $temporaryIdentity = Get-FileIdentity -Path $temporary
+                        if($sourceBefore.Hash -ne $sourceAfter.Hash -or $sourceBefore.Length -ne $sourceAfter.Length -or $sourceBefore.LastWriteUtc -ne $sourceAfter.LastWriteUtc) { throw 'Source changed while temporary copy was being made.' }
+                        if($temporaryIdentity.Hash -ne $sourceBefore.Hash) { throw 'Temporary copy hash does not match the source hash.' }
+                        $temporaryValidation = Read-AndValidateBasketsCsv -Path $temporary -ExpectedLogin $expectedLogin
+                        Publish-AtomicFile -Source $temporary -Destination $destination
+                        $destinationIdentity = Get-FileIdentity -Path $destination
+                        if($destinationIdentity.Hash -ne $sourceBefore.Hash) { throw 'Published destination hash does not match the source hash.' }
+                        $publicationUtc = [DateTime]::UtcNow.ToString('o')
+                        $heartbeat = [ordered]@{
+                            AccountNumber = $expectedLogin
+                            Status = 'Success'
+                            RowCount = $temporaryValidation.RowCount
+                            SourceHash = $sourceBefore.Hash
+                            DestinationHash = $destinationIdentity.Hash
+                            SourceLastWriteUtc = $sourceBefore.LastWriteUtc
+                            PublishedUtc = $publicationUtc
+                            CloudDeliveryVerified = $false
+                        }
+                        Write-AtomicText -Path (Join-Path $destinationDir 'SyncStatus.json') -Content ($heartbeat | ConvertTo-Json -Depth 5)
+                        $result = [pscustomobject]@{ AccountNumber=$expectedLogin; Status='Success'; Message='Published latest cumulative Baskets.csv'; RowCount=$temporaryValidation.RowCount; SourceHash=$sourceBefore.Hash; DestinationHash=$destinationIdentity.Hash; PublishedUtc=$publicationUtc }
+                        $published = $true
+                    } finally {
+                        if(Test-Path -LiteralPath $temporary) { Remove-Item -LiteralPath $temporary -Force -ErrorAction SilentlyContinue }
+                    }
+                } catch {
+                    $message = $_.Exception.Message
+                    if($attempt -lt $MaxRetries) { Start-Sleep -Seconds 1 }
                 }
             }
-            catch {
-                $message = $_.Exception.Message
-                if($attempt -lt $MaxRetries) { Start-Sleep -Seconds 1 }
+            if($published) {
+                $state[$expectedLogin] = [ordered]@{ Status='Success'; SuccessDate=$today; RowCount=$result.RowCount; SourceHash=$result.SourceHash; DestinationHash=$result.DestinationHash; PublishedUtc=$result.PublishedUtc }
+                $results.Add($result)
+                Write-SyncLog 'INFO' "Published account '$expectedLogin' successfully. Rows=$($result.RowCount)."
+            } else {
+                $result = [pscustomobject]@{ AccountNumber=$expectedLogin; Status='Error'; Message=$message }
+                $state[$expectedLogin] = [ordered]@{ Status='Error'; SuccessDate=$today; Message=$message }
+                $results.Add($result)
+                Write-SyncLog 'ERROR' "Account '$expectedLogin' failed: $message"
             }
         }
-
-        if($copied) {
-            $successState[$expectedLogin] = $today
-            $results.Add([pscustomobject]@{ AccountNumber=$expectedLogin; Status='Success'; Message='Copied latest cumulative Baskets.csv' })
-            Write-SyncLog 'INFO' "Copied account '$expectedLogin' successfully."
-        }
-        else {
-            $status = if($message -match 'does not match') { 'Skipped' } else { 'Error' }
-            $results.Add([pscustomobject]@{ AccountNumber=$expectedLogin; Status=$status; Message=$message })
-            Write-SyncLog 'WARN' "Account '$expectedLogin' not copied: $message"
-        }
+        Save-LastRunState -State $state
+        return $results
+    } finally {
+        if($hasLock) { $mutex.ReleaseMutex() }
+        $mutex.Dispose()
     }
-    Save-SuccessState -State $successState
-    return $results
 }
 
 if(-not $AsLibrary) {
-    Invoke-MoneyMachineCsvSync -ConfigPath $ConfigPath -StartupCatchup:$StartupCatchup -StableCheckSeconds $StableCheckSeconds -MaxRetries $MaxRetries |
-        Format-Table -AutoSize
+    try {
+        $runResults = @(Invoke-MoneyMachineCsvSync -ConfigPath $ConfigPath -StartupCatchup:$StartupCatchup -StableCheckSeconds $StableCheckSeconds -MaxRetries $MaxRetries)
+        $runResults | Format-Table -AutoSize
+        if(@($runResults | Where-Object { $_.Status -eq 'Error' }).Count -gt 0) { exit 1 }
+    } catch {
+        Write-FatalSyncError -Message $_.Exception.ToString()
+        throw
+    }
 }
