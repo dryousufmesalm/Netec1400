@@ -1,2 +1,2 @@
-Enabled,ExpectedMT4Login,SourceCsv,OneDriveRoot
-true,892522910,C:\Path\To\MT4\MQL4\Files\AGOLD___Baskets.csv,C:\Users\YourWindowsUser\OneDrive
+Enabled,VpsName,ExpectedMT4Login,SourceCsv,OneDriveRoot
+true,Example VPS,892522910,C:\Path\To\MT4\MQL4\Files\AGOLD___Baskets.csv,C:\Users\YourWindowsUser\OneDrive

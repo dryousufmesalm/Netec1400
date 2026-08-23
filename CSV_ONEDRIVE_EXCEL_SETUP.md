@@ -13,11 +13,27 @@ The CSV stays in that terminal's `MQL4\Files` sandbox. It is appended only at ba
 
 ## 2. Configure one VPS/account
 
+### Recommended: use the Arabic setup wizard
+
+For a non-technical operator, use this five-step flow on the VPS being added:
+
+1. Sign in to the Windows OneDrive app with the dedicated Money Machine uploader identity. Share/access only the central `MoneyMachine` reporting folder; do not use a personal OneDrive identity on VPS machines.
+2. Copy the complete `automation\MoneyMachineCsvSync` folder to a durable local directory on that VPS.
+3. Double-click `Start-MoneyMachineSyncWizard.cmd`. The wizard runs only on `127.0.0.1`, opens in the default browser, and does not require Node.js.
+4. Enter a friendly VPS name and MT4 account number. Choose the detected `AGOLD___Baskets.csv` and OneDrive root, then click **إعداد المزامنة الآن**.
+5. Keep the final destination shown by the wizard. On the reporting device, wait for OneDrive and run the receiver check in section 6 before treating cloud delivery as confirmed.
+
+The wizard validates the schema/account before changing configuration, creates a timestamped backup of an existing `accounts.csv`, performs the first local publication, and only then installs the daily and logon catch-up tasks. It never asks for or stores Microsoft, RDP, broker, or MT4 passwords. If the first publication fails, it restores the prior configuration. If task registration fails after publication, it reports partial setup rather than claiming automation is active.
+
+The local wizard API accepts only its three setup routes, binds to IPv4 loopback, requires a strict session cookie, validates Host/Origin, and caps JSON bodies at 64 KiB. Close the wizard window after setup; no external firewall or router port is required.
+
+### Manual fallback
+
 Copy the complete `automation\MoneyMachineCsvSync` folder to a durable local directory on the VPS. Edit `accounts.csv`:
 
 ```csv
-Enabled,ExpectedMT4Login,SourceCsv,OneDriveRoot
-true,892522910,C:\\Path\\To\\MT4\\MQL4\\Files\\AGOLD___Baskets.csv,C:\\Users\\YourWindowsUser\\OneDrive
+Enabled,VpsName,ExpectedMT4Login,SourceCsv,OneDriveRoot
+true,VPS London 01,892522910,C:\\Path\\To\\MT4\\MQL4\\Files\\AGOLD___Baskets.csv,C:\\Users\\YourWindowsUser\\OneDrive
 ```
 
 - `ExpectedMT4Login` must equal the `AccountNumber` inside the CSV. The script treats the CSV value as authoritative and refuses a mismatch.
@@ -44,7 +60,7 @@ This idempotently creates two tasks: a daily copy at 23:59 VPS local time and a 
 
 ## 4. Add future VPSs/accounts
 
-No development is needed. Install OneDrive and this same folder on the new VPS, point one new `accounts.csv` row to that terminal's `MQL4\Files\AGOLD___Baskets.csv`, test the manual copy, then run the installer. Reusing the same central OneDrive root is safe because every login gets its own `Account_<MT4Login>` folder.
+No development is needed. On each new VPS, sign in to the dedicated uploader identity, copy this same folder, and double-click `Start-MoneyMachineSyncWizard.cmd`. Reusing the same central OneDrive root is safe because every login gets its own `Account_<MT4Login>` folder. For the manual fallback, add one `accounts.csv` row, test the manual copy, then run the installer.
 
 ## 5. Use the Excel workbook
 
