@@ -23,7 +23,8 @@ try {
     $oneDrive = Join-Path $tempRoot 'oneDrive'
     New-Item -ItemType Directory -Path $sourceDir,$oneDrive | Out-Null
     $sourceCsv = Join-Path $sourceDir 'AGOLD___Baskets.csv'
-    Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'fixtures\AGOLD___Baskets_v3.csv') -Destination $sourceCsv
+    $fixturePath = Join-Path $PSScriptRoot 'fixtures\AGOLD___Baskets_v3.csv'
+    Copy-Item -LiteralPath $fixturePath -Destination $sourceCsv
 
     $testConfigPath = Join-Path $tempRoot 'accounts.csv'
     @([pscustomobject]@{
@@ -48,11 +49,51 @@ try {
     if($second[0].Status -ne 'Success') { throw 'Second overwrite copy failed.' }
     if((Get-Content -LiteralPath $destination -Raw) -notmatch 'second copy replaces') { throw 'Destination was not overwritten.' }
 
+    $baselineHash = (Get-FileHash -LiteralPath $destination -Algorithm SHA256).Hash
+    $invalidCases = @(
+        @{ Name='duplicate key'; Expected='duplicate'; Build={ $rows=@(Import-Csv -LiteralPath $fixturePath); @($rows[0],$rows[0]) } },
+        @{ Name='direction enum'; Expected='Direction'; Build={ $rows=@(Import-Csv -LiteralPath $fixturePath); $rows[0].Direction='SIDEWAYS'; $rows } },
+        @{ Name='duration type'; Expected='DurationSeconds'; Build={ $rows=@(Import-Csv -LiteralPath $fixturePath); $rows[0].DurationSeconds='not-an-integer'; $rows } },
+        @{ Name='max orders type'; Expected='MaxOrdersInBasket'; Build={ $rows=@(Import-Csv -LiteralPath $fixturePath); $rows[0].MaxOrdersInBasket='not-an-integer'; $rows } },
+        @{ Name='decimal type'; Expected='TotalLots'; Build={ $rows=@(Import-Csv -LiteralPath $fixturePath); $rows[0].TotalLots='not-a-decimal'; $rows } },
+        @{ Name='boolean value'; Expected='UseBasketTrailingTP'; Build={ $rows=@(Import-Csv -LiteralPath $fixturePath); $rows[0].UseBasketTrailingTP='true'; $rows } },
+        @{ Name='timestamp type'; Expected='StartTime'; Build={ $rows=@(Import-Csv -LiteralPath $fixturePath); $rows[0].StartTime='27/07/2026 03:00'; $rows } },
+        @{ Name='end before start'; Expected='EndTime'; Build={ $rows=@(Import-Csv -LiteralPath $fixturePath); $rows[0].EndTime='2026-07-27 02:59:59'; $rows } },
+        @{ Name='duration agreement'; Expected='DurationSeconds'; Build={ $rows=@(Import-Csv -LiteralPath $fixturePath); $rows[0].DurationSeconds='301'; $rows } },
+        @{ Name='trade date agreement'; Expected='TradeDate'; Build={ $rows=@(Import-Csv -LiteralPath $fixturePath); $rows[0].TradeDate='1999-01-01'; $rows } },
+        @{ Name='missing run key'; Expected='RunID'; Build={ $rows=@(Import-Csv -LiteralPath $fixturePath); $rows[0].RunID=''; $rows } },
+        @{ Name='missing basket key'; Expected='BasketID'; Build={ $rows=@(Import-Csv -LiteralPath $fixturePath); $rows[0].BasketID=''; $rows } },
+        @{ Name='mixed account'; Expected='AccountNumber'; Build={ $rows=@(Import-Csv -LiteralPath $fixturePath); $rows[0].AccountNumber='999'; $rows } },
+        @{ Name='wrong schema'; Expected='CsvSchemaVersion'; Build={ $rows=@(Import-Csv -LiteralPath $fixturePath); $rows[0].CsvSchemaVersion='2'; $rows } }
+    )
+    foreach($case in $invalidCases) {
+        @(& $case.Build) | Export-Csv -LiteralPath $sourceCsv -NoTypeInformation -Encoding utf8
+        $invalid = @(Invoke-MoneyMachineCsvSync -ConfigPath $testConfigPath -StableCheckSeconds 0 -MaxRetries 1)
+        if($invalid[0].Status -ne 'Error') { throw "Invalid case '$($case.Name)' must return Error." }
+        if($invalid[0].Message -notmatch [regex]::Escape($case.Expected)) { throw "Invalid case '$($case.Name)' did not identify '$($case.Expected)': $($invalid[0].Message)" }
+        if((Get-FileHash -LiteralPath $destination -Algorithm SHA256).Hash -ne $baselineHash) { throw "Invalid case '$($case.Name)' overwrote the valid destination." }
+    }
+
+    $legacyRows = @(Import-Csv -LiteralPath $fixturePath)
+    $legacyRows[0].MaxOrdersInBasket = ''
+    $legacyRows | Export-Csv -LiteralPath $sourceCsv -NoTypeInformation -Encoding utf8
+    $legacyBlank = @(Invoke-MoneyMachineCsvSync -ConfigPath $testConfigPath -StableCheckSeconds 0 -MaxRetries 1)
+    if($legacyBlank[0].Status -ne 'Success') { throw 'Legacy blank MaxOrdersInBasket must be accepted as disabled value 0.' }
+
+    Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'fixtures\AGOLD___Baskets_v3_quoted.csv') -Destination $sourceCsv -Force
+    $quoted = @(Invoke-MoneyMachineCsvSync -ConfigPath $testConfigPath -StableCheckSeconds 0 -MaxRetries 1)
+    if($quoted[0].Status -ne 'Success' -or $quoted[0].RowCount -ne 1) { throw 'Quoted CSV fixture must publish as one logical row.' }
+    $quotedRows = @(Import-Csv -LiteralPath $destination)
+    if($quotedRows[0].BrokerName -ne 'Broker, "Gold" Desk') { throw 'Quoted BrokerName was not preserved.' }
+    if(($quotedRows[0].EAName -replace "`r`n", "`n") -ne "Ammar`nTradingGoldEA") { throw 'Embedded line break was not preserved.' }
+
+    Copy-Item -LiteralPath $fixturePath -Destination $sourceCsv -Force
+    $preMismatchHash = (Get-FileHash -LiteralPath $destination -Algorithm SHA256).Hash
     @([pscustomobject]@{ Enabled='true'; ExpectedMT4Login='999'; SourceCsv=$sourceCsv; OneDriveRoot=$oneDrive }) |
         Export-Csv -LiteralPath $testConfigPath -NoTypeInformation -Encoding utf8
     $mismatch = @(Invoke-MoneyMachineCsvSync -ConfigPath $testConfigPath -StableCheckSeconds 0 -MaxRetries 1)
     if($mismatch[0].Status -ne 'Error') { throw 'Account-login mismatch must return Error.' }
-    if((Get-Content -LiteralPath $destination -Raw) -notmatch 'second copy replaces') { throw 'A mismatch overwrote a valid destination.' }
+    if((Get-FileHash -LiteralPath $destination -Algorithm SHA256).Hash -ne $preMismatchHash) { throw 'A mismatch overwrote a valid destination.' }
 
     @([pscustomobject]@{ Enabled='true'; ExpectedMT4Login='892522910'; SourceCsv=$sourceCsv; OneDriveRoot=$oneDrive }) |
         Export-Csv -LiteralPath $testConfigPath -NoTypeInformation -Encoding utf8

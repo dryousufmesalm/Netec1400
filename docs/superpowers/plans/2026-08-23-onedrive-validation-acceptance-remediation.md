@@ -30,6 +30,7 @@
 - The live heartbeat currently reports `CloudDeliveryVerified: false`; this is correct and must remain false on the publishing machine.
 - Windows PowerShell 5.1 exposed default-parameter failures in both `Sync-BasketsToOneDrive.ps1` and `Test-MoneyMachineCsvSync.ps1` when `$PSScriptRoot` is evaluated during parameter binding.
 - The current validator accepted two duplicate rows containing `Direction=SIDEWAYS`, `DurationSeconds=not-an-integer`, and an incorrect `TradeDate`. The remediation is not complete until this exact adversarial case fails without replacing the prior destination.
+- The current production schema-v3 history uses blank `MaxOrdersInBasket` for the disabled value because of the existing writer. Preserve those rows by accepting blank only for this field as legacy value `0`; all new EA rows must serialize explicit `0`.
 
 ---
 

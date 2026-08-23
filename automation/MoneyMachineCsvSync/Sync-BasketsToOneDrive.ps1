@@ -12,18 +12,9 @@ $ErrorActionPreference = 'Stop'
 $ScriptRoot = Split-Path -Parent $PSCommandPath
 if([string]::IsNullOrWhiteSpace($ScriptRoot)) { throw 'Could not resolve the sync script directory.' }
 if([string]::IsNullOrWhiteSpace($ConfigPath)) { $ConfigPath = Join-Path $ScriptRoot 'accounts.csv' }
-
-$SchemaV3Columns = @(
-    'AccountNumber','BrokerName','BasketID','Symbol','SymbolNormalized','Timeframe','StartTime','EndTime','DurationSeconds',
-    'Direction','OrdersCount','TotalLots','FixedLots','MaxOrdersConcurrent','MaxTotalLots','MaxFloatingDrawdownAbs','MaxFloatingProfit',
-    'ClosePL','CloseReason','OutcomeClass','SpreadAtEntry','EquityAtEntry','HeadroomAtEntry','MinHeadroom','TimesNearKill',
-    'ExposureBlocks','PipsStep','TakeProfit','KillEquityLevel','MaxOrdersInBasket','MaxTotalLotsInBasket','EquityAtExit','BalanceAfter',
-    'TradeDate','RunID','RunStartTime','RunStartBalance','EAName','EAVersion','Magic','PointsPerPip','Tral','TralStart','MaxSpread',
-    'TimeStart','TimeEnd','OpenTime','NewBasketDelaySeconds','SpeedEA','UseBasketTrailingTP','TrailingStart','TrailingStep',
-    'KillSwitchEnable','KillCooldownMinutes','RegimeEnable','RegimeAction','RegimeADXPeriod','RegimeADXLevel','RegimeADXBars',
-    'RegimeRangeBars','RegimeRecoveryBars','EnableTradingDaysFilter','TradeMonday','TradeTuesday','TradeWednesday','TradeThursday',
-    'TradeFriday','EnableRecoveryStepUp','RecoveryWaitMinutes','RecoveryMaxTotalLotsInBasket','CsvSchemaVersion'
-)
+$schemaModule = Join-Path $ScriptRoot 'MoneyMachineCsvSchemaV3.psm1'
+if(-not (Test-Path -LiteralPath $schemaModule -PathType Leaf)) { throw "Schema module not found: $schemaModule" }
+Import-Module -Name $schemaModule -Force -ErrorAction Stop
 
 function Write-SyncLog {
     param([string]$Level, [string]$Message)
@@ -50,35 +41,6 @@ function Test-StableFile {
     if($Seconds -gt 0) { Start-Sleep -Seconds $Seconds }
     $after = Get-FileIdentity -Path $Path
     return $before.Length -eq $after.Length -and $before.LastWriteUtc -eq $after.LastWriteUtc -and $before.Hash -eq $after.Hash
-}
-
-function Get-CsvHeader {
-    param([Parameter(Mandatory)][string]$Path)
-    $line = Get-Content -LiteralPath $Path -TotalCount 1 -ErrorAction Stop
-    if([string]::IsNullOrWhiteSpace($line)) { throw 'CSV header is empty.' }
-    return @($line.TrimStart([char]0xFEFF).Split(',') | ForEach-Object { $_.Trim().Trim('"') })
-}
-
-function Read-AndValidateBasketsCsv {
-    param(
-        [Parameter(Mandatory)][string]$Path,
-        [Parameter(Mandatory)][string]$ExpectedLogin
-    )
-    $header = @(Get-CsvHeader -Path $Path)
-    if($header.Count -ne $SchemaV3Columns.Count) { throw "CSV header has $($header.Count) columns; expected $($SchemaV3Columns.Count)." }
-    for($index = 0; $index -lt $SchemaV3Columns.Count; $index++) {
-        if($header[$index] -cne $SchemaV3Columns[$index]) { throw "CSV header column $($index + 1) is '$($header[$index])'; expected '$($SchemaV3Columns[$index])'." }
-    }
-
-    $rows = @(Import-Csv -LiteralPath $Path -ErrorAction Stop)
-    foreach($row in $rows) {
-        if(@($row.PSObject.Properties).Count -ne $SchemaV3Columns.Count) { throw 'CSV row field count does not match the schema-v3 contract.' }
-        if([string]::IsNullOrWhiteSpace([string]$row.AccountNumber)) { throw 'CSV row is missing AccountNumber.' }
-        if(([string]$row.AccountNumber).Trim() -ne $ExpectedLogin) { throw "CSV AccountNumber '$($row.AccountNumber)' does not match ExpectedMT4Login '$ExpectedLogin'." }
-        if(([string]$row.CsvSchemaVersion).Trim() -ne '3') { throw 'CSV row CsvSchemaVersion must be 3.' }
-        if([string]::IsNullOrWhiteSpace([string]$row.BasketID) -or [string]::IsNullOrWhiteSpace([string]$row.RunID)) { throw 'CSV row is missing BasketID or RunID.' }
-    }
-    return [pscustomobject]@{ Rows = $rows; RowCount = $rows.Count; Header = ($header -join ',') }
 }
 
 function Write-AtomicText {
@@ -191,7 +153,7 @@ function Invoke-MoneyMachineCsvSync {
                     if(-not (Test-Path -LiteralPath $sourceCsv)) { throw "Source CSV not found: $sourceCsv" }
                     if(-not (Test-StableFile -Path $sourceCsv -Seconds $StableCheckSeconds)) { throw 'Source changed during stable-file check.' }
                     $sourceBefore = Get-FileIdentity -Path $sourceCsv
-                    $validation = Read-AndValidateBasketsCsv -Path $sourceCsv -ExpectedLogin $expectedLogin
+                    $validation = Read-MoneyMachineBasketsCsv -Path $sourceCsv -ExpectedLogin $expectedLogin
                     $destinationDir = Join-Path $oneDriveRoot (Join-Path 'MoneyMachine' ("Account_{0}" -f $expectedLogin))
                     $destination = Join-Path $destinationDir 'Baskets.csv'
                     $temporary = Join-Path $destinationDir ("Baskets.csv.$([guid]::NewGuid().ToString('N')).source.tmp")
@@ -202,7 +164,7 @@ function Invoke-MoneyMachineCsvSync {
                         $temporaryIdentity = Get-FileIdentity -Path $temporary
                         if($sourceBefore.Hash -ne $sourceAfter.Hash -or $sourceBefore.Length -ne $sourceAfter.Length -or $sourceBefore.LastWriteUtc -ne $sourceAfter.LastWriteUtc) { throw 'Source changed while temporary copy was being made.' }
                         if($temporaryIdentity.Hash -ne $sourceBefore.Hash) { throw 'Temporary copy hash does not match the source hash.' }
-                        $temporaryValidation = Read-AndValidateBasketsCsv -Path $temporary -ExpectedLogin $expectedLogin
+                        $temporaryValidation = Read-MoneyMachineBasketsCsv -Path $temporary -ExpectedLogin $expectedLogin
                         Publish-AtomicFile -Source $temporary -Destination $destination
                         $destinationIdentity = Get-FileIdentity -Path $destination
                         if($destinationIdentity.Hash -ne $sourceBefore.Hash) { throw 'Published destination hash does not match the source hash.' }
