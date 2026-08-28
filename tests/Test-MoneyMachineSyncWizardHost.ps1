@@ -48,9 +48,17 @@ try {
     $sourceDir = Join-Path $terminalRoot 'HOSTTEST\MQL4\Files'
     $runtimeRoot = Join-Path $tempRoot 'runtime'
     $configPath = Join-Path $tempRoot 'config\accounts.csv'
-    New-Item -ItemType Directory -Path $appRoot,$oneDriveRoot,$sourceDir -Force | Out-Null
+    New-Item -ItemType Directory -Path $appRoot,$oneDriveRoot,$sourceDir,(Split-Path -Parent $configPath) -Force | Out-Null
     Set-Content -LiteralPath (Join-Path $appRoot 'index.html') -Value '<!doctype html><html><body>Wizard host test</body></html>' -Encoding utf8
     Copy-Item -LiteralPath (Join-Path (Split-Path -Parent $MyInvocation.MyCommand.Path) 'fixtures\AGOLD___Baskets_v3.csv') -Destination (Join-Path $sourceDir 'AGOLD___Baskets.csv')
+
+    $canonicalAccountDir = Join-Path $oneDriveRoot 'AmmarTrading\Account_892522910'
+    New-Item -ItemType Directory -Path $canonicalAccountDir -Force | Out-Null
+    Copy-Item -LiteralPath (Join-Path $sourceDir 'AGOLD___Baskets.csv') -Destination (Join-Path $canonicalAccountDir 'Baskets.csv')
+    @([pscustomobject]@{ Enabled='true'; VpsName='Canonical Account'; ExpectedMT4Login='892522910'; SourceCsv=(Join-Path $sourceDir 'AGOLD___Baskets.csv'); OneDriveRoot=$oneDriveRoot }) |
+        Export-Csv -LiteralPath $configPath -NoTypeInformation -Encoding utf8
+    $canonicalAccount = @(Get-MoneyMachineWizardAccounts -ConfigPath $configPath)
+    if($canonicalAccount.Count -ne 1 -or $canonicalAccount[0].files -ne 1 -or -not $canonicalAccount[0].localPublished) { throw 'Accounts API lookup must recognize a canonical AmmarTrading publication.' }
 
     $portProbe = New-Object Net.Sockets.TcpListener([Net.IPAddress]::Loopback,0)
     $portProbe.Start()

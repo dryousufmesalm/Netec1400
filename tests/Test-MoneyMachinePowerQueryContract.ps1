@@ -14,6 +14,17 @@ $basketSource = Get-Content -LiteralPath $BasketQueryPath -Raw
 if(-not (Test-Path -LiteralPath $StatusQueryPath -PathType Leaf)) { throw "Sync-status query is missing: $StatusQueryPath" }
 $statusSource = Get-Content -LiteralPath $StatusQueryPath -Raw
 
+foreach($query in @(
+    @{ Name='Basket'; Source=$basketSource },
+    @{ Name='Sync-status'; Source=$statusSource }
+)) {
+    if($query.Source -notmatch [regex]::Escape('\AmmarTrading')) { throw "$($query.Name) query must read the canonical AmmarTrading folder." }
+    if($query.Source -notmatch [regex]::Escape('\AmarTrading')) { throw "$($query.Name) query must retain the legacy AmarTrading folder as a migration source." }
+    if($query.Source -notmatch 'FolderPriority') { throw "$($query.Name) query must mark canonical and legacy folders for precedence." }
+    if($query.Source -notmatch 'CanonicalAccounts\s*=\s*List\.Buffer') { throw "$($query.Name) query must identify canonical account folders before selecting migration files." }
+    if($query.Source -notmatch 'List\.Contains\(CanonicalAccounts') { throw "$($query.Name) query must exclude a legacy copy when a canonical account folder exists." }
+}
+
 $expectedFingerprintFields = @(
     'FixedLots','Magic','PointsPerPip','PipsStep','TakeProfit','Tral','TralStart','MaxSpread',
     'TimeStart','TimeEnd','OpenTime','NewBasketDelaySeconds','SpeedEA','UseBasketTrailingTP',

@@ -321,7 +321,7 @@ export function App() {
     <div className="app-shell" dir="ltr">
       <Header onHome={() => setScreen("overview")} />
       {loading && <main className="page service-state"><SpinnerGap className="spin" /><h2>Checking this VPS...</h2><p>Looking for MT4 and OneDrive automatically.</p></main>}
-      {!loading && serviceError && screen === "overview" && <main className="page service-state error-state"><Info weight="fill" /><h2>Open the wizard from its launcher</h2><p>{serviceError}</p><small>Run Start-MoneyMachineSyncWizard.cmd on the Windows VPS.</small></main>}
+      {!loading && serviceError && screen === "overview" && <main className="page service-state error-state"><Info weight="fill" /><h2>Open the wizard from its launcher</h2><p>{serviceError}</p><small>Run the AmmarTrading Sync launcher on the Windows VPS.</small></main>}
       {!loading && !serviceError && screen === "overview" && <EmptyIntro accounts={accounts} onAdd={startAdd} />}
       {!loading && screen === "form" && <FormScreen form={form} setForm={setForm} errors={errors} sources={sources} roots={roots} serviceError={serviceError} onBack={() => setScreen("overview")} onNext={validate} />}
       {!loading && screen === "check" && <CheckScreen form={form} phase={phase} setupError={setupError} onStart={startSetup} onBack={() => { setPhase("idle"); setScreen("form"); }} />}

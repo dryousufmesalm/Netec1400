@@ -113,6 +113,15 @@ function Get-MoneyMachineWizardContentType {
     }
 }
 
+function Get-AmmarTradingDestinationPath {
+    param(
+        [Parameter(Mandatory)][string]$OneDriveRoot,
+        [Parameter(Mandatory)][string]$AccountNumber
+    )
+
+    Join-Path $OneDriveRoot (Join-Path 'AmmarTrading' (Join-Path ("Account_{0}" -f $AccountNumber) 'Baskets.csv'))
+}
+
 function Get-MoneyMachineWizardAccounts {
     param([Parameter(Mandatory)][string]$ConfigPath)
     if(-not (Test-Path -LiteralPath $ConfigPath -PathType Leaf)) { return @() }
@@ -120,7 +129,7 @@ function Get-MoneyMachineWizardAccounts {
         Import-Csv -LiteralPath $ConfigPath | ForEach-Object {
             $accountNumber = [string]$_.ExpectedMT4Login
             $oneDriveRoot = [string]$_.OneDriveRoot
-            $destination = Join-Path $oneDriveRoot (Join-Path 'AmarTrading' (Join-Path ("Account_{0}" -f $accountNumber) 'Baskets.csv'))
+            $destination = Get-AmmarTradingDestinationPath -OneDriveRoot $oneDriveRoot -AccountNumber $accountNumber
             $published = Test-Path -LiteralPath $destination -PathType Leaf
             $destinationItem = if($published) { Get-Item -LiteralPath $destination } else { $null }
             [pscustomobject]@{
@@ -177,7 +186,7 @@ function Start-MoneyMachineSyncWizard {
     $listener.Prefixes.Add($prefix)
     try {
         $listener.Start()
-        Write-Host "Money Machine Sync Wizard is running at $prefix"
+        Write-Host "AmmarTrading Sync is running at $prefix"
         if(-not $NoBrowser) { Start-Process $prefix }
         while($listener.IsListening) {
             $context = $listener.GetContext()

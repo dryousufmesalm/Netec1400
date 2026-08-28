@@ -8,12 +8,25 @@ import { createServer } from "vite";
 
 const projectRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const appSource = await readFile(path.join(projectRoot, "src", "App.jsx"), "utf8");
+const deployedAppRoot = path.resolve(projectRoot, "..", "..", "automation", "MoneyMachineCsvSync", "WizardApp");
+const deployedIndex = await readFile(path.join(deployedAppRoot, "index.html"), "utf8");
+const deployedBundleName = deployedIndex.match(/src="\/assets\/([^"?]+\.js)"/)?.[1];
+if (!deployedBundleName) throw new Error("Deployed WizardApp index does not reference a JavaScript bundle.");
+const deployedBundle = await readFile(path.join(deployedAppRoot, "assets", deployedBundleName), "utf8");
 const arabicText = /[\u0600-\u06ff]/;
 
 test("the UI source uses the canonical AmmarTrading product and destination names", () => {
   assert.match(appSource, /AmmarTrading Sync/);
   assert.doesNotMatch(appSource, /Money Machine|OneDrive \/ AmarTrading/);
   assert.match(appSource, /OneDrive \/ AmmarTrading/);
+  assert.doesNotMatch(appSource, /Start-MoneyMachineSyncWizard\.cmd/);
+});
+
+test("the deployed WizardApp contains only canonical product-facing naming", () => {
+  assert.match(deployedIndex, /AmmarTrading Sync/);
+  assert.match(deployedBundle, /AmmarTrading Sync/);
+  assert.match(deployedBundle, /OneDrive \/ AmmarTrading/);
+  assert.doesNotMatch(`${deployedIndex}\n${deployedBundle}`, /Money Machine|AmarTrading|Start-MoneyMachineSyncWizard\.cmd/);
 });
 
 test("the complete wizard renders in English from left to right", async (t) => {
