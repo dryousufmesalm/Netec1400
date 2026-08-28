@@ -1,0 +1,67 @@
+{
+  "viewport": "1440x900",
+  "screenshots": 6,
+  "captures": [
+    {
+      "filename": "01-system-desktop.png",
+      "heading": "Check this VPS",
+      "horizontalOverflow": false,
+      "scrollWidth": 1440,
+      "clientWidth": 1440,
+      "hasArabic": false,
+      "direction": "ltr",
+      "language": "en"
+    },
+    {
+      "filename": "02-accounts-desktop.png",
+      "heading": "Select MT4 accounts",
+      "horizontalOverflow": false,
+      "scrollWidth": 1440,
+      "clientWidth": 1440,
+      "hasArabic": false,
+      "direction": "ltr",
+      "language": "en"
+    },
+    {
+      "filename": "03-onedrive-desktop.png",
+      "heading": "Choose the OneDrive folder",
+      "horizontalOverflow": false,
+      "scrollWidth": 1440,
+      "clientWidth": 1440,
+      "hasArabic": false,
+      "direction": "ltr",
+      "language": "en"
+    },
+    {
+      "filename": "04-test-desktop.png",
+      "heading": "Selections are ready",
+      "horizontalOverflow": false,
+      "scrollWidth": 1440,
+      "clientWidth": 1440,
+      "hasArabic": false,
+      "direction": "ltr",
+      "language": "en"
+    },
+    {
+      "filename": "05-finish-desktop.png",
+      "heading": "Local synchronization is ready",
+      "horizontalOverflow": false,
+      "scrollWidth": 1440,
+      "clientWidth": 1440,
+      "hasArabic": false,
+      "direction": "ltr",
+      "language": "en"
+    },
+    {
+      "filename": "06-monitor-desktop.png",
+      "heading": "MT4 account monitoring",
+      "horizontalOverflow": false,
+      "scrollWidth": 1440,
+      "clientWidth": 1440,
+      "hasArabic": false,
+      "direction": "ltr",
+      "language": "en"
+    }
+  ],
+  "consoleErrors": []
+}

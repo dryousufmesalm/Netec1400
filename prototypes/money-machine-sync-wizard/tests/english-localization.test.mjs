@@ -17,22 +17,61 @@ const deployedLauncher = await readFile(path.join(path.dirname(deployedAppRoot),
 const arabicText = /[\u0600-\u06ff]/;
 const testApiModuleId = "\0english-localization-api";
 const testApiModule = `
-import { createWizardApi } from "/src/api.js";
+const discoveredAccounts = [
+  {
+    DiscoveryId: "ready-1", AccountNumber: "7788451", BrokerName: "Ammar Markets",
+    TerminalId: "TERMINAL-A", TerminalName: "MetaTrader 4 London",
+    SourceCsv: "C:\\\\MT4-A\\\\MQL4\\\\Files\\\\AGOLD___Baskets.csv", SchemaVersion: "3",
+    LastWriteUtc: "2026-08-29T09:15:00Z", Freshness: "Fresh", Eligibility: "Ready", ReasonCode: "Ready",
+  },
+  {
+    DiscoveryId: "ready-2", AccountNumber: "9912044", BrokerName: "Northstar Broker",
+    TerminalId: "TERMINAL-B", TerminalName: "MetaTrader 4 Frankfurt",
+    SourceCsv: "C:\\\\MT4-B\\\\MQL4\\\\Files\\\\AGOLD___Baskets.csv", SchemaVersion: "3",
+    LastWriteUtc: "2026-08-29T09:12:00Z", Freshness: "Fresh", Eligibility: "Ready", ReasonCode: "Ready",
+  },
+  {
+    DiscoveryId: "blocked-1", AccountNumber: "4455667", BrokerName: "Legacy Broker",
+    TerminalId: "TERMINAL-C", TerminalName: "MetaTrader 4 Legacy",
+    SourceCsv: "C:\\\\MT4-C\\\\MQL4\\\\Files\\\\AGOLD___Baskets.csv", SchemaVersion: "2",
+    LastWriteUtc: "2026-08-29T08:30:00Z", Freshness: "Stale", Eligibility: "Blocked", ReasonCode: "SchemaV2",
+  },
+];
+let configuredAccounts = [];
 
-const fetchImpl = async (url) => {
-  const payload = url.endsWith("/api/setup")
-    ? { ok: true, status: "Success", destination: "C:\\\\OneDrive\\\\AmmarTrading\\\\Account_7788451\\\\Baskets.csv" }
-    : url.endsWith("/api/discovery")
-      ? {
-        ok: true,
-        sources: [{ Path: "C:\\\\MT4\\\\MQL4\\\\Files\\\\AGOLD___Baskets.csv", TerminalId: "TEST" }],
-        oneDriveRoots: [{ Path: "C:\\\\OneDrive - AmmarTrading", Name: "OneDrive - AmmarTrading" }],
-      }
-      : { ok: true, accounts: [] };
-  return new Response(JSON.stringify(payload), { status: 200, headers: { "content-type": "application/json" } });
+export const wizardApi = {
+  getSystemStatus: async () => ({ Ready: true, ComputerName: "VPS Dubai 02", Checks: [
+    { Name: "Windows and PowerShell", Ready: true, Message: "Compatible Windows tools are available." },
+    { Name: "MT4 terminal data", Ready: true, Message: "MT4 report locations can be checked securely." },
+    { Name: "OneDrive", Ready: true, Message: "A signed-in OneDrive folder is available." },
+    { Name: "Automatic sync", Ready: true, Message: "Windows Scheduled Tasks are available." },
+  ] }),
+  discoverMt4Accounts: async () => ({ Accounts: discoveredAccounts }),
+  browseForCsv: async () => ({ Accounts: discoveredAccounts }),
+  getOneDriveRoots: async () => ({ Roots: [{ Path: "C:\\\\OneDrive - AmmarTrading", Name: "OneDrive - AmmarTrading", IsActive: true }] }),
+  getConfiguredAccounts: async () => ({ Accounts: configuredAccounts }),
+  validateSelection: async (payload) => ({ Stages: [{ Code: "Validated", Status: "Success", Message: payload.accounts.length + " selected sources are valid." }] }),
+  applySetup: async (payload) => {
+    configuredAccounts = payload.accounts.map((account) => ({
+      AccountNumber: account.expectedMT4Login,
+      BrokerName: discoveredAccounts.find((item) => item.DiscoveryId === account.discoveryId).BrokerName,
+      Destination: payload.oneDriveRoot + "\\\\AmmarTrading\\\\Account_" + account.expectedMT4Login + "\\\\Baskets.csv",
+      LocalPublished: true,
+      TaskState: "Registered",
+    }));
+    return {
+      Status: "Success", Accounts: configuredAccounts, CloudDeliveryVerified: false,
+      Stages: [
+        { Code: "Validated", Status: "Success", Message: "Selected sources are valid." },
+        { Code: "LocalPublished", Status: "Success", Message: "Local CSV snapshots were published." },
+        { Code: "Automated", Status: "Success", Message: "Automatic sync is active." },
+      ],
+    };
+  },
+  runSyncNow: async () => ({ Status: "Success" }),
+  openReportingFolder: async () => ({ Status: "Opened" }),
+  exportSupportReport: async () => ({ Path: "C:\\\\Support\\\\AmmarTrading-Support.json" }),
 };
-
-export const wizardApi = createWizardApi(fetchImpl);
 `;
 
 test("the UI source uses the canonical AmmarTrading product and destination names", () => {
@@ -95,19 +134,32 @@ test("the complete wizard renders in English from left to right", async (t) => {
   assert.equal(await page.locator("html").getAttribute("dir"), "ltr");
   assert.equal(await page.locator(".app-shell").getAttribute("dir"), "ltr");
   assert.equal(await page.title(), "AmmarTrading Sync — Report Sync Setup");
-  await page.getByRole("heading", { name: "All VPS reports in one place" }).waitFor();
+  await page.getByRole("heading", { name: "Check this VPS" }).waitFor();
   await assertEnglishScreen();
 
-  await page.getByRole("button", { name: "Add a new VPS" }).click();
-  await page.getByPlaceholder("Example: Main London VPS").fill("VPS Dubai 02");
-  await page.getByPlaceholder("Example: 1024587").fill("7788451");
-  await page.getByRole("button", { name: "Continue to readiness check" }).click();
-    await page.getByRole("heading", { name: "Everything is ready" }).waitFor();
-    await page.getByText("OneDrive / AmmarTrading / 7788451", { exact: true }).waitFor();
+  await page.getByRole("button", { name: "Find MT4 accounts" }).click();
+  await page.getByRole("heading", { name: "Select MT4 accounts" }).waitFor();
+  await page.locator(".account-card").filter({ hasText: "7788451" }).click();
+  await page.locator(".account-card").filter({ hasText: "9912044" }).click();
+  assert.equal(await page.locator(".account-card.disabled input").isDisabled(), true);
   await assertEnglishScreen();
 
-  await page.getByRole("button", { name: "Set up sync now" }).click();
-  await page.getByRole("heading", { name: "Sync is now running" }).waitFor();
-  await page.getByText("Published locally").waitFor();
+  await page.getByRole("button", { name: "Choose OneDrive" }).click();
+  await page.getByRole("heading", { name: "Choose the OneDrive folder" }).waitFor();
+  await page.getByText("OneDrive / AmmarTrading / Account_7788451 / Baskets.csv", { exact: true }).waitFor();
+  await assertEnglishScreen();
+
+  await page.getByRole("button", { name: "Test selected accounts" }).click();
+  await page.getByRole("heading", { name: "Selections are ready" }).waitFor();
+  await assertEnglishScreen();
+
+  await page.getByRole("button", { name: "Apply setup and run test sync" }).click();
+  await page.getByRole("heading", { name: "Local synchronization is ready" }).waitFor();
+  assert.equal(await page.getByText("Published locally", { exact: true }).count(), 2);
+  await page.getByText("Publication is local only.", { exact: true }).waitFor();
+  await assertEnglishScreen();
+
+  await page.getByRole("button", { name: "View Status", exact: true }).click();
+  await page.getByRole("heading", { name: "MT4 account monitoring" }).waitFor();
   await assertEnglishScreen();
 });

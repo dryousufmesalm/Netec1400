@@ -1,318 +1,532 @@
-import { useEffect, useState } from "react";
+import { useEffect, useReducer, useState } from "react";
 import {
+  ArrowClockwise,
   ArrowLeft,
   ArrowRight,
   Check,
   CheckCircle,
   CloudArrowUp,
   DesktopTower,
+  DownloadSimple,
   FileCsv,
   FolderOpen,
-  GearSix,
+  Gauge,
   HardDrives,
   Info,
-  LockKey,
-  MicrosoftExcelLogo,
+  MagnifyingGlass,
+  Play,
   Plus,
   ShieldCheck,
   SpinnerGap,
+  WarningCircle,
+  XCircle,
 } from "@phosphor-icons/react";
 import { wizardApi } from "./api.js";
+import {
+  accountNumber,
+  buildSetupPayload,
+  canContinueFromAccounts,
+  discoveryId,
+  initialWizardState,
+  isAccountEligible,
+  mapSetupStages,
+  reasonCode,
+  reduceWizard,
+  rootPath,
+  screens,
+} from "./wizardState.js";
 
-const initialForm = {
-  name: "",
-  account: "",
-  path: "",
-  oneDriveRoot: "",
-};
-
-function mapApiAccount(item) {
-  return {
-    id: item.expectedMT4Login,
-    name: item.vpsName || `VPS ${item.expectedMT4Login}`,
-    account: item.expectedMT4Login,
-    files: item.files ?? 0,
-    updated: item.localPublished ? "Published locally" : item.enabled ? "Waiting for first publish" : "Paused",
-    enabled: item.enabled,
-  };
+function field(record, camelName, pascalName, fallback = "") {
+  return record?.[camelName] ?? record?.[pascalName] ?? fallback;
 }
 
-function formatSetupError(message = "") {
-  if (/AccountNumber|ExpectedMT4Login|account number/i.test(message)) {
-    return "The MT4 account number does not match the account in the CSV file. Check the number and try again.";
-  }
-  if (/OneDrive/i.test(message)) return "The OneDrive folder is not ready. Open OneDrive, confirm that you are signed in, and try again.";
-  if (/Source CSV|\.csv|schema/i.test(message)) return "The MT4 report file is invalid or not ready. Select the correct AGOLD___Baskets.csv file.";
-  if (/ScheduledTask|scheduled task/i.test(message)) return "The file was published, but automatic sync could not be enabled. Run the wizard as administrator or contact support.";
-  return "Setup could not be completed. Review the details and try again. Contact support if the problem continues.";
+function arrayField(record, camelName, pascalName) {
+  const result = field(record, camelName, pascalName, []);
+  return Array.isArray(result) ? result : [];
 }
+
+function safeMessage(error) {
+  if (/OneDrive/i.test(error?.message ?? "")) return "OneDrive is not ready. Sign in to OneDrive on this VPS, then try again.";
+  if (/schema|csv|account|selection|discovery/i.test(error?.message ?? "")) return error.message;
+  return error?.message || "AmmarTrading Sync could not complete that action. Try again or export a support report.";
+}
+
+const reasonMessages = Object.freeze({
+  HeaderOnly: "Waiting for the first complete basket row before the account identity can be verified.",
+  SchemaV2: "Schema v2 is not supported for this setup. Update the EA so it writes schema v3.",
+  MalformedCsv: "This report is malformed and cannot be used. Check the EA export and refresh.",
+  DuplicateAccount: "The same account was found in more than one terminal. Keep only the current source active, then refresh.",
+  Ready: "Ready for setup.",
+});
+
+const setupSteps = [
+  { screen: screens.SYSTEM, label: "System" },
+  { screen: screens.ACCOUNTS, label: "MT4 accounts" },
+  { screen: screens.ONEDRIVE, label: "OneDrive" },
+  { screen: screens.TEST, label: "Test sync" },
+  { screen: screens.FINISH, label: "Finish" },
+];
 
 function Brand() {
   return (
-    <button className="brand" type="button" aria-label="Return to dashboard">
+    <div className="brand" aria-label="AmmarTrading Sync">
       <span className="brand-mark"><CloudArrowUp weight="fill" /></span>
-      <span><strong>AmmarTrading Sync</strong><small>CSV synchronization</small></span>
-    </button>
+      <span><strong>AmmarTrading Sync</strong><small>MT4 report synchronization</small></span>
+    </div>
   );
 }
 
-function Header({ onHome }) {
+function Header({ onStatus, showStatus }) {
   return (
     <header className="topbar">
-      <div onClick={onHome}><Brand /></div>
-      <div className="secure-pill"><ShieldCheck weight="fill" /> Secure connection</div>
+      <Brand />
+      {showStatus ? (
+        <button className="header-action" type="button" onClick={onStatus}><Gauge /> View status</button>
+      ) : (
+        <div className="secure-pill"><ShieldCheck weight="fill" /> Local Windows connection</div>
+      )}
     </header>
   );
 }
 
-function ServerIllustration() {
+function Progress({ current }) {
+  const activeIndex = setupSteps.findIndex((step) => step.screen === current);
   return (
-    <div className="sync-visual" aria-label="CSV files moving from VPS devices to OneDrive">
-      <div className="server-stack">
-        {["London 01", "New York", "Frankfurt"].map((label, index) => (
-          <div className="mini-server" key={label} style={{ "--delay": `${index * 0.45}s` }}>
-            <DesktopTower weight="duotone" />
-            <span>{label}</span>
-            <i />
-          </div>
-        ))}
-      </div>
-      <div className="flow-track"><span /><span /><span /></div>
-      <div className="cloud-card">
-        <CloudArrowUp weight="duotone" />
-        <strong>OneDrive</strong>
-        <span>AmmarTrading</span>
-        <FileCsv className="csv-float" weight="fill" />
-      </div>
+    <nav className="progress" aria-label="Setup progress">
+      <ol>
+        {setupSteps.map((step, index) => {
+          const complete = index < activeIndex;
+          const active = index === activeIndex;
+          return (
+            <li className={`${complete ? "complete" : ""} ${active ? "active" : ""}`} key={step.screen} aria-current={active ? "step" : undefined}>
+              <span>{complete ? <Check weight="bold" /> : index + 1}</span>
+              <b>{step.label}</b>
+            </li>
+          );
+        })}
+      </ol>
+    </nav>
+  );
+}
+
+function PageHeading({ eyebrow, title, copy, actions }) {
+  return (
+    <div className="page-heading">
+      <div><span className="eyebrow">{eyebrow}</span><h1>{title}</h1><p>{copy}</p></div>
+      {actions && <div className="heading-actions">{actions}</div>}
     </div>
   );
 }
 
-function EmptyIntro({ accounts, onAdd }) {
-  const totalFiles = accounts.reduce((sum, account) => sum + account.files, 0);
-  return (
-    <main className="page overview-page">
-      <section className="hero-grid">
-        <div className="hero-copy">
-          <span className="eyebrow"><CloudArrowUp weight="fill" /> Automatic and secure sync</span>
-          <h1>All VPS reports<br /><em>in one place</em></h1>
-          <p>Add a new VPS in minutes. Its CSV reports will automatically appear in OneDrive on your reporting PC.</p>
-          <div className="hero-actions">
-            <button className="primary large" type="button" onClick={onAdd}>
-              <Plus weight="bold" /> Add a new VPS
-            </button>
-            <span className="helper"><CheckCircle weight="fill" /> No complicated technical setup</span>
-          </div>
-        </div>
-        <ServerIllustration />
-      </section>
-
-      <section className="dashboard-section">
-        <div className="section-heading">
-          <div><h2>Connected devices</h2><p>Latest synchronization status for every account</p></div>
-          <button className="secondary" type="button" onClick={onAdd}><Plus weight="bold" /> Add device</button>
-        </div>
-        <div className="stats-row">
-          <div className="stat"><HardDrives weight="duotone" /><span><b>{accounts.length}</b> connected devices</span></div>
-          <div className="stat"><FileCsv weight="duotone" /><span><b>{totalFiles}</b> CSV files</span></div>
-          <div className="stat"><CheckCircle weight="fill" /><span><b>Active</b> all sync jobs</span></div>
-        </div>
-        <div className="account-list">
-          {accounts.length === 0 && <div className="empty-accounts"><DesktopTower weight="duotone" /><b>No VPS has been added yet</b><span>Select Add a new VPS and the wizard will handle the rest.</span></div>}
-          {accounts.map((item) => (
-            <article className="account-row" key={item.id}>
-              <div className="account-main"><span className="device-icon"><DesktopTower weight="duotone" /></span><div><h3>{item.name}</h3><p>MT4 account {item.account}</p></div></div>
-              <div className="file-count"><FileCsv /> {item.files} files</div>
-              <div className="update-time">Last sync<br /><b>{item.updated}</b></div>
-              <span className={`status ${item.enabled === false ? "paused" : "success"}`}><i /> {item.enabled === false ? "Paused" : "Active"}</span>
-            </article>
-          ))}
-        </div>
-      </section>
-    </main>
-  );
+function ErrorAlert({ message }) {
+  if (!message) return null;
+  return <div className="alert error-alert" role="alert"><WarningCircle weight="fill" /><span>{message}</span></div>;
 }
 
-function Stepper({ current }) {
-  const steps = ["VPS details", "Readiness check", "Setup complete"];
-  return (
-    <div className="stepper" aria-label={`Step ${current} of 3`}>
-      {steps.map((label, index) => {
-        const number = index + 1;
-        const complete = number < current;
-        const active = number === current;
-        return (
-          <div className={`step ${active ? "active" : ""} ${complete ? "complete" : ""}`} key={label}>
-            <span>{complete ? <Check weight="bold" /> : number}</span>
-            <b>{label}</b>
-          </div>
-        );
-      })}
-    </div>
-  );
+function LoadingState({ label }) {
+  return <div className="loading-panel" aria-live="polite"><SpinnerGap className="spin" /><b>{label}</b></div>;
 }
 
-function FormScreen({ form, setForm, errors, sources, roots, serviceError, onBack, onNext }) {
+function SystemScreen({ state, busy, onRefresh, onContinue, dispatch }) {
+  const rawChecks = arrayField(state.systemStatus, "checks", "Checks");
+  const checks = rawChecks.length ? rawChecks : [
+    { Name: "Windows and PowerShell", Ready: true, Message: "Compatible Windows tools are available." },
+    { Name: "MT4 terminal data", Ready: true, Message: "MT4 report locations can be checked securely." },
+    { Name: "OneDrive", Ready: true, Message: "Local OneDrive folders can be detected." },
+    { Name: "Automatic sync", Ready: true, Message: "Windows Scheduled Tasks are available." },
+  ];
+  const systemReady = field(state.systemStatus, "ready", "Ready", checks.every((check) => field(check, "ready", "Ready", false)));
+
   return (
-    <main className="page wizard-page">
-      <Stepper current={1} />
-      <section className="wizard-card split-card">
-        <div className="card-copy">
-          <span className="eyebrow">Step one</span>
-          <h1>Add VPS details</h1>
-          <p>Enter a clear device name and the MT4 account number running on this VPS.</p>
-          <div className="privacy-note"><LockKey weight="duotone" /><span><b>Your credentials stay private</b><small>We will never ask for your trading account password.</small></span></div>
+    <WizardLayout screen={screens.SYSTEM}>
+      <PageHeading eyebrow="Step 1 of 5" title="Check this VPS" copy="AmmarTrading Sync checks the local Windows services it needs. No trading or Microsoft password is requested." />
+      <section className="content-card system-grid">
+        <div className="system-summary">
+          <span className={`hero-icon ${systemReady ? "success" : "warning"}`}>{systemReady ? <CheckCircle weight="duotone" /> : <WarningCircle weight="duotone" />}</span>
+          <h2>{systemReady ? "This VPS is ready" : "This VPS needs attention"}</h2>
+          <p>{systemReady ? "Choose a clear name, then find the MT4 accounts already running here." : "Resolve the checks marked Needs attention, then run the check again."}</p>
+          <label className="field-label" htmlFor="vps-name">VPS name</label>
+          <input id="vps-name" className="text-input" value={state.vpsName} maxLength={100} onChange={(event) => dispatch({ type: "VPS_NAME_CHANGED", vpsName: event.target.value })} placeholder="Example: Dubai VPS 02" />
         </div>
-        <form className="setup-form" onSubmit={(event) => { event.preventDefault(); onNext(); }}>
-          <label>Device name <small>For identification only</small>
-            <div className={`input-wrap ${errors.name ? "invalid" : ""}`}><DesktopTower /><input autoFocus value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} placeholder="Example: Main London VPS" /></div>
-            {errors.name && <span className="error">Enter a device name</span>}
-          </label>
-          <label>MT4 account number
-            <div className={`input-wrap ${errors.account ? "invalid" : ""}`}><MicrosoftExcelLogo /><input inputMode="numeric" value={form.account} onChange={(e) => setForm({ ...form, account: e.target.value.replace(/\D/g, "") })} placeholder="Example: 1024587" /></div>
-            {errors.account && <span className="error">Enter the account number</span>}
-          </label>
-          <label>CSV report file on this VPS
-            <div className={`input-wrap path-input ${errors.path ? "invalid" : ""}`}><FolderOpen /><input dir="ltr" list="csv-sources" value={form.path} onChange={(e) => setForm({ ...form, path: e.target.value })} placeholder="Select the detected report file" /><button type="button" disabled={sources.length === 0} onClick={() => sources[0] && setForm({ ...form, path: sources[0].Path })}>Select</button></div>
-            <datalist id="csv-sources">{sources.map((source) => <option value={source.Path} key={source.Path}>{source.TerminalId}</option>)}</datalist>
-            <span className="field-help"><Info /> {sources.length ? `${sources.length} report file${sources.length === 1 ? " was" : "s were"} found on this VPS.` : "No report file was found. Confirm that MT4 has created it first."}</span>
-            {errors.path && <span className="error">Select the CSV file for this account</span>}
-          </label>
-          <label>OneDrive folder for reports
-            <div className={`input-wrap ${errors.oneDriveRoot ? "invalid" : ""}`}><CloudArrowUp /><select dir="ltr" value={form.oneDriveRoot} onChange={(e) => setForm({ ...form, oneDriveRoot: e.target.value })}><option value="">Select a OneDrive folder</option>{roots.map((root) => <option value={root.Path} key={root.Path}>{root.Name || root.Path}</option>)}</select></div>
-            <span className="field-help"><ShieldCheck /> Sign in to the dedicated OneDrive uploader account before continuing.</span>
-            {errors.oneDriveRoot && <span className="error">Select a OneDrive folder</span>}
-          </label>
-          {serviceError && <div className="inline-alert error-alert"><Info weight="fill" /><span>{serviceError}</span></div>}
-          <div className="form-actions"><button className="text-button" type="button" onClick={onBack}><ArrowLeft /> Back</button><button className="primary" type="submit">Continue to readiness check <ArrowRight weight="bold" /></button></div>
-        </form>
-      </section>
-    </main>
-  );
-}
-
-const checks = [
-  { key: "device", label: "VPS connection", detail: "This VPS is available and ready for setup", Icon: DesktopTower },
-  { key: "folder", label: "CSV report file", detail: "The report file was found successfully", Icon: FolderOpen },
-  { key: "drive", label: "OneDrive folder", detail: "AmmarTrading is ready to receive files", Icon: CloudArrowUp },
-  { key: "security", label: "Secure permissions", detail: "Access is limited to the reporting folder", Icon: ShieldCheck },
-];
-
-function CheckScreen({ form, phase, setupError, onStart, onBack }) {
-  const activeCount = phase === "checking" ? 2 : phase === "ready" ? 4 : 0;
-  return (
-    <main className="page wizard-page">
-      <Stepper current={2} />
-      <section className="wizard-card check-card">
-        <div className="check-heading"><span className="eyebrow">Step two</span><h1>{phase === "ready" ? "Everything is ready" : "Checking VPS readiness"}</h1><p>{phase === "ready" ? "Review the details, then complete setup with one click." : "The wizard checks everything automatically. You will not need to open technical settings."}</p></div>
-        <div className="device-summary"><span className="device-icon"><DesktopTower weight="duotone" /></span><div><b>{form.name}</b><span>Account {form.account}</span></div><button type="button" onClick={onBack}>Edit</button></div>
-        <div className="checks-list">
-          {checks.map(({ key, label, detail, Icon }, index) => {
-            const done = index < activeCount;
-            const loading = phase === "checking" && index === activeCount;
-            return <div className={`check-row ${done ? "done" : ""}`} key={key}><span className="check-icon"><Icon weight="duotone" /></span><div><b>{label}</b><small>{done ? detail : loading ? "Checking now..." : "Waiting for check"}</small></div><span className="check-result">{done ? <CheckCircle weight="fill" /> : loading ? <SpinnerGap className="spin" /> : <span />}</span></div>;
+        <div className="check-list" aria-label="System checks">
+          {checks.map((check, index) => {
+            const ready = Boolean(field(check, "ready", "Ready", false));
+            return (
+              <article className={`check-item ${ready ? "ready" : "blocked"}`} key={`${field(check, "name", "Name", "System check")}-${index}`}>
+                <span className="check-state-icon">{ready ? <CheckCircle weight="fill" /> : <XCircle weight="fill" />}</span>
+                <div><h3>{field(check, "name", "Name", "System check")}</h3><p>{field(check, "message", "Message", ready ? "Ready" : "Needs attention")}</p></div>
+                <strong>{ready ? "Ready" : "Needs attention"}</strong>
+              </article>
+            );
           })}
         </div>
-        <div className="destination"><FolderOpen weight="duotone" /><div><span>Files will appear on your reporting PC in</span><b dir="ltr">OneDrive / AmmarTrading / {form.account}</b></div></div>
-        {setupError && <div className="inline-alert error-alert"><Info weight="fill" /><span>{setupError}</span></div>}
-        <div className="form-actions"><button className="text-button" type="button" onClick={onBack} disabled={phase === "checking"}><ArrowLeft /> Back</button><button className="primary" type="button" onClick={onStart} disabled={phase === "checking"}>{phase === "checking" ? <><SpinnerGap className="spin" /> Setting up...</> : phase === "ready" ? <><GearSix weight="fill" /> Set up sync now</> : <>Start check <ArrowRight /></>}</button></div>
       </section>
+      <ErrorAlert message={state.error} />
+      <div className="page-actions">
+        <button className="secondary" type="button" onClick={onRefresh} disabled={busy}><ArrowClockwise className={busy ? "spin" : ""} /> Check again</button>
+        <button className="primary" type="button" onClick={onContinue} disabled={!systemReady || !state.vpsName.trim() || busy}>Find MT4 accounts <ArrowRight weight="bold" /></button>
+      </div>
+    </WizardLayout>
+  );
+}
+
+function AccountCard({ account, checked, onToggle }) {
+  const eligible = isAccountEligible(account);
+  const reason = reasonCode(account);
+  const number = accountNumber(account) || "Account not identified";
+  const broker = field(account, "brokerName", "BrokerName", "Broker not identified");
+  const terminalName = field(account, "terminalName", "TerminalName", "MetaTrader 4");
+  const terminalId = field(account, "terminalId", "TerminalId", "Unknown terminal");
+  const schema = field(account, "schemaVersion", "SchemaVersion", "Unknown");
+  const freshness = field(account, "freshness", "Freshness", "Unknown");
+  const lastWrite = field(account, "lastWriteUtc", "LastWriteUtc", "");
+  const reasonText = reasonMessages[reason] ?? (eligible ? "Ready for setup." : `Blocked: ${reason}`);
+
+  return (
+    <label className={`account-card ${eligible ? "eligible" : "disabled"} ${checked ? "selected" : ""}`}>
+      <input type="checkbox" checked={checked} disabled={!eligible} onChange={onToggle} />
+      <span className="account-checkbox" aria-hidden="true">{checked && <Check weight="bold" />}</span>
+      <span className="account-icon"><DesktopTower weight="duotone" /></span>
+      <span className="account-copy">
+        <span className="account-title"><strong>{number}</strong><em>{broker}</em></span>
+        <span className="account-terminal">{terminalName} <small>{terminalId}</small></span>
+        <span className="account-meta"><span>Schema {schema}</span><span>{freshness}</span>{lastWrite && <span>Updated {new Date(lastWrite).toLocaleString("en-GB", { dateStyle: "medium", timeStyle: "short" })}</span>}</span>
+        <span className={`eligibility-note ${eligible ? "ready" : "blocked"}`}>{eligible ? <CheckCircle weight="fill" /> : <WarningCircle weight="fill" />}<span><b>{eligible ? "Ready" : "Cannot select"}</b>{reasonText}</span></span>
+      </span>
+    </label>
+  );
+}
+
+function AccountsScreen({ state, busy, activity, onRefresh, onBrowse, onBack, onContinue, dispatch }) {
+  return (
+    <WizardLayout screen={screens.ACCOUNTS}>
+      <PageHeading
+        eyebrow="Step 2 of 5"
+        title="Select MT4 accounts"
+        copy="Choose one or more verified schema-v3 accounts. Blocked reports stay visible so you can see exactly what needs attention."
+        actions={<><button className="secondary" type="button" onClick={onRefresh} disabled={busy}><ArrowClockwise className={busy ? "spin" : ""} /> Refresh</button><button className="secondary" type="button" onClick={onBrowse} disabled={busy}><FolderOpen /> Browse manually</button></>}
+      />
+      <div className="discovery-status" aria-live="polite">{activity}</div>
+      {busy && state.accounts.length === 0 ? <LoadingState label="Looking for MT4 reports on this VPS…" /> : (
+        <section className="account-grid" aria-label="Discovered MT4 accounts">
+          {state.accounts.length === 0 ? (
+            <div className="empty-state"><MagnifyingGlass weight="duotone" /><h2>No MT4 reports found yet</h2><p>Run the EA until it writes AGOLD___Baskets.csv, then select Refresh or Browse manually.</p></div>
+          ) : state.accounts.map((account) => {
+            const id = discoveryId(account);
+            return <AccountCard account={account} checked={state.selectedDiscoveryIds.includes(id)} key={id} onToggle={() => dispatch({ type: "ACCOUNT_TOGGLED", discoveryId: id })} />;
+          })}
+        </section>
+      )}
+      <ErrorAlert message={state.error} />
+      <div className="selection-summary" aria-live="polite"><b>{state.selectedDiscoveryIds.length}</b> MT4 account{state.selectedDiscoveryIds.length === 1 ? "" : "s"} selected</div>
+      <div className="page-actions"><button className="text-button" type="button" onClick={onBack}><ArrowLeft /> Back</button><button className="primary" type="button" onClick={onContinue} disabled={!canContinueFromAccounts(state) || busy}>Choose OneDrive <ArrowRight weight="bold" /></button></div>
+    </WizardLayout>
+  );
+}
+
+function OneDriveScreen({ state, busy, onBack, onContinue, dispatch }) {
+  const selectedIds = new Set(state.selectedDiscoveryIds);
+  const selectedAccounts = state.accounts.filter((account) => selectedIds.has(discoveryId(account)));
+  return (
+    <WizardLayout screen={screens.ONEDRIVE}>
+      <PageHeading eyebrow="Step 3 of 5" title="Choose the OneDrive folder" copy="Reports are published into an AmmarTrading account folder inside the selected local OneDrive root." />
+      {busy ? <LoadingState label="Checking signed-in OneDrive folders…" /> : (
+        <section className="onedrive-layout">
+          <div className="content-card root-panel">
+            <h2>Available OneDrive folders</h2>
+            <p>Select the signed-in uploader folder for this VPS.</p>
+            <div className="root-list">
+              {state.roots.map((root) => {
+                const path = rootPath(root);
+                const selected = state.oneDriveRoot === path;
+                return (
+                  <label className={`root-option ${selected ? "selected" : ""}`} key={path}>
+                    <input type="radio" name="onedrive-root" value={path} checked={selected} onChange={() => dispatch({ type: "ROOT_SELECTED", oneDriveRoot: path })} />
+                    <span className="root-radio" aria-hidden="true" />
+                    <CloudArrowUp weight="duotone" />
+                    <span><b>{field(root, "name", "Name", "OneDrive")}</b><small>{path}</small></span>
+                    {selected && <em>Selected</em>}
+                  </label>
+                );
+              })}
+              {state.roots.length === 0 && <div className="empty-inline"><WarningCircle /><span><b>No signed-in OneDrive folder found</b>Open OneDrive on this VPS, sign in, then go back and try again.</span></div>}
+            </div>
+          </div>
+          <div className="content-card mapping-panel">
+            <h2>Local destination preview</h2>
+            <p>Source paths remain managed by discovery and cannot be edited here.</p>
+            <div className="mapping-list">
+              {selectedAccounts.map((account) => (
+                <article key={discoveryId(account)}><FileCsv weight="duotone" /><span><b>Account {accountNumber(account)}</b><small>OneDrive / AmmarTrading / Account_{accountNumber(account)} / Baskets.csv</small></span><CheckCircle weight="fill" /></article>
+              ))}
+            </div>
+            <div className="local-note"><Info weight="fill" /><span><b>Local folder only</b>Setup confirms publication into the local OneDrive folder. Cloud delivery and reporting-PC receipt must be verified separately.</span></div>
+          </div>
+        </section>
+      )}
+      <ErrorAlert message={state.error} />
+      <div className="page-actions"><button className="text-button" type="button" onClick={onBack}><ArrowLeft /> Back</button><button className="primary" type="button" onClick={onContinue} disabled={!state.oneDriveRoot || busy}>Test selected accounts <ArrowRight weight="bold" /></button></div>
+    </WizardLayout>
+  );
+}
+
+function StageRow({ row }) {
+  const Icon = row.status === "success" ? CheckCircle : row.status === "error" ? XCircle : row.status === "running" ? SpinnerGap : Info;
+  return <article className={`stage-row ${row.status}`}><span><Icon className={row.status === "running" ? "spin" : ""} weight="fill" /></span><div><h3>{row.label}</h3><p>{row.message}</p></div><strong>{row.status === "success" ? "Complete" : row.status === "error" ? "Needs attention" : row.status === "running" ? "Running" : "Pending"}</strong></article>;
+}
+
+function TestScreen({ state, validationState, setupBusy, onBack, onApply }) {
+  const stageRows = mapSetupStages(state.stages);
+  const isReady = validationState === "ready";
+  return (
+    <WizardLayout screen={screens.TEST}>
+      <PageHeading eyebrow="Step 4 of 5" title="Test and apply synchronization" copy="The selected sources are checked again before any configuration changes. Setup then publishes each CSV locally and enables automatic sync." />
+      <section className="content-card test-card">
+        <div className={`test-hero ${isReady ? "ready" : state.error ? "error" : "working"}`} aria-live="polite">
+          {validationState === "checking" ? <SpinnerGap className="spin" /> : isReady ? <ShieldCheck weight="duotone" /> : <WarningCircle weight="duotone" />}
+          <div><h2>{validationState === "checking" ? "Validating selected accounts" : isReady ? "Selections are ready" : "Validation needs attention"}</h2><p>{validationState === "checking" ? "No settings are being changed yet." : isReady ? "Choose Apply setup to configure every selected account in one transaction." : "Review the message below, then return to the relevant step."}</p></div>
+        </div>
+        <div className="stage-list">
+          {stageRows.map((row) => <StageRow key={row.id} row={setupBusy && row.status === "pending" ? { ...row, status: "running", message: "Setup is processing this stage." } : row} />)}
+        </div>
+        <div className="local-note"><Info weight="fill" /><span><b>No cloud-delivery claim</b>A successful test proves the local AmmarTrading file and Windows automation. It does not prove that OneDrive has uploaded the file.</span></div>
+      </section>
+      <ErrorAlert message={state.error} />
+      <div className="page-actions"><button className="text-button" type="button" onClick={onBack} disabled={setupBusy}><ArrowLeft /> Back</button><button className="primary" type="button" onClick={onApply} disabled={!isReady || setupBusy}>{setupBusy ? <><SpinnerGap className="spin" /> Applying setup…</> : <>Apply setup and run test sync <Play weight="fill" /></>}</button></div>
+    </WizardLayout>
+  );
+}
+
+function ResultAccounts({ accounts }) {
+  return <div className="result-accounts">{accounts.map((account, index) => <article key={`${field(account, "accountNumber", "AccountNumber")}-${index}`}><span className="account-icon"><DesktopTower weight="duotone" /></span><div><h3>Account {field(account, "accountNumber", "AccountNumber")}</h3><p>{field(account, "brokerName", "BrokerName", "MT4 account")}</p><small>{field(account, "destination", "Destination", "Local AmmarTrading folder")}</small></div><span className="status-badge ready"><CheckCircle weight="fill" /> Published locally</span></article>)}</div>;
+}
+
+function FinishScreen({ state, actionBusy, onOpen, onRun, onStatus, onAdd, onExport }) {
+  const resultAccounts = arrayField(state.setupResult, "accounts", "Accounts");
+  return (
+    <WizardLayout screen={screens.FINISH}>
+      <section className="finish-hero"><span className="success-badge"><Check weight="bold" /></span><span className="eyebrow">Step 5 of 5</span><h1>Local synchronization is ready</h1><p>Every selected MT4 account was configured and published into its local OneDrive AmmarTrading folder.</p></section>
+      <div className="alert local-success"><Info weight="fill" /><span><b>Publication is local only.</b> OneDrive cloud delivery and physical receipt on the reporting PC are not verified by this VPS app.</span></div>
+      <ResultAccounts accounts={resultAccounts} />
+      <ErrorAlert message={state.error} />
+      <div className="finish-actions" aria-live="polite">
+        <button className="primary" type="button" onClick={onOpen} disabled={actionBusy}><FolderOpen /> Open AmmarTrading Folder</button>
+        <button className="secondary" type="button" onClick={onRun} disabled={actionBusy}><Play weight="fill" /> Run Sync Now</button>
+        <button className="secondary" type="button" onClick={onStatus} disabled={actionBusy}><Gauge /> View Status</button>
+        <button className="secondary" type="button" onClick={onAdd} disabled={actionBusy}><Plus /> Add Another MT4 Account</button>
+        <button className="text-button" type="button" onClick={onExport} disabled={actionBusy}><DownloadSimple /> Export Support Report</button>
+      </div>
+    </WizardLayout>
+  );
+}
+
+function MonitorScreen({ state, loading, activity, onRefresh, onRun, onOpen, onAdd, onExport }) {
+  const configured = state.configuredAccounts;
+  return (
+    <main className="page monitor-page">
+      <PageHeading eyebrow="Synchronization status" title="MT4 account monitoring" copy="Local publication and Windows automation status for the accounts configured on this VPS." actions={<button className="secondary" type="button" onClick={onRefresh} disabled={loading}><ArrowClockwise className={loading ? "spin" : ""} /> Refresh status</button>} />
+      <div className="monitor-summary" aria-live="polite"><div><HardDrives weight="duotone" /><span><b>{configured.length}</b> configured accounts</span></div><div><CheckCircle weight="duotone" /><span><b>Local</b> publication scope</span></div><div><ShieldCheck weight="duotone" /><span><b>Separate</b> cloud verification</span></div></div>
+      <div className="monitor-activity" aria-live="polite">{activity}</div>
+      {loading && configured.length === 0 ? <LoadingState label="Loading account status…" /> : configured.length ? <ResultAccounts accounts={configured} /> : <div className="empty-state"><DesktopTower weight="duotone" /><h2>No accounts configured</h2><p>Start setup to discover and select MT4 accounts on this VPS.</p></div>}
+      <ErrorAlert message={state.error} />
+      <div className="finish-actions"><button className="primary" type="button" onClick={onRun} disabled={loading || !configured.length}><Play weight="fill" /> Run Sync Now</button><button className="secondary" type="button" onClick={onOpen} disabled={loading || !configured.length}><FolderOpen /> Open AmmarTrading Folder</button><button className="secondary" type="button" onClick={onAdd} disabled={loading}><Plus /> Add MT4 Account</button><button className="text-button" type="button" onClick={onExport} disabled={loading}><DownloadSimple /> Export Support Report</button></div>
+      <div className="alert local-success"><Info weight="fill" /><span><b>Local status only.</b> Confirm OneDrive receipt on the reporting PC before relying on the report.</span></div>
     </main>
   );
 }
 
-function SuccessScreen({ form, result, onDashboard, onAddAnother }) {
-  return (
-    <main className="page wizard-page success-page">
-      <Stepper current={3} />
-      <section className="wizard-card success-card">
-        <div className="success-badge"><Check weight="bold" /></div>
-        <span className="eyebrow">Setup complete</span>
-        <h1>Sync is now running</h1>
-        <p><b>{form.name}</b> was added and local publishing is active. OneDrive will deliver the files to your reporting PC.</p>
-        <div className="success-route">
-          <span><DesktopTower weight="duotone" /><b>{form.name}</b></span><div className="route-line"><i /><i /><i /></div><span><CloudArrowUp weight="duotone" /><b>OneDrive</b></span>
-        </div>
-        <div className="destination success-destination"><FolderOpen weight="duotone" /><div><span>Local file location</span><b dir="ltr">{result?.destination || `OneDrive / AmmarTrading / ${form.account}`}</b></div><CheckCircle weight="fill" /></div>
-        <div className="cloud-proof-note"><Info weight="fill" /><span><b>Published locally</b> — cloud delivery is confirmed from the reporting PC after OneDrive finishes syncing.</span></div>
-        <div className="success-actions"><button className="primary large" type="button" onClick={onDashboard}>View all devices <ArrowRight /></button><button className="secondary" type="button" onClick={onAddAnother}><Plus /> Add another VPS</button></div>
-      </section>
-    </main>
-  );
+function WizardLayout({ screen, children }) {
+  return <main className="page wizard-page"><Progress current={screen} />{children}</main>;
 }
 
 export function App() {
-  const [screen, setScreen] = useState("overview");
-  const [form, setForm] = useState(initialForm);
-  const [errors, setErrors] = useState({});
-  const [phase, setPhase] = useState("idle");
-  const [accounts, setAccounts] = useState([]);
-  const [sources, setSources] = useState([]);
-  const [roots, setRoots] = useState([]);
-  const [loading, setLoading] = useState(true);
-  const [serviceError, setServiceError] = useState("");
-  const [setupError, setSetupError] = useState("");
-  const [setupResult, setSetupResult] = useState(null);
+  const [state, dispatch] = useReducer(reduceWizard, initialWizardState);
+  const [busy, setBusy] = useState({ startup: true, discovery: false, roots: false, validation: false, setup: false, action: false });
+  const [activity, setActivity] = useState("Starting AmmarTrading Sync…");
+  const [validationState, setValidationState] = useState("idle");
 
-  useEffect(() => { window.scrollTo({ top: 0, behavior: "smooth" }); }, [screen]);
+  const setBusyFlag = (name, value) => setBusy((current) => ({ ...current, [name]: value }));
+
+  async function loadSystem() {
+    setBusyFlag("startup", true);
+    dispatch({ type: "ERROR_CLEARED" });
+    setActivity("Checking this VPS…");
+    try {
+      const status = await wizardApi.getSystemStatus();
+      dispatch({ type: "SYSTEM_LOADED", status });
+      setActivity("System check complete.");
+      return status;
+    } catch (error) {
+      dispatch({ type: "ERROR_SET", error: safeMessage(error) });
+      setActivity("System check failed.");
+      return null;
+    } finally {
+      setBusyFlag("startup", false);
+    }
+  }
+
+  async function loadConfigured({ openMonitor = true } = {}) {
+    setBusyFlag("action", true);
+    try {
+      const response = await wizardApi.getConfiguredAccounts();
+      const accounts = arrayField(response, "accounts", "Accounts");
+      dispatch({ type: "CONFIGURED_LOADED", accounts });
+      if (openMonitor) dispatch({ type: "SCREEN_CHANGED", screen: screens.MONITOR });
+      setActivity(accounts.length ? "Account status is up to date." : "No accounts are configured yet.");
+      return accounts;
+    } catch (error) {
+      dispatch({ type: "ERROR_SET", error: safeMessage(error) });
+      return [];
+    } finally {
+      setBusyFlag("action", false);
+    }
+  }
+
   useEffect(() => {
-    let cancelled = false;
-    Promise.all([wizardApi.getDiscovery(), wizardApi.getAccounts()])
-      .then(([discovery, accountResponse]) => {
-        if (cancelled) return;
-        setSources(discovery.sources ?? []);
-        setRoots(discovery.oneDriveRoots ?? []);
-        setAccounts((accountResponse.accounts ?? []).map(mapApiAccount));
-      })
-      .catch((error) => { if (!cancelled) setServiceError(error.message); })
-      .finally(() => { if (!cancelled) setLoading(false); });
-    return () => { cancelled = true; };
+    let active = true;
+    (async () => {
+      const [systemResult, configuredResult] = await Promise.allSettled([
+        wizardApi.getSystemStatus(),
+        wizardApi.getConfiguredAccounts(),
+      ]);
+      if (!active) return;
+      if (systemResult.status === "fulfilled") dispatch({ type: "SYSTEM_LOADED", status: systemResult.value });
+      else dispatch({ type: "ERROR_SET", error: safeMessage(systemResult.reason) });
+      const configured = configuredResult.status === "fulfilled" ? arrayField(configuredResult.value, "accounts", "Accounts") : [];
+      dispatch({ type: "CONFIGURED_LOADED", accounts: configured });
+      if (configured.length) dispatch({ type: "SCREEN_CHANGED", screen: screens.MONITOR });
+      setActivity(configured.length ? "Configured account status loaded." : "System check complete.");
+      setBusy((current) => ({ ...current, startup: false }));
+    })();
+    return () => { active = false; };
   }, []);
 
-  const startAdd = () => {
-    setForm({ ...initialForm, path: sources[0]?.Path ?? "", oneDriveRoot: roots[0]?.Path ?? "" });
-    setErrors({});
-    setSetupError("");
-    setSetupResult(null);
-    setPhase("idle");
-    setScreen("form");
-  };
-  const validate = () => {
-    const nextErrors = { name: !form.name.trim(), account: form.account.length < 4, path: !form.path.trim(), oneDriveRoot: !form.oneDriveRoot.trim() };
-    setErrors(nextErrors);
-    if (!Object.values(nextErrors).some(Boolean)) { setPhase("ready"); setScreen("check"); }
-  };
-  const startSetup = async () => {
-    if (phase !== "ready") return;
-    setPhase("checking");
-    setSetupError("");
+  async function discoverAccounts({ clear = false } = {}) {
+    if (clear) dispatch({ type: "SELECTION_CLEARED" });
+    dispatch({ type: "SCREEN_CHANGED", screen: screens.ACCOUNTS });
+    setBusyFlag("discovery", true);
+    setActivity("Looking for MT4 reports on this VPS…");
     try {
-      const result = await wizardApi.runSetup({
-        vpsName: form.name.trim(),
-        expectedMT4Login: form.account,
-        sourceCsv: form.path,
-        oneDriveRoot: form.oneDriveRoot,
-      });
-      setSetupResult(result);
-      const refreshed = await wizardApi.getAccounts();
-      setAccounts((refreshed.accounts ?? []).map(mapApiAccount));
-      setScreen("success");
+      const response = await wizardApi.discoverMt4Accounts();
+      const accounts = arrayField(response, "accounts", "Accounts");
+      dispatch({ type: "DISCOVERY_LOADED", accounts });
+      setActivity(`${accounts.length} MT4 report${accounts.length === 1 ? "" : "s"} found. Only cards marked Ready can be selected.`);
     } catch (error) {
-      setSetupError(formatSetupError(error.message));
-      setPhase("ready");
+      dispatch({ type: "ERROR_SET", error: safeMessage(error) });
+      setActivity("MT4 discovery could not finish.");
+    } finally {
+      setBusyFlag("discovery", false);
     }
-  };
+  }
+
+  async function browseForCsv() {
+    setBusyFlag("discovery", true);
+    setActivity("Waiting for a local CSV selection…");
+    try {
+      const response = await wizardApi.browseForCsv();
+      let accounts = arrayField(response, "accounts", "Accounts");
+      if (!accounts.length) {
+        const discovered = await wizardApi.discoverMt4Accounts();
+        accounts = arrayField(discovered, "accounts", "Accounts");
+      }
+      dispatch({ type: "DISCOVERY_LOADED", accounts });
+      setActivity(`${accounts.length} validated MT4 report${accounts.length === 1 ? "" : "s"} shown.`);
+    } catch (error) {
+      if (error?.code !== "Cancelled") dispatch({ type: "ERROR_SET", error: safeMessage(error) });
+      setActivity(error?.code === "Cancelled" ? "Manual browse cancelled." : "The selected CSV could not be added.");
+    } finally {
+      setBusyFlag("discovery", false);
+    }
+  }
+
+  async function openOneDrive() {
+    setBusyFlag("roots", true);
+    dispatch({ type: "SCREEN_CHANGED", screen: screens.ONEDRIVE });
+    try {
+      const response = await wizardApi.getOneDriveRoots();
+      dispatch({ type: "ROOTS_LOADED", roots: arrayField(response, "roots", "Roots").length ? arrayField(response, "roots", "Roots") : arrayField(response, "oneDriveRoots", "OneDriveRoots") });
+    } catch (error) {
+      dispatch({ type: "ERROR_SET", error: safeMessage(error) });
+    } finally {
+      setBusyFlag("roots", false);
+    }
+  }
+
+  async function validateSelection() {
+    dispatch({ type: "SCREEN_CHANGED", screen: screens.TEST });
+    dispatch({ type: "STAGES_LOADED", stages: [] });
+    setValidationState("checking");
+    setBusyFlag("validation", true);
+    setActivity("Validating selected accounts…");
+    try {
+      const response = await wizardApi.validateSelection(buildSetupPayload(state));
+      const stages = arrayField(response, "stages", "Stages");
+      dispatch({ type: "STAGES_LOADED", stages: stages.length ? stages : [{ Code: "Validated", Status: "Success", Message: `${state.selectedDiscoveryIds.length} selected account source(s) passed validation.` }] });
+      setValidationState("ready");
+      setActivity("Selections are ready for setup.");
+    } catch (error) {
+      dispatch({ type: "ERROR_SET", error: safeMessage(error) });
+      setValidationState("error");
+      setActivity("Validation failed.");
+    } finally {
+      setBusyFlag("validation", false);
+    }
+  }
+
+  async function applySetup() {
+    setBusyFlag("setup", true);
+    dispatch({ type: "ERROR_CLEARED" });
+    setActivity("Applying setup and publishing local CSV files…");
+    try {
+      const result = await wizardApi.applySetup(buildSetupPayload(state));
+      dispatch({ type: "SETUP_COMPLETED", result });
+      dispatch({ type: "CONFIGURED_LOADED", accounts: arrayField(result, "accounts", "Accounts") });
+      setActivity("Local setup completed.");
+    } catch (error) {
+      dispatch({ type: "ERROR_SET", error: safeMessage(error) });
+      const stages = arrayField(error?.data, "stages", "Stages");
+      if (stages.length) dispatch({ type: "STAGES_LOADED", stages });
+      setActivity("Setup needs attention.");
+    } finally {
+      setBusyFlag("setup", false);
+    }
+  }
+
+  async function performAction(label, operation) {
+    setBusyFlag("action", true);
+    dispatch({ type: "ERROR_CLEARED" });
+    setActivity(`${label}…`);
+    try {
+      await operation();
+      setActivity(`${label} complete.`);
+    } catch (error) {
+      dispatch({ type: "ERROR_SET", error: safeMessage(error) });
+      setActivity(`${label} failed.`);
+    } finally {
+      setBusyFlag("action", false);
+    }
+  }
+
+  const selectedAccountNumbers = state.accounts.filter((account) => state.selectedDiscoveryIds.includes(discoveryId(account))).map(accountNumber);
+  const actionPayload = { accountNumbers: selectedAccountNumbers.length ? selectedAccountNumbers : state.configuredAccounts.map((account) => String(field(account, "accountNumber", "AccountNumber"))) };
+
+  const openFolder = () => performAction("Opening AmmarTrading folder", () => wizardApi.openReportingFolder(actionPayload));
+  const runSync = () => performAction("Running local sync", async () => { await wizardApi.runSyncNow(actionPayload); await loadConfigured({ openMonitor: state.screen === screens.MONITOR }); });
+  const exportReport = () => performAction("Exporting support report", () => wizardApi.exportSupportReport());
+  const viewStatus = async () => { dispatch({ type: "SCREEN_CHANGED", screen: screens.MONITOR }); await loadConfigured({ openMonitor: false }); };
+
+  if (busy.startup && !state.systemStatus) return <div className="app-shell" dir="ltr"><Header /><main className="startup-state" aria-live="polite"><SpinnerGap className="spin" /><h1>Checking this VPS</h1><p>AmmarTrading Sync is loading local system status.</p></main></div>;
 
   return (
     <div className="app-shell" dir="ltr">
-      <Header onHome={() => setScreen("overview")} />
-      {loading && <main className="page service-state"><SpinnerGap className="spin" /><h2>Checking this VPS...</h2><p>Looking for MT4 and OneDrive automatically.</p></main>}
-      {!loading && serviceError && screen === "overview" && <main className="page service-state error-state"><Info weight="fill" /><h2>Open the wizard from its launcher</h2><p>{serviceError}</p><small>Run the AmmarTrading Sync launcher on the Windows VPS.</small></main>}
-      {!loading && !serviceError && screen === "overview" && <EmptyIntro accounts={accounts} onAdd={startAdd} />}
-      {!loading && screen === "form" && <FormScreen form={form} setForm={setForm} errors={errors} sources={sources} roots={roots} serviceError={serviceError} onBack={() => setScreen("overview")} onNext={validate} />}
-      {!loading && screen === "check" && <CheckScreen form={form} phase={phase} setupError={setupError} onStart={startSetup} onBack={() => { setPhase("idle"); setScreen("form"); }} />}
-      {!loading && screen === "success" && <SuccessScreen form={form} result={setupResult} onDashboard={() => setScreen("overview")} onAddAnother={startAdd} />}
-      <footer><span>AmmarTrading Sync</span><span><LockKey /> Encrypted and secure connection</span></footer>
+      <Header showStatus={state.screen !== screens.MONITOR && state.configuredAccounts.length > 0} onStatus={viewStatus} />
+      {state.screen === screens.SYSTEM && <SystemScreen state={state} busy={busy.startup} onRefresh={loadSystem} onContinue={() => discoverAccounts({ clear: true })} dispatch={dispatch} />}
+      {state.screen === screens.ACCOUNTS && <AccountsScreen state={state} busy={busy.discovery} activity={activity} onRefresh={discoverAccounts} onBrowse={browseForCsv} onBack={() => dispatch({ type: "SCREEN_CHANGED", screen: screens.SYSTEM })} onContinue={openOneDrive} dispatch={dispatch} />}
+      {state.screen === screens.ONEDRIVE && <OneDriveScreen state={state} busy={busy.roots} onBack={() => dispatch({ type: "SCREEN_CHANGED", screen: screens.ACCOUNTS })} onContinue={validateSelection} dispatch={dispatch} />}
+      {state.screen === screens.TEST && <TestScreen state={state} validationState={validationState} setupBusy={busy.setup} onBack={() => dispatch({ type: "SCREEN_CHANGED", screen: screens.ONEDRIVE })} onApply={applySetup} />}
+      {state.screen === screens.FINISH && <FinishScreen state={state} actionBusy={busy.action} onOpen={openFolder} onRun={runSync} onStatus={viewStatus} onAdd={() => discoverAccounts({ clear: true })} onExport={exportReport} />}
+      {state.screen === screens.MONITOR && <MonitorScreen state={state} loading={busy.action} activity={activity} onRefresh={viewStatus} onRun={runSync} onOpen={openFolder} onAdd={() => discoverAccounts({ clear: true })} onExport={exportReport} />}
+      <footer><span>AmmarTrading Sync • Local Windows application</span><span><ShieldCheck weight="fill" /> Trading and Microsoft passwords are never requested</span></footer>
     </div>
   );
 }
