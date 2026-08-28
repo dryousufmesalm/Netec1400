@@ -1,6 +1,54 @@
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
+$script:AmmarTradingDriveTypeResolver = {
+    param([Parameter(Mandatory)][string]$VolumeRoot)
+    return (New-Object IO.DriveInfo($VolumeRoot)).DriveType
+}
+
+function Test-AmmarTradingUncPath {
+    param([Parameter(Mandatory)][string]$Path)
+    return $Path -match '^(?:[^:]+::)?[\\/]{2}'
+}
+
+function Resolve-AmmarTradingLocalPath {
+    param(
+        [Parameter(Mandatory)][string]$Path,
+        [Parameter(Mandatory)][ValidateSet('Leaf','Container')][string]$PathType,
+        [Parameter(Mandatory)][string]$Description
+    )
+
+    $expanded = [Environment]::ExpandEnvironmentVariables($Path.Trim())
+    if([string]::IsNullOrWhiteSpace($expanded)) { throw "$Description is required." }
+    if(Test-AmmarTradingUncPath -Path $expanded) { throw "$Description must use a local filesystem path; UNC paths are not allowed." }
+    if(-not (Test-Path -LiteralPath $expanded -PathType $PathType)) { throw "$Description was not found: $expanded" }
+
+    $resolved = Resolve-Path -LiteralPath $expanded -ErrorAction Stop
+    if($resolved.Provider.Name -cne 'FileSystem') { throw "$Description must use a local filesystem path." }
+    $providerPath = [string]$resolved.ProviderPath
+    if(Test-AmmarTradingUncPath -Path $providerPath) { throw "$Description must use a local filesystem path; UNC paths are not allowed." }
+
+    $drive = $resolved.Drive
+    if($null -eq $drive) { throw "$Description must use a local filesystem volume." }
+    $displayRoot = if($drive.PSObject.Properties['DisplayRoot']) { [string]$drive.DisplayRoot } else { '' }
+    if(-not [string]::IsNullOrWhiteSpace($displayRoot) -and (Test-AmmarTradingUncPath -Path $displayRoot)) {
+        throw "$Description must use a local filesystem volume; mapped network drives are not allowed."
+    }
+
+    $volumeRoot = [IO.Path]::GetPathRoot($providerPath)
+    if([string]::IsNullOrWhiteSpace($volumeRoot)) { throw "$Description must use a local filesystem volume." }
+    try {
+        $driveType = & $script:AmmarTradingDriveTypeResolver $volumeRoot
+    } catch {
+        throw "$Description local filesystem volume could not be verified."
+    }
+    if([IO.DriveType]$driveType -eq [IO.DriveType]::Network) {
+        throw "$Description must use a local filesystem volume; mapped network drives are not allowed."
+    }
+
+    return [IO.Path]::GetFullPath($providerPath)
+}
+
 function Get-AmmarTradingDestinationPath {
     param(
         [Parameter(Mandatory)][string]$OneDriveRoot,
@@ -41,10 +89,14 @@ function Get-AmmarTradingMt4Accounts {
     $candidates = [System.Collections.Generic.List[object]]::new()
     $seenPaths = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::OrdinalIgnoreCase)
 
-    if(-not [string]::IsNullOrWhiteSpace($TerminalDataRoot) -and (Test-Path -LiteralPath $TerminalDataRoot -PathType Container)) {
-        foreach($terminal in @(Get-ChildItem -LiteralPath $TerminalDataRoot -Directory -ErrorAction SilentlyContinue | Sort-Object FullName)) {
+    $resolvedTerminalRoot = $null
+    if(-not [string]::IsNullOrWhiteSpace($TerminalDataRoot)) {
+        try { $resolvedTerminalRoot = Resolve-AmmarTradingLocalPath -Path $TerminalDataRoot -PathType Container -Description 'MT4 terminal data root' } catch { $resolvedTerminalRoot = $null }
+    }
+    if($null -ne $resolvedTerminalRoot) {
+        foreach($terminal in @(Get-ChildItem -LiteralPath $resolvedTerminalRoot -Directory -ErrorAction SilentlyContinue | Sort-Object FullName)) {
             $csv = Join-Path $terminal.FullName 'MQL4\Files\AGOLD___Baskets.csv'
-            if(-not (Test-Path -LiteralPath $csv -PathType Leaf)) { continue }
+            try { $resolvedCsv = Resolve-AmmarTradingLocalPath -Path $csv -PathType Leaf -Description 'MT4 source CSV' } catch { continue }
 
             $terminalName = $terminal.Name
             $origin = Join-Path $terminal.FullName 'origin.txt'
@@ -57,7 +109,6 @@ function Get-AmmarTradingMt4Accounts {
                 }
             }
 
-            $resolvedCsv = (Resolve-Path -LiteralPath $csv -ErrorAction Stop).Path
             if($seenPaths.Add($resolvedCsv)) {
                 $candidates.Add([pscustomobject]@{
                     SourceCsv = $resolvedCsv
@@ -71,8 +122,8 @@ function Get-AmmarTradingMt4Accounts {
     foreach($manualPath in @($ManualCsv)) {
         if([string]::IsNullOrWhiteSpace([string]$manualPath)) { continue }
         $expanded = [Environment]::ExpandEnvironmentVariables(([string]$manualPath).Trim())
-        if([IO.Path]::GetExtension($expanded) -ine '.csv' -or -not (Test-Path -LiteralPath $expanded -PathType Leaf)) { continue }
-        $resolvedCsv = (Resolve-Path -LiteralPath $expanded -ErrorAction Stop).Path
+        if([IO.Path]::GetExtension($expanded) -ine '.csv') { continue }
+        try { $resolvedCsv = Resolve-AmmarTradingLocalPath -Path $expanded -PathType Leaf -Description 'Manual source CSV' } catch { continue }
         if($seenPaths.Add($resolvedCsv)) {
             $candidates.Add([pscustomobject]@{
                 SourceCsv = $resolvedCsv
@@ -152,11 +203,15 @@ function Get-MoneyMachineSetupDiscovery {
     }
 
     $sources = [System.Collections.Generic.List[object]]::new()
-    if(-not [string]::IsNullOrWhiteSpace($TerminalDataRoot) -and (Test-Path -LiteralPath $TerminalDataRoot -PathType Container)) {
-        foreach($terminalDirectory in @(Get-ChildItem -LiteralPath $TerminalDataRoot -Directory -ErrorAction SilentlyContinue)) {
+    $resolvedTerminalRoot = $null
+    if(-not [string]::IsNullOrWhiteSpace($TerminalDataRoot)) {
+        try { $resolvedTerminalRoot = Resolve-AmmarTradingLocalPath -Path $TerminalDataRoot -PathType Container -Description 'MT4 terminal data root' } catch { $resolvedTerminalRoot = $null }
+    }
+    if($null -ne $resolvedTerminalRoot) {
+        foreach($terminalDirectory in @(Get-ChildItem -LiteralPath $resolvedTerminalRoot -Directory -ErrorAction SilentlyContinue)) {
             $sourcePath = Join-Path $terminalDirectory.FullName 'MQL4\Files\AGOLD___Baskets.csv'
-            if(-not (Test-Path -LiteralPath $sourcePath -PathType Leaf)) { continue }
-            $file = Get-Item -LiteralPath $sourcePath -ErrorAction Stop
+            try { $resolvedSourcePath = Resolve-AmmarTradingLocalPath -Path $sourcePath -PathType Leaf -Description 'MT4 source CSV' } catch { continue }
+            $file = Get-Item -LiteralPath $resolvedSourcePath -ErrorAction Stop
             $sources.Add([pscustomobject]@{
                 Path = $file.FullName
                 TerminalId = $terminalDirectory.Name
@@ -188,9 +243,8 @@ function Test-MoneyMachineSetupRequest {
     if($normalizedLogin -notmatch '^\d{4,20}$') { throw 'MT4 account number must contain 4 to 20 digits.' }
 
     $expandedSource = [Environment]::ExpandEnvironmentVariables($SourceCsv.Trim())
-    if(-not (Test-Path -LiteralPath $expandedSource -PathType Leaf)) { throw "Source CSV was not found: $expandedSource" }
     if([IO.Path]::GetExtension($expandedSource) -ine '.csv') { throw 'Source file must use the .csv extension.' }
-    $resolvedSource = (Resolve-Path -LiteralPath $expandedSource).Path
+    $resolvedSource = Resolve-AmmarTradingLocalPath -Path $expandedSource -PathType Leaf -Description 'Source CSV'
 
     $expandedOneDrive = [Environment]::ExpandEnvironmentVariables($OneDriveRoot.Trim())
     if(-not (Test-Path -LiteralPath $expandedOneDrive -PathType Container)) { throw "OneDrive root was not found: $expandedOneDrive" }

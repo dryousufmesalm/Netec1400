@@ -53,6 +53,7 @@ try {
     Assert-ThrowsLike -Expected 'account number' -Action { Test-MoneyMachineSetupRequest -VpsName 'VPS' -ExpectedMT4Login '89A' -SourceCsv $sourceCsv -OneDriveRoot $oneDriveRoot | Out-Null }
     Assert-ThrowsLike -Expected 'Source CSV' -Action { Test-MoneyMachineSetupRequest -VpsName 'VPS' -ExpectedMT4Login '892522910' -SourceCsv (Join-Path $tempRoot 'missing.csv') -OneDriveRoot $oneDriveRoot | Out-Null }
     Assert-ThrowsLike -Expected '.csv' -Action { Test-MoneyMachineSetupRequest -VpsName 'VPS' -ExpectedMT4Login '892522910' -SourceCsv $notCsv -OneDriveRoot $oneDriveRoot | Out-Null }
+    Assert-ThrowsLike -Expected 'local filesystem' -Action { Test-MoneyMachineSetupRequest -VpsName 'VPS' -ExpectedMT4Login '892522910' -SourceCsv '\\localhost\AmmarTradingMissingShare\AGOLD___Baskets.csv' -OneDriveRoot $oneDriveRoot | Out-Null }
     Assert-ThrowsLike -Expected 'OneDrive root' -Action { Test-MoneyMachineSetupRequest -VpsName 'VPS' -ExpectedMT4Login '892522910' -SourceCsv $sourceCsv -OneDriveRoot (Join-Path $tempRoot 'missing-onedrive') | Out-Null }
     Assert-ThrowsLike -Expected 'AccountNumber' -Action { Test-MoneyMachineSetupRequest -VpsName 'VPS' -ExpectedMT4Login '9999' -SourceCsv $sourceCsv -OneDriveRoot $oneDriveRoot | Out-Null }
 

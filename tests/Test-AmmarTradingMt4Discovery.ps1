@@ -137,6 +137,41 @@ try {
     Assert-Equal -Actual $manual[0].TerminalId -Expected 'Manual' -Message 'Manual CSV discovery must use a stable terminal identifier.'
     Assert-Equal -Actual $manual[0].Eligibility -Expected 'Ready' -Message 'Manual browse must use the same identity validation as MT4 discovery.'
 
+    $setupModule = Get-Module -Name MoneyMachineSyncSetup
+    & $setupModule {
+        $script:AmmarTradingDriveTypeResolver = { param([string]$Root) [IO.DriveType]::Network }
+    }
+    try {
+        $mappedTerminalAccounts = @(Get-AmmarTradingMt4Accounts -TerminalDataRoot $terminalRoot)
+        Assert-Equal -Actual $mappedTerminalAccounts.Count -Expected 0 -Message 'A terminal root on a mapped network drive must not produce discovery candidates.'
+        $mappedManualAccounts = @(Get-AmmarTradingMt4Accounts -TerminalDataRoot (Join-Path $TestDrive 'missing-terminal-root') -ManualCsv @($manualCsv))
+        Assert-Equal -Actual $mappedManualAccounts.Count -Expected 0 -Message 'A manual CSV on a mapped network drive must not become eligible.'
+        $mappedCompatibilityDiscovery = Get-MoneyMachineSetupDiscovery -OneDriveCandidates @() -TerminalDataRoot $terminalRoot
+        Assert-Equal -Actual @($mappedCompatibilityDiscovery.Sources).Count -Expected 0 -Message 'Compatibility discovery must reject a mapped network terminal root.'
+        $mappedSetupRejected = $false
+        try {
+            Test-MoneyMachineSetupRequest -VpsName 'Network source' -ExpectedMT4Login '10000001' -SourceCsv $freshCsv -OneDriveRoot $manualDirectory | Out-Null
+        } catch {
+            if($_.Exception.Message -notmatch 'local filesystem') { throw }
+            $mappedSetupRejected = $true
+        }
+        Assert-True -Condition $mappedSetupRejected -Message 'Setup validation must reject a source on a mapped network drive.'
+    } finally {
+        Import-Module -Name $SetupModulePath -Force -ErrorAction Stop
+    }
+
+    $uncSource = '\\localhost\AmmarTradingMissingShare\AGOLD___Baskets.csv'
+    $uncAccounts = @(Get-AmmarTradingMt4Accounts -TerminalDataRoot '\\localhost\AmmarTradingMissingShare' -ManualCsv @($uncSource))
+    Assert-Equal -Actual $uncAccounts.Count -Expected 0 -Message 'UNC terminal and manual paths must not produce discovery candidates.'
+    $uncSetupRejected = $false
+    try {
+        Test-MoneyMachineSetupRequest -VpsName 'UNC source' -ExpectedMT4Login '10000001' -SourceCsv $uncSource -OneDriveRoot $manualDirectory | Out-Null
+    } catch {
+        if($_.Exception.Message -notmatch 'local filesystem') { throw }
+        $uncSetupRejected = $true
+    }
+    Assert-True -Condition $uncSetupRejected -Message 'Setup validation must reject UNC syntax before checking reachability.'
+
     $identity = Get-AmmarTradingCsvIdentity -Path $freshCsv
     Assert-Equal -Actual ($identity.PSObject.Properties.Name -join ',') -Expected 'AccountNumber,BrokerName,SchemaVersion,Status' -Message 'The bounded identity probe must return only identity and status metadata.'
     Assert-Equal -Actual $identity.Status -Expected 'Ready' -Message 'The bounded probe must accept a complete schema-v3 identity row.'
