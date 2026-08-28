@@ -19,12 +19,6 @@ import {
 } from "@phosphor-icons/react";
 import { wizardApi } from "./api.js";
 
-const seedAccounts = [
-  { id: 1, name: "VPS London 01", account: "1024587", files: 18, updated: "2 minutes ago" },
-  { id: 2, name: "VPS New York", account: "2048651", files: 12, updated: "5 minutes ago" },
-  { id: 3, name: "VPS Frankfurt", account: "3097742", files: 9, updated: "8 minutes ago" },
-];
-
 const initialForm = {
   name: "",
   account: "",
@@ -263,14 +257,6 @@ export function App() {
   useEffect(() => { window.scrollTo({ top: 0, behavior: "smooth" }); }, [screen]);
   useEffect(() => {
     let cancelled = false;
-    const demo = new URLSearchParams(window.location.search).get("demo") === "1";
-    if (demo) {
-      setAccounts(seedAccounts);
-      setSources([{ Path: "C:\\MT4\\MQL4\\Files\\AGOLD___Baskets.csv", TerminalId: "DEMO" }]);
-      setRoots([{ Path: "C:\\Users\\Trader\\OneDrive - AmmarTrading", Name: "OneDrive - AmmarTrading" }]);
-      setLoading(false);
-      return () => { cancelled = true; };
-    }
     Promise.all([wizardApi.getDiscovery(), wizardApi.getAccounts()])
       .then(([discovery, accountResponse]) => {
         if (cancelled) return;

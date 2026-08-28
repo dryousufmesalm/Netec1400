@@ -1,5 +1,7 @@
 const BRIDGE_VERSION = 1;
 const DEFAULT_TIMEOUT_MS = 30_000;
+const HOST_UNAVAILABLE_MESSAGE = "The Windows host is unavailable. Close and reopen AmmarTrading Sync, then try again.";
+const MISSING_HOST_MESSAGE = "AmmarTrading Sync must be opened from the installed Windows app because the WebView2 host is unavailable.";
 const nativeCommands = Object.freeze([
   "getSystemStatus",
   "discoverMt4Accounts",
@@ -91,10 +93,10 @@ export function createNativeWizardApi(webview, { timeoutMs = DEFAULT_TIMEOUT_MS,
 
       try {
         webview.postMessage({ version: BRIDGE_VERSION, id, command, payload });
-      } catch (error) {
+      } catch {
         pendingRequests.delete(id);
         clearTimeout(timeout);
-        reject(new WizardApiError(error instanceof Error ? error.message : "The Windows host could not receive the request.", {
+        reject(new WizardApiError(HOST_UNAVAILABLE_MESSAGE, {
           code: "HostUnavailable",
         }));
       }
@@ -152,8 +154,7 @@ export function createWizardApi(fetchImpl) {
 }
 
 function createMissingHostApi() {
-  const errorMessage = "AmmarTrading Sync must be opened from the installed Windows app because the WebView2 host is unavailable.";
-  const reject = () => Promise.reject(new WizardApiError(errorMessage, { code: "NativeHostUnavailable" }));
+  const reject = () => Promise.reject(new WizardApiError(MISSING_HOST_MESSAGE, { code: "MissingHost" }));
   return Object.fromEntries([...nativeCommands, "getDiscovery", "getAccounts", "runSetup"].map((name) => [name, reject]));
 }
 
@@ -163,13 +164,8 @@ function getBrowserWebView() {
   return webview && typeof webview.postMessage === "function" && typeof webview.addEventListener === "function" ? webview : null;
 }
 
-function isExplicitBrowserTest() {
-  return typeof window !== "undefined" && new URLSearchParams(window.location.search).get("demo") === "1";
+export function createProductionWizardApi(webview = getBrowserWebView()) {
+  return webview ? createNativeWizardApi(webview) : createMissingHostApi();
 }
 
-const browserWebView = getBrowserWebView();
-export const wizardApi = browserWebView
-  ? createNativeWizardApi(browserWebView)
-  : isExplicitBrowserTest()
-    ? createWizardApi(window.fetch.bind(window))
-    : createMissingHostApi();
+export const wizardApi = createProductionWizardApi();

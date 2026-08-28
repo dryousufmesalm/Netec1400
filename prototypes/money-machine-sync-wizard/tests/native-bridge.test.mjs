@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { createNativeWizardApi, WizardApiError } from "../src/api.js";
+import { createNativeWizardApi, createProductionWizardApi, WizardApiError } from "../src/api.js";
 
 function createFakeWebView() {
   const handlers = new Set();
@@ -121,4 +121,56 @@ test("rejects timed out requests and clears their timer", async () => {
   });
 
   webview.reply({ version: 1, id: "req-1", ok: true, code: "Success", data: {} });
+});
+
+test("production transport selects WebView2 when it is present", async () => {
+  const webview = createFakeWebView();
+  const api = createProductionWizardApi(webview);
+
+  const pending = api.getSystemStatus();
+  assert.deepEqual(webview.sent, [{ version: 1, id: webview.sent[0].id, command: "getSystemStatus", payload: {} }]);
+  webview.reply({ version: 1, id: webview.sent[0].id, ok: true, code: "Success", data: { ready: true } });
+
+  assert.deepEqual(await pending, { ready: true });
+});
+
+test("production transport rejects a missing WebView2 host even when a demo query is present", async () => {
+  const originalWindow = globalThis.window;
+  globalThis.window = { location: { search: "?demo=1" } };
+  try {
+    const api = createProductionWizardApi();
+    await assert.rejects(api.getSystemStatus(), (error) => {
+      assert.ok(error instanceof WizardApiError);
+      assert.equal(error.code, "MissingHost");
+      assert.match(error.message, /installed Windows app/i);
+      return true;
+    });
+  } finally {
+    if (originalWindow === undefined) delete globalThis.window;
+    else globalThis.window = originalWindow;
+  }
+});
+
+test("uses a fixed safe host error when postMessage throws and clears the pending request", async () => {
+  const webview = createFakeWebView();
+  let postShouldThrow = true;
+  webview.postMessage = (message) => {
+    if (postShouldThrow) throw new Error("C:\\Users\\Trader\\secret-path");
+    webview.sent.push(message);
+  };
+  let nextId = 0;
+  const api = createNativeWizardApi(webview, { idFactory: () => `req-${++nextId}`, timeoutMs: 50 });
+
+  await assert.rejects(api.getSystemStatus(), (error) => {
+    assert.ok(error instanceof WizardApiError);
+    assert.equal(error.code, "HostUnavailable");
+    assert.equal(error.message, "The Windows host is unavailable. Close and reopen AmmarTrading Sync, then try again.");
+    assert.doesNotMatch(error.message, /secret-path/);
+    return true;
+  });
+
+  postShouldThrow = false;
+  const pending = api.getSystemStatus();
+  webview.reply({ version: 1, id: "req-2", ok: true, code: "Success", data: { ready: true } });
+  assert.deepEqual(await pending, { ready: true });
 });

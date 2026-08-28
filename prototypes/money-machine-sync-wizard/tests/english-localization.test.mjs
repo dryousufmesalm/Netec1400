@@ -15,6 +15,25 @@ if (!deployedBundleName) throw new Error("Deployed WizardApp index does not refe
 const deployedBundle = await readFile(path.join(deployedAppRoot, "assets", deployedBundleName), "utf8");
 const deployedLauncher = await readFile(path.join(path.dirname(deployedAppRoot), "Start-MoneyMachineSyncWizard.cmd"), "utf8");
 const arabicText = /[\u0600-\u06ff]/;
+const testApiModuleId = "\0english-localization-api";
+const testApiModule = `
+import { createWizardApi } from "/src/api.js";
+
+const fetchImpl = async (url) => {
+  const payload = url.endsWith("/api/setup")
+    ? { ok: true, status: "Success", destination: "C:\\\\OneDrive\\\\AmmarTrading\\\\Account_7788451\\\\Baskets.csv" }
+    : url.endsWith("/api/discovery")
+      ? {
+        ok: true,
+        sources: [{ Path: "C:\\\\MT4\\\\MQL4\\\\Files\\\\AGOLD___Baskets.csv", TerminalId: "TEST" }],
+        oneDriveRoots: [{ Path: "C:\\\\OneDrive - AmmarTrading", Name: "OneDrive - AmmarTrading" }],
+      }
+      : { ok: true, accounts: [] };
+  return new Response(JSON.stringify(payload), { status: 200, headers: { "content-type": "application/json" } });
+};
+
+export const wizardApi = createWizardApi(fetchImpl);
+`;
 
 test("the UI source uses the canonical AmmarTrading product and destination names", () => {
   assert.match(appSource, /AmmarTrading Sync/);
@@ -37,6 +56,21 @@ test("the complete wizard renders in English from left to right", async (t) => {
     root: projectRoot,
     logLevel: "silent",
     server: { host: "127.0.0.1", port: 0 },
+    plugins: [{
+      name: "english-localization-test-api",
+      enforce: "pre",
+      transform(code, id) {
+        if (id.endsWith("/src/App.jsx")) return code.replace('from "./api.js"', 'from "virtual:english-localization-api"');
+        return null;
+      },
+      resolveId(source, importer) {
+        if (source === "virtual:english-localization-api") return testApiModuleId;
+        return null;
+      },
+      load(id) {
+        return id === testApiModuleId ? testApiModule : null;
+      },
+    }],
   });
   await server.listen();
   t.after(() => server.close());
@@ -49,16 +83,8 @@ test("the complete wizard renders in English from left to right", async (t) => {
   t.after(() => browser.close());
 
   const page = await browser.newPage();
-  await page.route("**/api/**", async (route) => {
-    const pathname = new URL(route.request().url()).pathname;
-    const payload = pathname === "/api/setup"
-      ? { ok: true, status: "Success", destination: "C:\\OneDrive\\AmmarTrading\\Account_7788451\\Baskets.csv" }
-      : { ok: true, accounts: [] };
-    await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(payload) });
-  });
-
   const address = server.httpServer.address();
-  await page.goto(`http://127.0.0.1:${address.port}/?demo=1`, { waitUntil: "networkidle" });
+  await page.goto(`http://127.0.0.1:${address.port}/`, { waitUntil: "networkidle" });
 
   const assertEnglishScreen = async () => {
     const bodyText = await page.locator("body").innerText();
