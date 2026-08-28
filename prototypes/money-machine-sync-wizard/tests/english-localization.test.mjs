@@ -13,6 +13,7 @@ const deployedIndex = await readFile(path.join(deployedAppRoot, "index.html"), "
 const deployedBundleName = deployedIndex.match(/src="\/assets\/([^"?]+\.js)"/)?.[1];
 if (!deployedBundleName) throw new Error("Deployed WizardApp index does not reference a JavaScript bundle.");
 const deployedBundle = await readFile(path.join(deployedAppRoot, "assets", deployedBundleName), "utf8");
+const deployedLauncher = await readFile(path.join(path.dirname(deployedAppRoot), "Start-MoneyMachineSyncWizard.cmd"), "utf8");
 const arabicText = /[\u0600-\u06ff]/;
 
 test("the UI source uses the canonical AmmarTrading product and destination names", () => {
@@ -27,6 +28,8 @@ test("the deployed WizardApp contains only canonical product-facing naming", () 
   assert.match(deployedBundle, /AmmarTrading Sync/);
   assert.match(deployedBundle, /OneDrive \/ AmmarTrading/);
   assert.doesNotMatch(`${deployedIndex}\n${deployedBundle}`, /Money Machine|AmarTrading|Start-MoneyMachineSyncWizard\.cmd/);
+  assert.match(deployedLauncher, /AmmarTrading Sync/);
+  assert.doesNotMatch(deployedLauncher, /Money Machine|AmarTrading/);
 });
 
 test("the complete wizard renders in English from left to right", async (t) => {
