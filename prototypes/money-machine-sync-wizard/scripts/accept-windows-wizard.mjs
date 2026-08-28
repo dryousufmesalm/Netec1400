@@ -13,7 +13,7 @@ const consoleErrors = [];
 let expectedValidationResponses = 0;
 
 try {
-  const context = await browser.newContext({ viewport: { width: 1440, height: 1024 }, deviceScaleFactor: 1, locale: "ar-EG" });
+  const context = await browser.newContext({ viewport: { width: 1440, height: 1024 }, deviceScaleFactor: 1, locale: "en-GB" });
   const page = await context.newPage();
   page.on("response", (response) => { if (response.status() === 422 && response.url().endsWith("/api/setup")) expectedValidationResponses += 1; });
   page.on("console", (message) => {
@@ -22,27 +22,27 @@ try {
   page.on("pageerror", (error) => consoleErrors.push(error.message));
 
   await page.goto(baseUrl, { waitUntil: "networkidle" });
-  await page.getByRole("heading", { name: "كل تقارير الـVPS في مكان واحد" }).waitFor();
+  await page.getByRole("heading", { name: "All VPS reports in one place" }).waitFor();
   await page.screenshot({ path: path.join(evidenceRoot, "01-real-overview-empty.png") });
 
-  await page.getByRole("button", { name: "إضافة VPS جديد" }).click();
+  await page.getByRole("button", { name: "Add a new VPS" }).click();
   await page.screenshot({ path: path.join(evidenceRoot, "02-real-form.png") });
-  const nameInput = page.getByPlaceholder("مثال: VPS لندن الرئيسي");
-  const accountInput = page.getByPlaceholder("مثال: 1024587");
+  const nameInput = page.getByPlaceholder("Example: Main London VPS");
+  const accountInput = page.getByPlaceholder("Example: 1024587");
   await nameInput.fill("VPS Acceptance 01");
   await accountInput.fill("9999");
-  await page.getByRole("button", { name: /متابعة للفحص/ }).click();
-  await page.getByRole("heading", { name: "كل شيء جاهز" }).waitFor();
-  await page.getByRole("button", { name: /إعداد المزامنة الآن/ }).click();
-  await page.getByText(/رقم حساب MT4 لا يطابق رقم الحساب داخل ملف CSV/).waitFor({ timeout: 15000 });
+  await page.getByRole("button", { name: /Continue to readiness check/ }).click();
+  await page.getByRole("heading", { name: "Everything is ready" }).waitFor();
+  await page.getByRole("button", { name: /Set up sync now/ }).click();
+  await page.getByText(/MT4 account number does not match the account in the CSV file/).waitFor({ timeout: 15000 });
   await page.screenshot({ path: path.join(evidenceRoot, "03-real-account-error.png") });
 
-  await page.getByRole("button", { name: /رجوع/ }).click();
+  await page.getByRole("button", { name: /Back/ }).click();
   await accountInput.fill("892522910");
-  await page.getByRole("button", { name: /متابعة للفحص/ }).click();
-  await page.getByRole("button", { name: /إعداد المزامنة الآن/ }).click();
-  await page.getByRole("heading", { name: "المزامنة تعمل الآن" }).waitFor({ timeout: 20000 });
-  await page.getByText(/تم النشر محليًا/).waitFor();
+  await page.getByRole("button", { name: /Continue to readiness check/ }).click();
+  await page.getByRole("button", { name: /Set up sync now/ }).click();
+  await page.getByRole("heading", { name: "Sync is now running" }).waitFor({ timeout: 20000 });
+  await page.getByText(/Published locally/).waitFor();
   const destinationCard = await page.locator(".success-destination").boundingBox();
   const destinationText = await page.locator(".success-destination b").boundingBox();
   if (!destinationCard || !destinationText || destinationText.x < destinationCard.x || destinationText.x + destinationText.width > destinationCard.x + destinationCard.width) {
@@ -50,12 +50,12 @@ try {
   }
   await page.screenshot({ path: path.join(evidenceRoot, "04-real-success.png") });
 
-  await page.getByRole("button", { name: /عرض كل الأجهزة/ }).click();
+  await page.getByRole("button", { name: /View all devices/ }).click();
   await page.getByText("VPS Acceptance 01", { exact: true }).waitFor();
   await page.screenshot({ path: path.join(evidenceRoot, "05-real-updated-overview.png") });
   await context.close();
 
-  const mobileContext = await browser.newContext({ viewport: { width: 390, height: 844 }, deviceScaleFactor: 1, locale: "ar-EG" });
+  const mobileContext = await browser.newContext({ viewport: { width: 390, height: 844 }, deviceScaleFactor: 1, locale: "en-GB" });
   const mobilePage = await mobileContext.newPage();
   mobilePage.on("console", (message) => { if (message.type() === "error") consoleErrors.push(message.text()); });
   mobilePage.on("pageerror", (error) => consoleErrors.push(error.message));

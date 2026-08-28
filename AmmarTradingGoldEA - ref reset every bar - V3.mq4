@@ -192,11 +192,6 @@
       //+------------------------------------------------------------------+
       #define TELEMETRY_FILE_NAME "AGOLD___Baskets.csv"
 
-      // Some terminals/builds may not expose FILE_UTF8; fallback to default encoding.
-      #ifndef FILE_UTF8
-      #define FILE_UTF8 0
-      #endif
-
       bool     g_LastOpenBlockedByExposureCap = false;
 
       // Active basket telemetry state (no per-trade logging)
@@ -1122,7 +1117,7 @@
       bool TelemetryReadHeader(string &header)
       {
          header = "";
-         int fh = FileOpen(TELEMETRY_FILE_NAME, FILE_READ | FILE_TXT | FILE_UTF8);
+         int fh = FileOpen(TELEMETRY_FILE_NAME, FILE_READ | FILE_TXT | FILE_ANSI, 0, CP_UTF8);
          if(fh < 0) return false;
          header = FileReadString(fh);
          FileClose(fh);
@@ -1186,7 +1181,7 @@
 
       bool TelemetryRestoreRunContextFromCSV()
       {
-         int fh = FileOpen(TELEMETRY_FILE_NAME, FILE_READ | FILE_TXT | FILE_UTF8);
+         int fh = FileOpen(TELEMETRY_FILE_NAME, FILE_READ | FILE_TXT | FILE_ANSI, 0, CP_UTF8);
          if(fh < 0) return false;
 
          string header = FileReadString(fh);
@@ -1240,7 +1235,7 @@
             return false;
          }
 
-         int fh = FileOpen(TELEMETRY_FILE_NAME, FILE_WRITE | FILE_TXT | FILE_UTF8);
+         int fh = FileOpen(TELEMETRY_FILE_NAME, FILE_WRITE | FILE_TXT | FILE_ANSI, 0, CP_UTF8);
          if(fh < 0)
          {
             Print("Telemetry: unable to create schema-v3 CSV err=", GetLastError());
@@ -1695,7 +1690,7 @@
          for(int attempt = 0; attempt < 2 && !wrote; attempt++)
          {
             // Use FILE_TXT + manual comma-separated lines to avoid CSV-escaping differences.
-            int fh = FileOpen(fileName, FILE_READ | FILE_WRITE | FILE_TXT | FILE_UTF8);
+            int fh = FileOpen(fileName, FILE_READ | FILE_WRITE | FILE_TXT | FILE_ANSI, 0, CP_UTF8);
             if(fh < 0)
             {
                Print("Telemetry: FileOpen failed attempt=", attempt, " err=", GetLastError());
@@ -1705,7 +1700,15 @@
             else
             {
                // Never write schema-v3 beneath a legacy or externally-corrupted header.
-               if(FileSize(fh) == 0 || !TelemetryFileIsSchemaV3())
+               if(FileSize(fh) == 0)
+               {
+                  FileClose(fh);
+                  Print("Telemetry: write skipped because CSV header is not schema v3.");
+                  break;
+               }
+               FileSeek(fh, 0, SEEK_SET);
+               string header = FileReadString(fh);
+               if(!TelemetryHeaderIsSchemaV3(header))
                {
                   FileClose(fh);
                   Print("Telemetry: write skipped because CSV header is not schema v3.");

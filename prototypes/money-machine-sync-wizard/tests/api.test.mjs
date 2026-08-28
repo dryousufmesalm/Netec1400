@@ -27,7 +27,7 @@ test("setup sends the exact backend payload", async () => {
   const calls = [];
   const api = createWizardApi(async (url, options) => {
     calls.push({ url, options });
-    return new Response(JSON.stringify({ ok: true, status: "Success", destination: "C:\\OneDrive\\MoneyMachine\\Account_7788451\\Baskets.csv" }), {
+    return new Response(JSON.stringify({ ok: true, status: "Success", destination: "C:\\OneDrive\\AmarTrading\\Account_7788451\\Baskets.csv" }), {
       status: 200,
       headers: { "content-type": "application/json" },
     });
@@ -49,7 +49,7 @@ test("setup sends the exact backend payload", async () => {
 });
 
 test("non-success responses expose the server message", async () => {
-  const api = createWizardApi(async () => new Response(JSON.stringify({ ok: false, code: "RequestFailed", message: "رقم الحساب لا يطابق ملف CSV" }), {
+  const api = createWizardApi(async () => new Response(JSON.stringify({ ok: false, code: "RequestFailed", message: "The account number does not match the CSV file" }), {
     status: 422,
     headers: { "content-type": "application/json" },
   }));
@@ -58,7 +58,7 @@ test("non-success responses expose the server message", async () => {
     assert.ok(error instanceof WizardApiError);
     assert.equal(error.status, 422);
     assert.equal(error.code, "RequestFailed");
-    assert.equal(error.message, "رقم الحساب لا يطابق ملف CSV");
+    assert.equal(error.message, "The account number does not match the CSV file");
     return true;
   });
 });

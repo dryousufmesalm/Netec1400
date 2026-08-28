@@ -234,8 +234,8 @@ $sensitiveValues.Add($publicationSource)
 $sensitiveValues.Add($publicationOneDrive)
 $sensitiveValues.Add($publicationConfig)
 $sensitiveValues.Add((Get-Content -LiteralPath $publicationConfig -Raw))
-$publishedCsv = Join-Path $publicationOneDrive 'MoneyMachine\Account_892522910\Baskets.csv'
-$publishedHeartbeat = Join-Path $publicationOneDrive 'MoneyMachine\Account_892522910\SyncStatus.json'
+$publishedCsv = Join-Path $publicationOneDrive 'AmarTrading\Account_892522910\Baskets.csv'
+$publishedHeartbeat = Join-Path $publicationOneDrive 'AmarTrading\Account_892522910\SyncStatus.json'
 $publishedState = Join-Path $publicationRuntime 'state\last-run.json'
 Invoke-AcceptanceCheck -Checks $checks -Name 'isolated-atomic-publication' -PassMessage 'An isolated direct-process publication produced hash-consistent CSV, heartbeat, and state artifacts.' -Action {
     $run = Invoke-AcceptancePowerShell -WindowsPowerShell $windowsPowerShell -ScriptPath (Join-Path $automationRoot 'Sync-BasketsToOneDrive.ps1') -Parameters ([ordered]@{

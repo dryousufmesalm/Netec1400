@@ -120,7 +120,7 @@ function Get-MoneyMachineWizardAccounts {
         Import-Csv -LiteralPath $ConfigPath | ForEach-Object {
             $accountNumber = [string]$_.ExpectedMT4Login
             $oneDriveRoot = [string]$_.OneDriveRoot
-            $destination = Join-Path $oneDriveRoot (Join-Path 'MoneyMachine' (Join-Path ("Account_{0}" -f $accountNumber) 'Baskets.csv'))
+            $destination = Join-Path $oneDriveRoot (Join-Path 'AmarTrading' (Join-Path ("Account_{0}" -f $accountNumber) 'Baskets.csv'))
             $published = Test-Path -LiteralPath $destination -PathType Leaf
             $destinationItem = if($published) { Get-Item -LiteralPath $destination } else { $null }
             [pscustomobject]@{

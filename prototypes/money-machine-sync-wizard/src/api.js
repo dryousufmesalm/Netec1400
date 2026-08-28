@@ -23,10 +23,10 @@ export function createWizardApi(fetchImpl = globalThis.fetch) {
     try {
       payload = await response.json();
     } catch {
-      payload = { ok: false, code: "InvalidResponse", message: "تعذر قراءة رد خدمة الإعداد." };
+      payload = { ok: false, code: "InvalidResponse", message: "The setup service returned an unreadable response." };
     }
     if (!response.ok || payload?.ok === false) {
-      throw new WizardApiError(payload?.message ?? "فشل الاتصال بخدمة الإعداد.", {
+      throw new WizardApiError(payload?.message ?? "Could not connect to the setup service.", {
         status: response.status,
         code: payload?.code ?? "RequestFailed",
       });

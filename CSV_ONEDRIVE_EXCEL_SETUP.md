@@ -38,7 +38,7 @@ true,VPS London 01,892522910,C:\\Path\\To\\MT4\\MQL4\\Files\\AGOLD___Baskets.csv
 
 - `ExpectedMT4Login` must equal the `AccountNumber` inside the CSV. The script treats the CSV value as authoritative and refuses a mismatch.
 - `OneDriveRoot` is the local folder already synchronized by the Windows user running the task.
-- The destination is `OneDriveRoot\MoneyMachine\Account_<MT4Login>\Baskets.csv`.
+- The destination is `OneDriveRoot\AmarTrading\Account_<MT4Login>\Baskets.csv`.
 
 Run a manual first copy:
 

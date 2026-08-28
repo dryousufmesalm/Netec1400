@@ -89,8 +89,8 @@ try {
     $setup = Invoke-MoneyMachineSetup -Request $valid -ConfigPath $setupConfig -RuntimeRoot $runtimeRoot -SkipTaskRegistration -StableCheckSeconds 0
     if($setup.Status -cne 'Success') { throw 'Staged setup must return Success.' }
     if(@($setup.Stages | Where-Object Code -eq 'LocalPublished').Count -ne 1) { throw 'Staged setup must report the LocalPublished stage.' }
-    $destination = Join-Path $oneDriveRoot 'MoneyMachine\Account_892522910\Baskets.csv'
-    $heartbeat = Join-Path $oneDriveRoot 'MoneyMachine\Account_892522910\SyncStatus.json'
+    $destination = Join-Path $oneDriveRoot 'AmarTrading\Account_892522910\Baskets.csv'
+    $heartbeat = Join-Path $oneDriveRoot 'AmarTrading\Account_892522910\SyncStatus.json'
     if(-not (Test-Path -LiteralPath $destination -PathType Leaf)) { throw 'Staged setup must publish Baskets.csv.' }
     if(-not (Test-Path -LiteralPath $heartbeat -PathType Leaf)) { throw 'Staged setup must publish SyncStatus.json.' }
 
@@ -100,9 +100,9 @@ try {
     $beforeRollback = (Get-FileHash -LiteralPath $rollbackConfig -Algorithm SHA256).Hash
     $blockedOneDrive = Join-Path $tempRoot 'blocked-onedrive'
     New-Item -ItemType Directory -Path $blockedOneDrive -Force | Out-Null
-    Set-Content -LiteralPath (Join-Path $blockedOneDrive 'MoneyMachine') -Value 'blocks destination directory creation' -Encoding utf8
+    Set-Content -LiteralPath (Join-Path $blockedOneDrive 'AmarTrading') -Value 'blocks destination directory creation' -Encoding utf8
     $blockedRequest = Test-MoneyMachineSetupRequest -VpsName 'Blocked VPS' -ExpectedMT4Login '892522910' -SourceCsv $sourceCsv -OneDriveRoot $blockedOneDrive
-    Assert-ThrowsLike -Expected 'MoneyMachine' -Action {
+    Assert-ThrowsLike -Expected 'AmarTrading' -Action {
         Invoke-MoneyMachineSetup -Request $blockedRequest -ConfigPath $rollbackConfig -RuntimeRoot (Join-Path $tempRoot 'rollback-runtime') -SkipTaskRegistration -StableCheckSeconds 0 | Out-Null
     }
     $afterRollback = (Get-FileHash -LiteralPath $rollbackConfig -Algorithm SHA256).Hash

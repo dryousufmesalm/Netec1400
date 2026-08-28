@@ -49,8 +49,8 @@ try {
     & node (Join-Path $PrototypeRoot 'scripts\accept-windows-wizard.mjs')
     if($LASTEXITCODE -ne 0) { throw "Browser acceptance exited $LASTEXITCODE." }
 
-    $destination = Join-Path $oneDriveRoot 'MoneyMachine\Account_892522910\Baskets.csv'
-    $heartbeat = Join-Path $oneDriveRoot 'MoneyMachine\Account_892522910\SyncStatus.json'
+    $destination = Join-Path $oneDriveRoot 'AmarTrading\Account_892522910\Baskets.csv'
+    $heartbeat = Join-Path $oneDriveRoot 'AmarTrading\Account_892522910\SyncStatus.json'
     if(-not (Test-Path -LiteralPath $destination -PathType Leaf)) { throw 'Acceptance destination CSV is missing.' }
     if(-not (Test-Path -LiteralPath $heartbeat -PathType Leaf)) { throw 'Acceptance heartbeat is missing.' }
     $rows = @(Import-Csv -LiteralPath $configPath)

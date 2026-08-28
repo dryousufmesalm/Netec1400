@@ -84,7 +84,7 @@ try {
     if($lastRun.OverallStatus -ne 'Success' -or -not $lastRun.StartedUtc -or -not $lastRun.CompletedUtc) { throw 'last-run.json must contain successful run timestamps and overall status.' }
     if(@($lastRun.Results).Count -ne 1 -or -not $lastRun.Accounts.'892522910') { throw 'last-run.json must contain result rows and per-account catch-up state.' }
 
-    $destination = Join-Path $oneDrive 'MoneyMachine\Account_892522910\Baskets.csv'
+    $destination = Join-Path $oneDrive 'AmarTrading\Account_892522910\Baskets.csv'
     if(-not (Test-Path -LiteralPath $destination)) { throw 'Destination CSV was not created.' }
     if((Get-Content -LiteralPath $destination -Raw) -notmatch 'RunStartBalance') { throw 'Destination CSV does not contain schema-v3 header.' }
 
@@ -171,7 +171,7 @@ try {
 
     $receiverScript = Join-Path (Split-Path -Parent $ScriptPath) 'Test-MoneyMachineSyncStatus.ps1'
     $receiverRoot = Join-Path $tempRoot 'receiver'
-    $receiverAccountDir = Join-Path $receiverRoot 'MoneyMachine\Account_892522910'
+    $receiverAccountDir = Join-Path $receiverRoot 'AmarTrading\Account_892522910'
     New-Item -ItemType Directory -Path $receiverAccountDir -Force | Out-Null
     $heartbeatPath = Join-Path $receiverAccountDir 'SyncStatus.json'
     [ordered]@{ AccountNumber='892522910'; Status='Success'; PublishedUtc=[DateTime]::UtcNow.ToString('o'); CloudDeliveryVerified=$false } |
@@ -189,7 +189,14 @@ try {
     $taskDefinition = Get-BasketsSyncTaskDefinition -ResolvedConfig (Resolve-Path -LiteralPath $testConfigPath).Path -SyncScript $ScriptPath -PowerShellPath $windowsPowerShell -WorkingDirectory (Split-Path -Parent $ScriptPath) -DailyTime ([datetime]::Today.AddHours(23).AddMinutes(59)) -TaskName 'MoneyMachine-Test' -PrincipalUser ((& whoami).Trim())
     if(-not [IO.Path]::IsPathRooted($taskDefinition.DailyAction.Execute) -or -not [IO.Path]::IsPathRooted($taskDefinition.DailyAction.WorkingDirectory)) { throw 'Task action executable and working directory must be absolute.' }
     if($taskDefinition.DailyAction.Arguments -notmatch [regex]::Escape($ScriptPath) -or $taskDefinition.DailyAction.Arguments -notmatch [regex]::Escape((Resolve-Path -LiteralPath $testConfigPath).Path)) { throw 'Task action must contain absolute script and config paths.' }
+    if([string]$taskDefinition.DailyTrigger.Repetition.Interval -ne 'PT5M') { throw 'Daily task must repeat every five minutes for live monitoring.' }
     if([string]$taskDefinition.Settings.MultipleInstances -ne 'IgnoreNew' -or $taskDefinition.Settings.RestartCount -ne 3) { throw 'Task settings must use IgnoreNew and three retries.' }
+
+    $defaultStartBefore = (Get-Date).AddSeconds(30)
+    $defaultDefinition = Get-BasketsSyncTaskDefinition -ResolvedConfig (Resolve-Path -LiteralPath $testConfigPath).Path -SyncScript $ScriptPath -PowerShellPath $windowsPowerShell -WorkingDirectory (Split-Path -Parent $ScriptPath) -TaskName 'MoneyMachine-Test-DefaultStart' -PrincipalUser ((& whoami).Trim())
+    $defaultStart = [datetime]$defaultDefinition.DailyTrigger.StartBoundary
+    $defaultStartAfter = (Get-Date).AddMinutes(2)
+    if($defaultStart -lt $defaultStartBefore -or $defaultStart -gt $defaultStartAfter) { throw 'Default monitoring schedule must begin within two minutes of installation.' }
 
     Write-Host 'MoneyMachine CSV sync tests passed.'
 }

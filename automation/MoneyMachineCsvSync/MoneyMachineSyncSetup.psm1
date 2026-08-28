@@ -200,7 +200,7 @@ function Invoke-MoneyMachineSetup {
         if($expectedResult.Count -ne 1 -or $expectedResult[0].Status -ne 'Success') { throw 'The configured account did not complete its first local publication.' }
 
         $localPublished = $true
-        $destination = Join-Path $normalized.OneDriveRoot (Join-Path 'MoneyMachine' (Join-Path ("Account_{0}" -f $normalized.ExpectedMT4Login) 'Baskets.csv'))
+        $destination = Join-Path $normalized.OneDriveRoot (Join-Path 'AmarTrading' (Join-Path ("Account_{0}" -f $normalized.ExpectedMT4Login) 'Baskets.csv'))
         $stages.Add([pscustomobject]@{ Code='LocalPublished'; Status='Success'; Message='The first CSV snapshot was published to the local OneDrive folder.' })
 
         if($SkipTaskRegistration) {

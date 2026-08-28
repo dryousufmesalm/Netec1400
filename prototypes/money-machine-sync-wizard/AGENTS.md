@@ -6,11 +6,11 @@ Before making substantial visual changes, use the Product Design plugin's `get-c
 
 ## Approved product direction
 
-- Build the three selected mockups as one connected RTL Arabic flow, not separate alternatives.
+- Build the three selected mockups as one connected English LTR flow, not separate alternatives.
 - Optimize every label and action for a non-technical operator adding a new VPS.
 - The flow is: overview → VPS details → automatic readiness check → success/dashboard.
 - Keep OneDrive and PowerShell implementation details behind a single clear setup action.
-- Use a dedicated OneDrive uploader identity with access limited to the central `MoneyMachine` folder.
+- Use a dedicated OneDrive uploader identity with access limited to the central `AmarTrading` folder.
 
 When implementing from a selected generated mock, treat that image as the source of truth for layout, component anatomy, density, spacing, color, typography, visible content, and hierarchy.
 

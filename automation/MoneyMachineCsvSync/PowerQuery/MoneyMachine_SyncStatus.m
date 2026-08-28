@@ -1,7 +1,7 @@
 let
     OneDriveRoot = Text.Trim(Text.From(Excel.CurrentWorkbook(){[Name="OneDriveRoot"]}[Content]{0}[Column1])),
     FreshnessHours = 26,
-    Files = Folder.Files(OneDriveRoot & "\MoneyMachine"),
+    Files = Folder.Files(OneDriveRoot & "\AmarTrading"),
     StatusFiles = Table.SelectRows(Files, each [Name] = "SyncStatus.json" and Text.StartsWith(List.Last(Text.Split(Text.TrimEnd([Folder Path], "\"), "\")), "Account_")),
     WithFolderLogin = Table.AddColumn(StatusFiles, "FolderAccountNumber", each Text.AfterDelimiter(List.Last(Text.Split(Text.TrimEnd([Folder Path], "\"), "\")), "Account_"), type text),
     WithJson = Table.AddColumn(WithFolderLogin, "StatusRecord", each Json.Document([Content])),

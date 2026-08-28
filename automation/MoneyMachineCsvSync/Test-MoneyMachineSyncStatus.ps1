@@ -24,7 +24,7 @@ foreach($account in $ExpectedAccount) {
     }
     try {
         if([string]::IsNullOrWhiteSpace($accountNumber)) { throw 'Expected account number is empty.' }
-        $statusPath = Join-Path $OneDriveRoot (Join-Path 'MoneyMachine' (Join-Path ("Account_{0}" -f $accountNumber) 'SyncStatus.json'))
+        $statusPath = Join-Path $OneDriveRoot (Join-Path 'AmarTrading' (Join-Path ("Account_{0}" -f $accountNumber) 'SyncStatus.json'))
         if(-not (Test-Path -LiteralPath $statusPath -PathType Leaf)) { throw 'Receiver heartbeat is missing.' }
         $heartbeat = Get-Content -LiteralPath $statusPath -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
         if([string]$heartbeat.AccountNumber -cne $accountNumber) { throw 'Heartbeat account does not match the expected folder account.' }

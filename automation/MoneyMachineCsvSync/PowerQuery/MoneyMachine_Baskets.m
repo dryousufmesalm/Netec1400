@@ -12,7 +12,7 @@ let
         "TradeMonday","TradeTuesday","TradeWednesday","TradeThursday","TradeFriday",
         "EnableRecoveryStepUp","RecoveryWaitMinutes","RecoveryMaxTotalLotsInBasket"
     },
-    Files = Folder.Files(OneDriveRoot & "\MoneyMachine"),
+    Files = Folder.Files(OneDriveRoot & "\AmarTrading"),
     BasketFiles = Table.SelectRows(Files, each [Name] = "Baskets.csv" and Text.StartsWith(List.Last(Text.Split(Text.TrimEnd([Folder Path], "\"), "\")), "Account_")),
     WithFolderLogin = Table.AddColumn(BasketFiles, "FolderAccountNumber", each Text.AfterDelimiter(List.Last(Text.Split(Text.TrimEnd([Folder Path], "\"), "\")), "Account_"), type text),
     WithCsv = Table.AddColumn(WithFolderLogin, "Data", each Table.SelectColumns(Table.PromoteHeaders(Csv.Document([Content], [Delimiter=",", Encoding=65001, QuoteStyle=QuoteStyle.Csv]), [PromoteAllScalars=true]), ExpectedColumns, MissingField.UseNull)),

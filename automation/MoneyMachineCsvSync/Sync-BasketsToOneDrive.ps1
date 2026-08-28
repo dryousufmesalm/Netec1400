@@ -190,7 +190,7 @@ function Invoke-MoneyMachineCsvSync {
                     if(-not (Test-StableFile -Path $sourceCsv -Seconds $StableCheckSeconds)) { throw 'Source changed during stable-file check.' }
                     $sourceBefore = Get-FileIdentity -Path $sourceCsv
                     $validation = Read-MoneyMachineBasketsCsv -Path $sourceCsv -ExpectedLogin $expectedLogin
-                    $destinationDir = Join-Path $oneDriveRoot (Join-Path 'MoneyMachine' ("Account_{0}" -f $expectedLogin))
+                    $destinationDir = Join-Path $oneDriveRoot (Join-Path 'AmarTrading' ("Account_{0}" -f $expectedLogin))
                     $destination = Join-Path $destinationDir 'Baskets.csv'
                     $temporary = Join-Path $destinationDir ("Baskets.csv.$([guid]::NewGuid().ToString('N')).source.tmp")
                     try {

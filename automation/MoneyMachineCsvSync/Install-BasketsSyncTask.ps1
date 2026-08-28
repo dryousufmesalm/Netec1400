@@ -1,7 +1,8 @@
 [CmdletBinding(SupportsShouldProcess)]
 param(
     [string]$ConfigPath,
-    [datetime]$DailyTime = ([datetime]::Today.AddHours(23).AddMinutes(59)),
+    [datetime]$DailyTime = ((Get-Date).AddMinutes(1)),
+    [ValidateRange(1,1440)][int]$SyncIntervalMinutes = 5,
     [string]$TaskName = 'MoneyMachine-Baskets-To-OneDrive',
     [switch]$AsLibrary
 )
@@ -33,7 +34,8 @@ function Get-BasketsSyncTaskDefinition {
         [Parameter(Mandatory)][string]$SyncScript,
         [Parameter(Mandatory)][string]$PowerShellPath,
         [Parameter(Mandatory)][string]$WorkingDirectory,
-        [Parameter(Mandatory)][datetime]$DailyTime,
+        [datetime]$DailyTime = ((Get-Date).AddMinutes(1)),
+        [ValidateRange(1,1440)][int]$SyncIntervalMinutes = 5,
         [Parameter(Mandatory)][string]$TaskName,
         [Parameter(Mandatory)][string]$PrincipalUser
     )
@@ -46,11 +48,18 @@ function Get-BasketsSyncTaskDefinition {
     $baseArguments = '-NoProfile -NonInteractive -ExecutionPolicy Bypass -File "{0}" -ConfigPath "{1}"' -f $SyncScript,$ResolvedConfig
     $dailyAction = New-ScheduledTaskAction -Execute $PowerShellPath -Argument $baseArguments -WorkingDirectory $WorkingDirectory
     $catchupAction = New-ScheduledTaskAction -Execute $PowerShellPath -Argument "$baseArguments -StartupCatchup" -WorkingDirectory $WorkingDirectory
+    $dailyTrigger = New-ScheduledTaskTrigger -Daily -At $DailyTime
+    $repetition = New-CimInstance -ClassName MSFT_TaskRepetitionPattern -Namespace 'Root/Microsoft/Windows/TaskScheduler' -ClientOnly -Property @{
+        Interval = [Xml.XmlConvert]::ToString([TimeSpan]::FromMinutes($SyncIntervalMinutes))
+        Duration = 'P1D'
+        StopAtDurationEnd = $false
+    }
+    $dailyTrigger.Repetition = $repetition
     return [pscustomobject]@{
         TaskName = $TaskName
         DailyAction = $dailyAction
         CatchupAction = $catchupAction
-        DailyTrigger = New-ScheduledTaskTrigger -Daily -At $DailyTime
+        DailyTrigger = $dailyTrigger
         LogonTrigger = New-ScheduledTaskTrigger -AtLogOn
         Principal = New-ScheduledTaskPrincipal -UserId $PrincipalUser -LogonType Interactive -RunLevel Limited
         Settings = New-ScheduledTaskSettingsSet -StartWhenAvailable -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -MultipleInstances IgnoreNew -RestartCount 3 -RestartInterval (New-TimeSpan -Minutes 5) -ExecutionTimeLimit (New-TimeSpan -Minutes 15)
@@ -66,11 +75,11 @@ if(-not $AsLibrary) {
     $principalUser = (& whoami).Trim()
 
     Assert-BasketsSyncTaskPrerequisites -PowerShellPath $powershell
-    $definition = Get-BasketsSyncTaskDefinition -ResolvedConfig $resolvedConfig -SyncScript $syncScript -PowerShellPath $powershell -WorkingDirectory $workingDirectory -DailyTime $DailyTime -TaskName $TaskName -PrincipalUser $principalUser
+    $definition = Get-BasketsSyncTaskDefinition -ResolvedConfig $resolvedConfig -SyncScript $syncScript -PowerShellPath $powershell -WorkingDirectory $workingDirectory -DailyTime $DailyTime -SyncIntervalMinutes $SyncIntervalMinutes -TaskName $TaskName -PrincipalUser $principalUser
 
     if($PSCmdlet.ShouldProcess($TaskName, 'Register or replace scheduled CSV synchronization tasks')) {
         Register-ScheduledTask -TaskName "$TaskName-Daily" -Action $definition.DailyAction -Trigger $definition.DailyTrigger -Principal $definition.Principal -Settings $definition.Settings -Force -ErrorAction Stop | Out-Null
         Register-ScheduledTask -TaskName "$TaskName-StartupCatchup" -Action $definition.CatchupAction -Trigger $definition.LogonTrigger -Principal $definition.Principal -Settings $definition.Settings -Force -ErrorAction Stop | Out-Null
-        Write-Host "Installed scheduled tasks '$TaskName-Daily' and '$TaskName-StartupCatchup' for $($DailyTime.ToString('HH:mm')) local VPS time."
+        Write-Host "Installed scheduled tasks '$TaskName-Daily' (every $SyncIntervalMinutes minutes) and '$TaskName-StartupCatchup'."
     }
 }
