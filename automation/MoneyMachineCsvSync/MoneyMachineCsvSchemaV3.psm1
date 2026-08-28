@@ -14,6 +14,7 @@ $script:SchemaV3Columns = @(
     'RegimeRangeBars','RegimeRecoveryBars','EnableTradingDaysFilter','TradeMonday','TradeTuesday','TradeWednesday','TradeThursday',
     'TradeFriday','EnableRecoveryStepUp','RecoveryWaitMinutes','RecoveryMaxTotalLotsInBasket','CsvSchemaVersion'
 )
+$script:SchemaV2Columns = @($script:SchemaV3Columns[0..33]) + @('CsvSchemaVersion')
 
 $script:IntegerFields = @(
     'BasketID','Timeframe','DurationSeconds','OrdersCount','MaxOrdersConcurrent','TimesNearKill','ExposureBlocks','PipsStep',
@@ -55,6 +56,77 @@ function Get-MoneyMachineSchemaV3Columns {
     [CmdletBinding()]
     param()
     return @($script:SchemaV3Columns)
+}
+
+function Test-ExactCsvHeader {
+    param([object[]]$Header,[string[]]$Expected)
+
+    if($Header.Count -ne $Expected.Count) { return $false }
+    for($index = 0; $index -lt $Expected.Count; $index++) {
+        $actual = ([string]$Header[$index]).TrimStart([char]0xFEFF)
+        if($actual -cne $Expected[$index]) { return $false }
+    }
+    return $true
+}
+
+function Get-AmmarTradingCsvIdentity {
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][string]$Path)
+
+    if(-not (Test-Path -LiteralPath $Path -PathType Leaf)) { throw "CSV file not found: $Path" }
+
+    $accountNumber = $null
+    $brokerName = $null
+    $schemaVersion = $null
+    $status = 'MalformedCsv'
+    $parser = $null
+    try {
+        $parser = New-Object Microsoft.VisualBasic.FileIO.TextFieldParser($Path, [Text.Encoding]::UTF8, $true)
+        $parser.TextFieldType = [Microsoft.VisualBasic.FileIO.FieldType]::Delimited
+        $parser.SetDelimiters(',')
+        $parser.HasFieldsEnclosedInQuotes = $true
+        $parser.TrimWhiteSpace = $false
+
+        if(-not $parser.EndOfData) {
+            $header = @($parser.ReadFields())
+            $isSchemaV3Header = Test-ExactCsvHeader -Header $header -Expected $script:SchemaV3Columns
+            $isSchemaV2Header = Test-ExactCsvHeader -Header $header -Expected $script:SchemaV2Columns
+            if($isSchemaV3Header -or $isSchemaV2Header) {
+                $schemaVersion = if($isSchemaV2Header) { '2' } else { '3' }
+                if($parser.EndOfData) {
+                    $status = if($isSchemaV2Header) { 'SchemaV2' } else { 'HeaderOnly' }
+                } else {
+                    $fields = @($parser.ReadFields())
+                    if($fields.Count -eq $header.Count) {
+                        $accountNumber = [string]$fields[0]
+                        $brokerName = [string]$fields[1]
+                        $schemaVersion = [string]$fields[$fields.Count - 1]
+                        if($isSchemaV2Header -or $schemaVersion -ceq '2') {
+                            $status = 'SchemaV2'
+                        } elseif($schemaVersion -ceq '3' -and
+                            $accountNumber -match '^\d+$' -and
+                            -not [string]::IsNullOrWhiteSpace($brokerName)) {
+                            $status = 'Ready'
+                        }
+                    }
+                }
+            }
+        }
+    } catch {
+        $status = 'MalformedCsv'
+    } finally {
+        if($null -ne $parser) {
+            $parser.Close()
+            $parser.Dispose()
+        }
+    }
+
+    return [pscustomobject][ordered]@{
+        AccountNumber = $accountNumber
+        BrokerName = $brokerName
+        SchemaVersion = $schemaVersion
+        Status = $status
+    }
 }
 
 function Test-InvariantInteger {
@@ -165,4 +237,4 @@ function Read-MoneyMachineBasketsCsv {
     return [pscustomobject]@{ Rows=@($rows); RowCount=$rows.Count; Header=($script:SchemaV3Columns -join ',') }
 }
 
-Export-ModuleMember -Function Get-MoneyMachineSchemaV3Columns,Read-MoneyMachineBasketsCsv
+Export-ModuleMember -Function Get-MoneyMachineSchemaV3Columns,Get-AmmarTradingCsvIdentity,Read-MoneyMachineBasketsCsv

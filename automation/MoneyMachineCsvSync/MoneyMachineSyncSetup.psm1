@@ -10,6 +10,117 @@ function Get-AmmarTradingDestinationPath {
     Join-Path $OneDriveRoot (Join-Path 'AmmarTrading' (Join-Path ("Account_{0}" -f $AccountNumber) 'Baskets.csv'))
 }
 
+function Get-AmmarTradingDiscoveryHash {
+    param([Parameter(Mandatory)][string]$Fingerprint)
+
+    $sha256 = [Security.Cryptography.SHA256]::Create()
+    try {
+        $bytes = [Text.Encoding]::UTF8.GetBytes($Fingerprint)
+        $hash = $sha256.ComputeHash($bytes)
+        return [BitConverter]::ToString($hash).Replace('-', '')
+    } finally {
+        $sha256.Dispose()
+    }
+}
+
+function Get-AmmarTradingMt4Accounts {
+    [CmdletBinding()]
+    param(
+        [string]$TerminalDataRoot,
+        [AllowEmptyCollection()][string[]]$ManualCsv
+    )
+
+    if([string]::IsNullOrWhiteSpace($TerminalDataRoot)) {
+        $TerminalDataRoot = Join-Path $env:APPDATA 'MetaQuotes\Terminal'
+    }
+
+    $schemaModule = Join-Path $PSScriptRoot 'MoneyMachineCsvSchemaV3.psm1'
+    if(-not (Test-Path -LiteralPath $schemaModule -PathType Leaf)) { throw "Schema validator was not found: $schemaModule" }
+    Import-Module -Name $schemaModule -ErrorAction Stop
+
+    $candidates = [System.Collections.Generic.List[object]]::new()
+    $seenPaths = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::OrdinalIgnoreCase)
+
+    if(-not [string]::IsNullOrWhiteSpace($TerminalDataRoot) -and (Test-Path -LiteralPath $TerminalDataRoot -PathType Container)) {
+        foreach($terminal in @(Get-ChildItem -LiteralPath $TerminalDataRoot -Directory -ErrorAction SilentlyContinue | Sort-Object FullName)) {
+            $csv = Join-Path $terminal.FullName 'MQL4\Files\AGOLD___Baskets.csv'
+            if(-not (Test-Path -LiteralPath $csv -PathType Leaf)) { continue }
+
+            $terminalName = $terminal.Name
+            $origin = Join-Path $terminal.FullName 'origin.txt'
+            if(Test-Path -LiteralPath $origin -PathType Leaf) {
+                try {
+                    $originValue = ([string](Get-Content -LiteralPath $origin -Raw -ErrorAction Stop)).Trim()
+                    if(-not [string]::IsNullOrWhiteSpace($originValue)) { $terminalName = $originValue }
+                } catch {
+                    $terminalName = $terminal.Name
+                }
+            }
+
+            $resolvedCsv = (Resolve-Path -LiteralPath $csv -ErrorAction Stop).Path
+            if($seenPaths.Add($resolvedCsv)) {
+                $candidates.Add([pscustomobject]@{
+                    SourceCsv = $resolvedCsv
+                    TerminalId = $terminal.Name
+                    TerminalName = $terminalName
+                })
+            }
+        }
+    }
+
+    foreach($manualPath in @($ManualCsv)) {
+        if([string]::IsNullOrWhiteSpace([string]$manualPath)) { continue }
+        $expanded = [Environment]::ExpandEnvironmentVariables(([string]$manualPath).Trim())
+        if([IO.Path]::GetExtension($expanded) -ine '.csv' -or -not (Test-Path -LiteralPath $expanded -PathType Leaf)) { continue }
+        $resolvedCsv = (Resolve-Path -LiteralPath $expanded -ErrorAction Stop).Path
+        if($seenPaths.Add($resolvedCsv)) {
+            $candidates.Add([pscustomobject]@{
+                SourceCsv = $resolvedCsv
+                TerminalId = 'Manual'
+                TerminalName = 'Manual CSV'
+            })
+        }
+    }
+
+    $results = [System.Collections.Generic.List[object]]::new()
+    foreach($candidate in @($candidates | Sort-Object SourceCsv)) {
+        $file = Get-Item -LiteralPath $candidate.SourceCsv -ErrorAction Stop
+        $identity = Get-AmmarTradingCsvIdentity -Path $file.FullName
+        $fingerprint = '{0}|{1}|{2}|{3}' -f $file.FullName,$identity.AccountNumber,$file.Length,$file.LastWriteTimeUtc.Ticks
+        $discoveryId = Get-AmmarTradingDiscoveryHash -Fingerprint $fingerprint
+
+        $freshness = 'Unknown'
+        if($file.LastWriteTimeUtc -ne [DateTime]::MinValue) {
+            $age = [DateTime]::UtcNow - $file.LastWriteTimeUtc
+            $freshness = if($age.TotalMinutes -le 15) { 'Fresh' } else { 'Stale' }
+        }
+
+        $eligibility = if($identity.Status -ceq 'Ready') { 'Ready' } else { 'Blocked' }
+        $results.Add([pscustomobject][ordered]@{
+            DiscoveryId = $discoveryId
+            AccountNumber = $identity.AccountNumber
+            BrokerName = $identity.BrokerName
+            TerminalId = $candidate.TerminalId
+            TerminalName = $candidate.TerminalName
+            SourceCsv = $file.FullName
+            SchemaVersion = $identity.SchemaVersion
+            LastWriteUtc = $file.LastWriteTimeUtc.ToString('o')
+            Freshness = $freshness
+            Eligibility = $eligibility
+            ReasonCode = $identity.Status
+        })
+    }
+
+    foreach($duplicateGroup in @($results | Where-Object Eligibility -eq 'Ready' | Group-Object AccountNumber | Where-Object Count -gt 1)) {
+        foreach($duplicate in @($duplicateGroup.Group)) {
+            $duplicate.Eligibility = 'Blocked'
+            $duplicate.ReasonCode = 'DuplicateAccount'
+        }
+    }
+
+    return @($results)
+}
+
 function Get-MoneyMachineSetupDiscovery {
     [CmdletBinding()]
     param(
@@ -42,14 +153,13 @@ function Get-MoneyMachineSetupDiscovery {
 
     $sources = [System.Collections.Generic.List[object]]::new()
     if(-not [string]::IsNullOrWhiteSpace($TerminalDataRoot) -and (Test-Path -LiteralPath $TerminalDataRoot -PathType Container)) {
-        foreach($file in @(Get-ChildItem -LiteralPath $TerminalDataRoot -Filter 'AGOLD___Baskets.csv' -File -Recurse -ErrorAction SilentlyContinue)) {
-            if((Split-Path -Leaf $file.DirectoryName) -cne 'Files') { continue }
-            $mql4Directory = Split-Path -Parent $file.DirectoryName
-            if((Split-Path -Leaf $mql4Directory) -cne 'MQL4') { continue }
-            $terminalDirectory = Split-Path -Parent $mql4Directory
+        foreach($terminalDirectory in @(Get-ChildItem -LiteralPath $TerminalDataRoot -Directory -ErrorAction SilentlyContinue)) {
+            $sourcePath = Join-Path $terminalDirectory.FullName 'MQL4\Files\AGOLD___Baskets.csv'
+            if(-not (Test-Path -LiteralPath $sourcePath -PathType Leaf)) { continue }
+            $file = Get-Item -LiteralPath $sourcePath -ErrorAction Stop
             $sources.Add([pscustomobject]@{
                 Path = $file.FullName
-                TerminalId = Split-Path -Leaf $terminalDirectory
+                TerminalId = $terminalDirectory.Name
                 LastWriteUtc = $file.LastWriteTimeUtc.ToString('o')
             })
         }
@@ -240,4 +350,4 @@ function Invoke-MoneyMachineSetup {
     }
 }
 
-Export-ModuleMember -Function Get-MoneyMachineSetupDiscovery,Test-MoneyMachineSetupRequest,Save-MoneyMachineAccountConfig,Invoke-MoneyMachineSetup
+Export-ModuleMember -Function Get-AmmarTradingMt4Accounts,Get-MoneyMachineSetupDiscovery,Test-MoneyMachineSetupRequest,Save-MoneyMachineAccountConfig,Invoke-MoneyMachineSetup
