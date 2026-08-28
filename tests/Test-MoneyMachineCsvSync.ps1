@@ -84,7 +84,7 @@ try {
     if($lastRun.OverallStatus -ne 'Success' -or -not $lastRun.StartedUtc -or -not $lastRun.CompletedUtc) { throw 'last-run.json must contain successful run timestamps and overall status.' }
     if(@($lastRun.Results).Count -ne 1 -or -not $lastRun.Accounts.'892522910') { throw 'last-run.json must contain result rows and per-account catch-up state.' }
 
-    $destination = Join-Path $oneDrive 'AmarTrading\Account_892522910\Baskets.csv'
+    $destination = Join-Path $oneDrive 'AmmarTrading\Account_892522910\Baskets.csv'
     if(-not (Test-Path -LiteralPath $destination)) { throw 'Destination CSV was not created.' }
     if((Get-Content -LiteralPath $destination -Raw) -notmatch 'RunStartBalance') { throw 'Destination CSV does not contain schema-v3 header.' }
 
@@ -171,7 +171,7 @@ try {
 
     $receiverScript = Join-Path (Split-Path -Parent $ScriptPath) 'Test-MoneyMachineSyncStatus.ps1'
     $receiverRoot = Join-Path $tempRoot 'receiver'
-    $receiverAccountDir = Join-Path $receiverRoot 'AmarTrading\Account_892522910'
+    $receiverAccountDir = Join-Path $receiverRoot 'AmmarTrading\Account_892522910'
     New-Item -ItemType Directory -Path $receiverAccountDir -Force | Out-Null
     $heartbeatPath = Join-Path $receiverAccountDir 'SyncStatus.json'
     [ordered]@{ AccountNumber='892522910'; Status='Success'; PublishedUtc=[DateTime]::UtcNow.ToString('o'); CloudDeliveryVerified=$false } |

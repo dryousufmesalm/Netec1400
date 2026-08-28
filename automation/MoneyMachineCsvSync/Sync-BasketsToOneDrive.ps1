@@ -97,6 +97,15 @@ function Publish-AtomicFile {
     }
 }
 
+function Get-AmmarTradingDestinationPath {
+    param(
+        [Parameter(Mandatory)][string]$OneDriveRoot,
+        [Parameter(Mandatory)][string]$AccountNumber
+    )
+
+    Join-Path $OneDriveRoot (Join-Path 'AmmarTrading' (Join-Path ("Account_{0}" -f $AccountNumber) 'Baskets.csv'))
+}
+
 function Get-LastRunState {
     param([string]$RuntimeRoot = $ScriptRoot)
     $path = Join-Path $RuntimeRoot 'state\last-run.json'
@@ -190,8 +199,8 @@ function Invoke-MoneyMachineCsvSync {
                     if(-not (Test-StableFile -Path $sourceCsv -Seconds $StableCheckSeconds)) { throw 'Source changed during stable-file check.' }
                     $sourceBefore = Get-FileIdentity -Path $sourceCsv
                     $validation = Read-MoneyMachineBasketsCsv -Path $sourceCsv -ExpectedLogin $expectedLogin
-                    $destinationDir = Join-Path $oneDriveRoot (Join-Path 'AmarTrading' ("Account_{0}" -f $expectedLogin))
-                    $destination = Join-Path $destinationDir 'Baskets.csv'
+                    $destination = Get-AmmarTradingDestinationPath -OneDriveRoot $oneDriveRoot -AccountNumber $expectedLogin
+                    $destinationDir = Split-Path -Parent $destination
                     $temporary = Join-Path $destinationDir ("Baskets.csv.$([guid]::NewGuid().ToString('N')).source.tmp")
                     try {
                         if(-not (Test-Path -LiteralPath $destinationDir)) { New-Item -ItemType Directory -Path $destinationDir -Force | Out-Null }

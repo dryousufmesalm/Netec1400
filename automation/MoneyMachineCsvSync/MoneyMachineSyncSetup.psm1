@@ -1,6 +1,15 @@
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
+function Get-AmmarTradingDestinationPath {
+    param(
+        [Parameter(Mandatory)][string]$OneDriveRoot,
+        [Parameter(Mandatory)][string]$AccountNumber
+    )
+
+    Join-Path $OneDriveRoot (Join-Path 'AmmarTrading' (Join-Path ("Account_{0}" -f $AccountNumber) 'Baskets.csv'))
+}
+
 function Get-MoneyMachineSetupDiscovery {
     [CmdletBinding()]
     param(
@@ -200,7 +209,7 @@ function Invoke-MoneyMachineSetup {
         if($expectedResult.Count -ne 1 -or $expectedResult[0].Status -ne 'Success') { throw 'The configured account did not complete its first local publication.' }
 
         $localPublished = $true
-        $destination = Join-Path $normalized.OneDriveRoot (Join-Path 'AmarTrading' (Join-Path ("Account_{0}" -f $normalized.ExpectedMT4Login) 'Baskets.csv'))
+        $destination = Get-AmmarTradingDestinationPath -OneDriveRoot $normalized.OneDriveRoot -AccountNumber $normalized.ExpectedMT4Login
         $stages.Add([pscustomobject]@{ Code='LocalPublished'; Status='Success'; Message='The first CSV snapshot was published to the local OneDrive folder.' })
 
         if($SkipTaskRegistration) {

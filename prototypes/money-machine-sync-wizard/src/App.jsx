@@ -57,7 +57,7 @@ function Brand() {
   return (
     <button className="brand" type="button" aria-label="Return to dashboard">
       <span className="brand-mark"><CloudArrowUp weight="fill" /></span>
-      <span><strong>Money Machine</strong><small>CSV Sync</small></span>
+      <span><strong>AmmarTrading Sync</strong><small>CSV synchronization</small></span>
     </button>
   );
 }
@@ -87,7 +87,7 @@ function ServerIllustration() {
       <div className="cloud-card">
         <CloudArrowUp weight="duotone" />
         <strong>OneDrive</strong>
-        <span>AmarTrading</span>
+        <span>AmmarTrading</span>
         <FileCsv className="csv-float" weight="fill" />
       </div>
     </div>
@@ -200,7 +200,7 @@ function FormScreen({ form, setForm, errors, sources, roots, serviceError, onBac
 const checks = [
   { key: "device", label: "VPS connection", detail: "This VPS is available and ready for setup", Icon: DesktopTower },
   { key: "folder", label: "CSV report file", detail: "The report file was found successfully", Icon: FolderOpen },
-  { key: "drive", label: "OneDrive folder", detail: "AmarTrading is ready to receive files", Icon: CloudArrowUp },
+  { key: "drive", label: "OneDrive folder", detail: "AmmarTrading is ready to receive files", Icon: CloudArrowUp },
   { key: "security", label: "Secure permissions", detail: "Access is limited to the reporting folder", Icon: ShieldCheck },
 ];
 
@@ -219,7 +219,7 @@ function CheckScreen({ form, phase, setupError, onStart, onBack }) {
             return <div className={`check-row ${done ? "done" : ""}`} key={key}><span className="check-icon"><Icon weight="duotone" /></span><div><b>{label}</b><small>{done ? detail : loading ? "Checking now..." : "Waiting for check"}</small></div><span className="check-result">{done ? <CheckCircle weight="fill" /> : loading ? <SpinnerGap className="spin" /> : <span />}</span></div>;
           })}
         </div>
-        <div className="destination"><FolderOpen weight="duotone" /><div><span>Files will appear on your reporting PC in</span><b dir="ltr">OneDrive / AmarTrading / {form.account}</b></div></div>
+        <div className="destination"><FolderOpen weight="duotone" /><div><span>Files will appear on your reporting PC in</span><b dir="ltr">OneDrive / AmmarTrading / {form.account}</b></div></div>
         {setupError && <div className="inline-alert error-alert"><Info weight="fill" /><span>{setupError}</span></div>}
         <div className="form-actions"><button className="text-button" type="button" onClick={onBack} disabled={phase === "checking"}><ArrowLeft /> Back</button><button className="primary" type="button" onClick={onStart} disabled={phase === "checking"}>{phase === "checking" ? <><SpinnerGap className="spin" /> Setting up...</> : phase === "ready" ? <><GearSix weight="fill" /> Set up sync now</> : <>Start check <ArrowRight /></>}</button></div>
       </section>
@@ -239,7 +239,7 @@ function SuccessScreen({ form, result, onDashboard, onAddAnother }) {
         <div className="success-route">
           <span><DesktopTower weight="duotone" /><b>{form.name}</b></span><div className="route-line"><i /><i /><i /></div><span><CloudArrowUp weight="duotone" /><b>OneDrive</b></span>
         </div>
-        <div className="destination success-destination"><FolderOpen weight="duotone" /><div><span>Local file location</span><b dir="ltr">{result?.destination || `OneDrive / AmarTrading / ${form.account}`}</b></div><CheckCircle weight="fill" /></div>
+        <div className="destination success-destination"><FolderOpen weight="duotone" /><div><span>Local file location</span><b dir="ltr">{result?.destination || `OneDrive / AmmarTrading / ${form.account}`}</b></div><CheckCircle weight="fill" /></div>
         <div className="cloud-proof-note"><Info weight="fill" /><span><b>Published locally</b> — cloud delivery is confirmed from the reporting PC after OneDrive finishes syncing.</span></div>
         <div className="success-actions"><button className="primary large" type="button" onClick={onDashboard}>View all devices <ArrowRight /></button><button className="secondary" type="button" onClick={onAddAnother}><Plus /> Add another VPS</button></div>
       </section>
@@ -267,7 +267,7 @@ export function App() {
     if (demo) {
       setAccounts(seedAccounts);
       setSources([{ Path: "C:\\MT4\\MQL4\\Files\\AGOLD___Baskets.csv", TerminalId: "DEMO" }]);
-      setRoots([{ Path: "C:\\Users\\Trader\\OneDrive - Money Machine", Name: "OneDrive - Money Machine" }]);
+      setRoots([{ Path: "C:\\Users\\Trader\\OneDrive - AmmarTrading", Name: "OneDrive - AmmarTrading" }]);
       setLoading(false);
       return () => { cancelled = true; };
     }
@@ -326,7 +326,7 @@ export function App() {
       {!loading && screen === "form" && <FormScreen form={form} setForm={setForm} errors={errors} sources={sources} roots={roots} serviceError={serviceError} onBack={() => setScreen("overview")} onNext={validate} />}
       {!loading && screen === "check" && <CheckScreen form={form} phase={phase} setupError={setupError} onStart={startSetup} onBack={() => { setPhase("idle"); setScreen("form"); }} />}
       {!loading && screen === "success" && <SuccessScreen form={form} result={setupResult} onDashboard={() => setScreen("overview")} onAddAnother={startAdd} />}
-      <footer><span>Money Machine CSV Sync</span><span><LockKey /> Encrypted and secure connection</span></footer>
+      <footer><span>AmmarTrading Sync</span><span><LockKey /> Encrypted and secure connection</span></footer>
     </div>
   );
 }

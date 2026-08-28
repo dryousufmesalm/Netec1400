@@ -8,6 +8,15 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
+function Get-AmmarTradingDestinationPath {
+    param(
+        [Parameter(Mandatory)][string]$OneDriveRoot,
+        [Parameter(Mandatory)][string]$AccountNumber
+    )
+
+    Join-Path $OneDriveRoot (Join-Path 'AmmarTrading' (Join-Path ("Account_{0}" -f $AccountNumber) 'Baskets.csv'))
+}
+
 if($FreshnessHours -le 0) { throw 'FreshnessHours must be greater than zero.' }
 if(-not (Test-Path -LiteralPath $OneDriveRoot -PathType Container)) { throw "OneDrive root not found: $OneDriveRoot" }
 
@@ -24,7 +33,8 @@ foreach($account in $ExpectedAccount) {
     }
     try {
         if([string]::IsNullOrWhiteSpace($accountNumber)) { throw 'Expected account number is empty.' }
-        $statusPath = Join-Path $OneDriveRoot (Join-Path 'AmarTrading' (Join-Path ("Account_{0}" -f $accountNumber) 'SyncStatus.json'))
+        $destination = Get-AmmarTradingDestinationPath -OneDriveRoot $OneDriveRoot -AccountNumber $accountNumber
+        $statusPath = Join-Path (Split-Path -Parent $destination) 'SyncStatus.json'
         if(-not (Test-Path -LiteralPath $statusPath -PathType Leaf)) { throw 'Receiver heartbeat is missing.' }
         $heartbeat = Get-Content -LiteralPath $statusPath -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
         if([string]$heartbeat.AccountNumber -cne $accountNumber) { throw 'Heartbeat account does not match the expected folder account.' }
