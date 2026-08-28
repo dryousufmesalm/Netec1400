@@ -6,7 +6,8 @@ param(
     [int]$StableCheckSeconds = 2,
     [int]$MaxRetries = 3,
     [int]$MutexWaitMilliseconds = 30000,
-    [string]$RuntimeRoot
+    [string]$RuntimeRoot,
+    [string[]]$AccountNumbers
 )
 
 Set-StrictMode -Version Latest
@@ -152,7 +153,8 @@ function Invoke-MoneyMachineCsvSync {
         [int]$StableCheckSeconds = 2,
         [int]$MaxRetries = 3,
         [int]$MutexWaitMilliseconds = 30000,
-        [string]$RuntimeRoot
+        [string]$RuntimeRoot,
+        [string[]]$AccountNumbers
     )
 
     if([string]::IsNullOrWhiteSpace($ConfigPath)) { $ConfigPath = Join-Path $ScriptRoot 'accounts.csv' }
@@ -161,6 +163,16 @@ function Invoke-MoneyMachineCsvSync {
     if($MaxRetries -lt 1) { throw 'MaxRetries must be at least one.' }
     if($MutexWaitMilliseconds -lt 0) { throw 'MutexWaitMilliseconds must be zero or greater.' }
     if(-not (Test-Path -LiteralPath $ConfigPath)) { throw "Configuration file not found: $ConfigPath" }
+
+    $hasAccountFilter = $PSBoundParameters.ContainsKey('AccountNumbers')
+    $accountFilter = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::Ordinal)
+    if($hasAccountFilter) {
+        foreach($accountNumberValue in @($AccountNumbers)) {
+            $accountNumber = ([string]$accountNumberValue).Trim()
+            if($accountNumber -notmatch '^\d{4,20}$') { throw 'AccountNumbers contains an invalid MT4 account number.' }
+            if(-not $accountFilter.Add($accountNumber)) { throw "AccountNumbers contains duplicate MT4 account '$accountNumber'." }
+        }
+    }
 
     $startedUtc = [DateTime]::UtcNow.ToString('o')
     $mutex = New-Object System.Threading.Mutex($false, 'Global\MoneyMachineCsvSync')
@@ -174,6 +186,7 @@ function Invoke-MoneyMachineCsvSync {
         $results = [System.Collections.Generic.List[object]]::new()
         foreach($account in @(Import-Csv -LiteralPath $ConfigPath -ErrorAction Stop)) {
             $expectedLogin = ([string]$account.ExpectedMT4Login).Trim()
+            if($hasAccountFilter -and -not $accountFilter.Contains($expectedLogin)) { continue }
             $enabled = ([string]$account.Enabled).Trim().ToLowerInvariant() -in @('true','1','yes','y')
             if(-not $enabled) {
                 $results.Add([pscustomobject]@{ AccountNumber=$expectedLogin; Status='Skipped'; Message='Disabled in accounts.csv' })
@@ -256,7 +269,16 @@ function Invoke-MoneyMachineCsvSync {
 
 if(-not $AsLibrary) {
     try {
-        $runResults = @(Invoke-MoneyMachineCsvSync -ConfigPath $ConfigPath -StartupCatchup:$StartupCatchup -StableCheckSeconds $StableCheckSeconds -MaxRetries $MaxRetries -MutexWaitMilliseconds $MutexWaitMilliseconds -RuntimeRoot $RuntimeRoot)
+        $syncParameters = @{
+            ConfigPath = $ConfigPath
+            StartupCatchup = $StartupCatchup
+            StableCheckSeconds = $StableCheckSeconds
+            MaxRetries = $MaxRetries
+            MutexWaitMilliseconds = $MutexWaitMilliseconds
+            RuntimeRoot = $RuntimeRoot
+        }
+        if($PSBoundParameters.ContainsKey('AccountNumbers')) { $syncParameters.AccountNumbers = $AccountNumbers }
+        $runResults = @(Invoke-MoneyMachineCsvSync @syncParameters)
         $runResults | Format-Table -AutoSize
         if(@($runResults | Where-Object { $_.Status -eq 'Error' }).Count -gt 0) { exit 1 }
     } catch {
