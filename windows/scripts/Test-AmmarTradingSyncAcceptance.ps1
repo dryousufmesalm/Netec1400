@@ -102,6 +102,31 @@ function Get-PeSubsystem {
     } finally { $reader.Dispose(); $stream.Dispose() }
 }
 
+function Get-InstalledPayloadHashes {
+    param(
+        [Parameter(Mandatory)][string]$InstallRoot,
+        [Parameter(Mandatory)][string]$AcceptanceRoot
+    )
+    $manifestPath = Assert-SafeAcceptancePath -Path (Join-Path $InstallRoot 'AmmarTrading.Sync.payload-manifest.txt') -AcceptanceRoot $AcceptanceRoot
+    if(-not (Test-Path -LiteralPath $manifestPath -PathType Leaf)) { throw 'Installed product payload manifest is missing.' }
+    $relativePaths = @(Get-Content -LiteralPath $manifestPath | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+    if($relativePaths.Count -eq 0) { throw 'Installed product payload manifest is empty.' }
+    $hashes = @{}
+    foreach($relativePath in $relativePaths) {
+        if([IO.Path]::IsPathRooted($relativePath) -or
+           $relativePath -match '(^|\\)\.\.?($|\\)' -or
+           $relativePath.Contains(':') -or
+           $relativePath.Contains('/') -or
+           $hashes.ContainsKey($relativePath)) {
+            throw 'Installed product payload manifest contains an unsafe or duplicate path.'
+        }
+        $payloadPath = Assert-SafeAcceptancePath -Path (Join-Path $InstallRoot $relativePath) -AcceptanceRoot $AcceptanceRoot
+        if(-not (Test-Path -LiteralPath $payloadPath -PathType Leaf)) { throw "Installed product payload file is missing: $relativePath" }
+        $hashes[$relativePath] = (Get-FileHash -LiteralPath $payloadPath -Algorithm SHA256).Hash.ToLowerInvariant()
+    }
+    return $hashes
+}
+
 function Repair-FailedSetupAttempt {
     param(
         [Parameter(Mandatory)][string]$AcceptanceRoot,
@@ -142,6 +167,10 @@ if([string]::IsNullOrWhiteSpace($FaultInstaller)) {
 $resolvedFaultInstaller = [IO.Path]::GetFullPath($FaultInstaller)
 if(-not (Test-Path -LiteralPath $resolvedFaultInstaller -PathType Leaf)) { throw "Fault-injection installer missing: $resolvedFaultInstaller" }
 if([IO.Path]::GetFileName($resolvedFaultInstaller) -cne 'AmmarTrading Sync Upgrade Fault Test.exe') { throw 'The fault installer filename is not test-scoped.' }
+$faultProbeHashPath = Join-Path (Split-Path -Parent $resolvedFaultInstaller) 'AmmarTrading Sync Upgrade Fault Probe.sha256'
+if(-not (Test-Path -LiteralPath $faultProbeHashPath -PathType Leaf)) { throw "Fault probe hash missing: $faultProbeHashPath" }
+$expectedFaultProbeHash = (Get-Content -LiteralPath $faultProbeHashPath -Raw).Trim().ToLowerInvariant()
+if($expectedFaultProbeHash -cnotmatch '^[0-9a-f]{64}$') { throw 'Fault probe hash is malformed.' }
 
 if(@(Get-UninstallEntry).Count -gt 0) { throw 'AmmarTrading Sync is already installed.' }
 if(Get-Process -Name 'AmmarTrading.Sync' -ErrorAction SilentlyContinue) { throw 'AmmarTrading Sync is already running.' }
@@ -232,7 +261,23 @@ try {
     $launchedProcessId=$null; Unregister-ScheduledTask $launchTaskName -Confirm:$false; $launchTaskCreated=$false
 
     $priorExeHash = (Get-FileHash $installedExe -Algorithm SHA256).Hash
+    if($expectedFaultProbeHash -ceq $priorExeHash.ToLowerInvariant()) { throw 'Fault probe hash unexpectedly matches the production executable.' }
+    $priorPayloadHashes = Get-InstalledPayloadHashes -InstallRoot $installRoot -AcceptanceRoot $acceptanceRoot
+    $distinguishablePayloadTargets = @(
+        'AmmarTrading.Sync.exe',
+        'AmmarTrading.Sync.Core.dll',
+        'Assets\Web\index.html',
+        'Scripts\Sync-BasketsToOneDrive.ps1'
+    )
+    foreach($relativePath in $distinguishablePayloadTargets) {
+        if(-not $priorPayloadHashes.ContainsKey($relativePath)) { throw "Rollback probe target is absent from the product payload manifest: $relativePath" }
+        if($priorPayloadHashes[$relativePath] -ceq $expectedFaultProbeHash) { throw "Fault probe hash unexpectedly matches a production payload file: $relativePath" }
+    }
     $priorEntry = Assert-ExactUninstallEntry -ExpectedInstallRoot $installRoot
+    $faultAppliedMarker = Assert-SafeAcceptancePath -Path (Join-Path $installRoot 'Task9FaultProbe.applied') -AcceptanceRoot $acceptanceRoot
+    if((Test-Path -LiteralPath $faultAppliedMarker) -or (Test-Path -LiteralPath (Join-Path $installRoot 'Task9UpgradeFault.blocked'))) {
+        throw 'Production installation contains an acceptance-only rollback seam.'
+    }
     $faultCollision = Assert-SafeAcceptancePath -Path (Join-Path $installRoot 'Task9UpgradeFault.blocked') -AcceptanceRoot $acceptanceRoot
     if(Test-Path -LiteralPath $faultCollision) { throw 'The task-scoped fault collision path already exists.' }
     New-Item -ItemType Directory -Path $faultCollision | Out-Null
@@ -240,7 +285,20 @@ try {
     if($faultExit -eq 0) { throw 'Fault-injection installer unexpectedly succeeded.' }
     Assert-SafeAcceptancePath -Path $faultCollision -AcceptanceRoot $acceptanceRoot | Out-Null
     Remove-Item -LiteralPath $faultCollision -Force
+    $faultLogContent = Get-Content -LiteralPath $faultLog -Raw
+    $probeLogIndex = $faultLogContent.IndexOf('Task9FaultProbe.applied',[StringComparison]::OrdinalIgnoreCase)
+    $collisionLogIndex = $faultLogContent.IndexOf('Task9UpgradeFault.blocked',[StringComparison]::OrdinalIgnoreCase)
+    if($probeLogIndex -lt 0 -or $collisionLogIndex -le $probeLogIndex) { throw 'Fault installer did not copy the distinguishable probe before rollback.' }
+    if(Test-Path -LiteralPath $faultAppliedMarker) { throw 'Failed upgrade left the distinguishable fault probe installed.' }
     if((Get-FileHash $installedExe -Algorithm SHA256).Hash -cne $priorExeHash) { throw 'Failed upgrade changed the installed executable.' }
+    $afterFaultPayloadHashes = Get-InstalledPayloadHashes -InstallRoot $installRoot -AcceptanceRoot $acceptanceRoot
+    if($afterFaultPayloadHashes.Count -ne $priorPayloadHashes.Count) { throw 'Failed upgrade changed the allowlisted product payload.' }
+    foreach($relativePath in $priorPayloadHashes.Keys) {
+        if(-not $afterFaultPayloadHashes.ContainsKey($relativePath) -or
+           $afterFaultPayloadHashes[$relativePath] -cne $priorPayloadHashes[$relativePath]) {
+            throw "Failed upgrade changed the allowlisted product payload: $relativePath"
+        }
+    }
     if(-not (Test-Path -LiteralPath $runtimeSentinel) -or -not (Test-Path -LiteralPath $oneDriveSentinel) -or $null -eq (Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue)) { throw 'Failed upgrade removed preserved state.' }
     $afterFaultEntry = Assert-ExactUninstallEntry -ExpectedInstallRoot $installRoot
     if([string]$afterFaultEntry.UninstallString -cne [string]$priorEntry.UninstallString) { throw 'Failed upgrade changed uninstall registration.' }
@@ -251,9 +309,9 @@ try {
 
     $uninstaller = Assert-SafeAcceptancePath -Path (Join-Path $installRoot 'unins000.exe') -AcceptanceRoot $acceptanceRoot
     Invoke-CheckedProcess -FilePath $uninstaller -ArgumentList @('/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART',"/LOG=`"$uninstallLog`"")
-    $setupAttempted = $false
     if((Test-Path -LiteralPath $installedExe) -or (Test-Path -LiteralPath $startMenuShortcut) -or (Test-Path -LiteralPath $desktopShortcut) -or @(Get-UninstallEntry).Count) { throw 'Uninstall did not remove product files and registration.' }
     if(-not (Test-Path -LiteralPath $runtimeSentinel) -or -not (Test-Path -LiteralPath $oneDriveSentinel) -or $null -eq (Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue)) { throw 'Uninstall removed preserved state.' }
+    $setupAttempted = $false
     Write-Host 'AmmarTrading Sync install, failed-upgrade rollback, successful upgrade, and uninstall acceptance passed.'
 } finally {
     if($null -ne $launchedProcessId) {

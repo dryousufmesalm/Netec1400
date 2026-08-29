@@ -3,7 +3,9 @@ param(
     [ValidateSet('Debug','Release')]
     [string]$Configuration = 'Release',
     [string]$WebView2BootstrapperPath,
-    [string]$InnoCompilerPath
+    [string]$InnoCompilerPath,
+    [ValidateSet('None','Preflight','PostPromotionCleanup')]
+    [string]$Task9TestLifecycleFault = 'None'
 )
 
 $ErrorActionPreference = 'Stop'
@@ -67,6 +69,7 @@ function Assert-ReleasePayload {
 
     $required = @(
         'AmmarTrading.Sync.exe',
+        'AmmarTrading.Sync.payload-manifest.txt',
         'Assets\Web\index.html',
         'Scripts\Install-BasketsSyncTask.ps1',
         'Scripts\Invoke-AmmarTradingDesktopOperation.ps1',
@@ -99,29 +102,38 @@ function Assert-ReleasePayload {
 }
 
 function Remove-CanonicalReleaseArtifacts {
-    param([string]$InstallerPath,[string]$ManifestPath,[string]$FaultPath)
+    param([string]$InstallerPath,[string]$ManifestPath,[string]$FaultPath,[string]$FaultProbeHashPath)
     Remove-Item -LiteralPath $InstallerPath -Force -ErrorAction SilentlyContinue
     Remove-Item -LiteralPath $ManifestPath -Force -ErrorAction SilentlyContinue
     Remove-Item -LiteralPath $FaultPath -Force -ErrorAction SilentlyContinue
+    Remove-Item -LiteralPath $FaultProbeHashPath -Force -ErrorAction SilentlyContinue
     $faultDirectory = Split-Path -Parent $FaultPath
     if((Test-Path -LiteralPath $faultDirectory -PathType Container) -and @(Get-ChildItem -LiteralPath $faultDirectory -Force).Count -eq 0) {
         Remove-Item -LiteralPath $faultDirectory -Force
     }
 }
 
+function Assert-CanonicalReleaseArtifactsAbsent {
+    param([string]$InstallerPath,[string]$ManifestPath,[string]$FaultPath,[string]$FaultProbeHashPath)
+    foreach($path in @($InstallerPath,$ManifestPath,$FaultPath,$FaultProbeHashPath)) {
+        if(Test-Path -LiteralPath $path) { throw "Canonical release artifact was not invalidated: $path" }
+    }
+}
+
 function Publish-ReleaseArtifacts {
     param(
-        [string]$StagedInstaller,[string]$StagedManifest,[string]$StagedFaultInstaller,
-        [string]$InstallerPath,[string]$ManifestPath,[string]$FaultPath
+        [string]$StagedInstaller,[string]$StagedManifest,[string]$StagedFaultInstaller,[string]$StagedFaultProbeHash,
+        [string]$InstallerPath,[string]$ManifestPath,[string]$FaultPath,[string]$FaultProbeHashPath
     )
-    Remove-CanonicalReleaseArtifacts -InstallerPath $InstallerPath -ManifestPath $ManifestPath -FaultPath $FaultPath
+    Remove-CanonicalReleaseArtifacts -InstallerPath $InstallerPath -ManifestPath $ManifestPath -FaultPath $FaultPath -FaultProbeHashPath $FaultProbeHashPath
     try {
         New-Item -ItemType Directory -Path (Split-Path -Parent $FaultPath) -Force | Out-Null
-        [IO.File]::Move($StagedInstaller,$InstallerPath)
-        [IO.File]::Move($StagedManifest,$ManifestPath)
         [IO.File]::Move($StagedFaultInstaller,$FaultPath)
+        [IO.File]::Move($StagedFaultProbeHash,$FaultProbeHashPath)
+        [IO.File]::Move($StagedManifest,$ManifestPath)
+        [IO.File]::Move($StagedInstaller,$InstallerPath)
     } catch {
-        Remove-CanonicalReleaseArtifacts -InstallerPath $InstallerPath -ManifestPath $ManifestPath -FaultPath $FaultPath
+        Remove-CanonicalReleaseArtifacts -InstallerPath $InstallerPath -ManifestPath $ManifestPath -FaultPath $FaultPath -FaultProbeHashPath $FaultProbeHashPath
         throw
     }
 }
@@ -137,20 +149,26 @@ $buildRoot = Join-Path $artifactRoot ('.build-' + [Guid]::NewGuid().ToString('N'
 $publishRoot = Join-Path $buildRoot 'publish'
 $productionOutputRoot = Join-Path $buildRoot 'production-output'
 $faultOutputRoot = Join-Path $buildRoot 'fault-output'
+$faultProbeRoot = Join-Path $buildRoot 'fault-probe'
+$faultProbePath = Join-Path $faultProbeRoot 'Task9FaultProbe.bin'
 $bootstrapperStagingPath = Join-Path $buildRoot 'MicrosoftEdgeWebView2Setup.exe'
 $installerPath = Join-Path $artifactRoot 'AmmarTrading Sync Setup.exe'
 $manifestPath = Join-Path $artifactRoot 'SHA256SUMS.txt'
 $faultInstallerPath = Join-Path $artifactRoot '.acceptance\AmmarTrading Sync Upgrade Fault Test.exe'
+$faultProbeHashPath = Join-Path $artifactRoot '.acceptance\AmmarTrading Sync Upgrade Fault Probe.sha256'
 $stagedInstallerPath = Join-Path $productionOutputRoot 'AmmarTrading Sync Setup.exe'
 $stagedManifestPath = Join-Path $buildRoot 'SHA256SUMS.txt'
 $stagedFaultInstallerPath = Join-Path $faultOutputRoot 'AmmarTrading Sync Upgrade Fault Test.exe'
-$iscc = Resolve-InnoCompiler -RequestedPath $InnoCompilerPath
-
-Remove-CanonicalReleaseArtifacts -InstallerPath $installerPath -ManifestPath $manifestPath -FaultPath $faultInstallerPath
-New-Item -ItemType Directory -Path $publishRoot -Force | Out-Null
-New-Item -ItemType Directory -Path $productionOutputRoot,$faultOutputRoot -Force | Out-Null
+$stagedFaultProbeHashPath = Join-Path $buildRoot 'AmmarTrading Sync Upgrade Fault Probe.sha256'
+$releasePromoted = $false
 
 try {
+Remove-CanonicalReleaseArtifacts -InstallerPath $installerPath -ManifestPath $manifestPath -FaultPath $faultInstallerPath -FaultProbeHashPath $faultProbeHashPath
+Assert-CanonicalReleaseArtifactsAbsent -InstallerPath $installerPath -ManifestPath $manifestPath -FaultPath $faultInstallerPath -FaultProbeHashPath $faultProbeHashPath
+if($Task9TestLifecycleFault -ceq 'Preflight') { throw 'Task 9 injected preflight failure.' }
+$iscc = Resolve-InnoCompiler -RequestedPath $InnoCompilerPath
+New-Item -ItemType Directory -Path $publishRoot -Force | Out-Null
+New-Item -ItemType Directory -Path $productionOutputRoot,$faultOutputRoot,$faultProbeRoot -Force | Out-Null
 Invoke-NativeCommand -FilePath 'npm.cmd' -ArgumentList @('ci','--ignore-scripts') -WorkingDirectory $prototypeRoot
 $priorQaBrowser = $env:QA_BROWSER
 try {
@@ -203,7 +221,33 @@ foreach($scriptName in $allowedScripts) {
 }
 $createdumpPath = Join-Path $publishRoot 'createdump.exe'
 if(Test-Path -LiteralPath $createdumpPath -PathType Leaf) { Remove-Item -LiteralPath $createdumpPath -Force }
+$payloadManifestName = 'AmmarTrading.Sync.payload-manifest.txt'
+$payloadManifestPath = Join-Path $publishRoot $payloadManifestName
+$publishPrefixLength = $publishRoot.TrimEnd('\').Length + 1
+$payloadRelativePaths = @(
+    Get-ChildItem -LiteralPath $publishRoot -File -Recurse -Force |
+        Where-Object { $_.FullName -ine $payloadManifestPath } |
+        ForEach-Object { $_.FullName.Substring($publishPrefixLength).Replace('/','\') }
+)
+$payloadRelativePaths += $payloadManifestName
+$payloadRelativePaths = @($payloadRelativePaths | Sort-Object -Unique)
+foreach($relativePath in $payloadRelativePaths) {
+    if([string]::IsNullOrWhiteSpace($relativePath) -or
+       [IO.Path]::IsPathRooted($relativePath) -or
+       $relativePath -match '(^|\\)\.\.?($|\\)' -or
+       $relativePath.Contains(':') -or
+       $relativePath.Contains('/')) {
+        throw "Unsafe release payload manifest path: $relativePath"
+    }
+}
+[IO.File]::WriteAllLines($payloadManifestPath,$payloadRelativePaths,(New-Object Text.UTF8Encoding($false)))
 Assert-ReleasePayload -PublishDirectory $publishRoot
+
+[IO.File]::WriteAllText($faultProbePath,'Task9 fault payload - never distribute',(New-Object Text.UTF8Encoding($false)))
+$faultProbeHash = (Get-FileHash -LiteralPath $faultProbePath -Algorithm SHA256).Hash.ToLowerInvariant()
+$productionExeHash = (Get-FileHash -LiteralPath (Join-Path $publishRoot 'AmmarTrading.Sync.exe') -Algorithm SHA256).Hash.ToLowerInvariant()
+if($faultProbeHash -ceq $productionExeHash) { throw 'The acceptance fault probe must differ from the production executable.' }
+[IO.File]::WriteAllText($stagedFaultProbeHashPath,"$faultProbeHash`r`n",(New-Object Text.UTF8Encoding($false)))
 
 if([string]::IsNullOrWhiteSpace($WebView2BootstrapperPath)) {
     $downloadPath = Join-Path $buildRoot 'MicrosoftEdgeWebView2Setup.download'
@@ -225,6 +269,7 @@ Invoke-NativeCommand -FilePath $iscc -ArgumentList @(
 ) -WorkingDirectory $repoRoot
 Invoke-NativeCommand -FilePath $iscc -ArgumentList @(
     '/DAcceptanceFaultInjection=1',
+    "/DFaultProbePath=$faultProbePath",
     "/DPublishDir=$publishRoot",
     "/DBootstrapperPath=$bootstrapperStagingPath",
     "/DOutputDir=$faultOutputRoot",
@@ -245,13 +290,24 @@ $installerHash = (Get-FileHash -LiteralPath $stagedInstallerPath -Algorithm SHA2
 if((Get-Content -LiteralPath $stagedManifestPath -Raw).Trim() -cne "$installerHash *AmmarTrading Sync Setup.exe") {
     throw 'The staged SHA-256 manifest failed validation.'
 }
-Publish-ReleaseArtifacts -StagedInstaller $stagedInstallerPath -StagedManifest $stagedManifestPath -StagedFaultInstaller $stagedFaultInstallerPath -InstallerPath $installerPath -ManifestPath $manifestPath -FaultPath $faultInstallerPath
+Publish-ReleaseArtifacts -StagedInstaller $stagedInstallerPath -StagedManifest $stagedManifestPath -StagedFaultInstaller $stagedFaultInstallerPath -StagedFaultProbeHash $stagedFaultProbeHashPath -InstallerPath $installerPath -ManifestPath $manifestPath -FaultPath $faultInstallerPath -FaultProbeHashPath $faultProbeHashPath
+$releasePromoted = $true
 
 Write-Host "Installer: $installerPath"
 Write-Host "SHA-256: $installerHash"
 } catch {
-    Remove-CanonicalReleaseArtifacts -InstallerPath $installerPath -ManifestPath $manifestPath -FaultPath $faultInstallerPath
+    Remove-CanonicalReleaseArtifacts -InstallerPath $installerPath -ManifestPath $manifestPath -FaultPath $faultInstallerPath -FaultProbeHashPath $faultProbeHashPath
+    Assert-CanonicalReleaseArtifactsAbsent -InstallerPath $installerPath -ManifestPath $manifestPath -FaultPath $faultInstallerPath -FaultProbeHashPath $faultProbeHashPath
     throw
 } finally {
-    if(Test-Path -LiteralPath $buildRoot -PathType Container) { Remove-Item -LiteralPath $buildRoot -Recurse -Force }
+    try {
+        if(Test-Path -LiteralPath $buildRoot -PathType Container) { Remove-Item -LiteralPath $buildRoot -Recurse -Force }
+        if($releasePromoted -and $Task9TestLifecycleFault -ceq 'PostPromotionCleanup') {
+            throw 'Task 9 injected post-promotion cleanup failure.'
+        }
+    } catch {
+        Remove-CanonicalReleaseArtifacts -InstallerPath $installerPath -ManifestPath $manifestPath -FaultPath $faultInstallerPath -FaultProbeHashPath $faultProbeHashPath
+        Assert-CanonicalReleaseArtifactsAbsent -InstallerPath $installerPath -ManifestPath $manifestPath -FaultPath $faultInstallerPath -FaultProbeHashPath $faultProbeHashPath
+        throw
+    }
 }
