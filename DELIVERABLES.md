@@ -19,7 +19,9 @@ The Windows desktop sync application is implemented as an internal, unsigned rel
 End-to-end evidence is deliberately split into two files:
 
 - The VPS report proves one enabled mapping per selected account, source/destination SHA-256 equality, successful local heartbeat, and ready scheduled tasks. It always records `CloudDeliveryVerified=false`.
-- The reporting-PC report consumes the VPS report and may record `CloudDeliveryVerified=true` only after the physical local OneDrive files exist and their hashes match.
+- The reporting-PC report consumes the VPS report and records `PhysicalReceiptObserved=true` only after a different Windows machine independently resolves a signed-in trusted OneDrive root, confirms OneDrive is running, reads hydrated local bytes, rechecks that no offline/recall attributes remain, and matches the VPS hashes. This is a physical-receipt observation, not a OneDrive provider attestation.
+
+Shareable evidence contains versioned, domain-separated SHA-256 identities for the Windows machine and normalized trusted OneDrive root. It never contains the raw MachineGuid, computer name, or OneDrive path. Evidence output must be a new `.json` file in a fixed local non-reparse directory outside OneDrive, runtime/configuration, MT4 sources, and publication data; existing evidence is never overwritten.
 
 Example acceptance commands (run from a trusted local checkout; keep evidence outside customer data):
 

@@ -15,6 +15,13 @@ if(-not (Test-Path -LiteralPath $RunnerPath -PathType Leaf)) {
 }
 
 $runnerSource = Get-Content -LiteralPath $RunnerPath -Raw
+$tokens=$null; $parseErrors=$null
+$runnerAst=[Management.Automation.Language.Parser]::ParseFile($RunnerPath,[ref]$tokens,[ref]$parseErrors)
+if(@($parseErrors).Count -ne 0) { throw 'Production acceptance runner does not parse.' }
+$productionParameterNames=@($runnerAst.ParamBlock.Parameters | ForEach-Object { $_.Name.VariablePath.UserPath })
+foreach($forbiddenProductionParameter in @('MachineIdentityHash','OneDriveProcessRunning','ReceiptAttributeValue','TaskEvidenceProvider')) {
+    if($forbiddenProductionParameter -in $productionParameterNames) { throw "A test seam is reachable from the production CLI: $forbiddenProductionParameter" }
+}
 foreach($requiredParameter in @(
     '[ValidateSet(''Staging'',''Vps'',''ReportingPc'')][string]$AcceptanceRole',
     '[string]$VpsName',
@@ -49,6 +56,7 @@ foreach($requiredFunction in @(
 
 $tempRoot = Join-Path ([IO.Path]::GetTempPath()) ("MoneyMachineAcceptanceContract_" + [guid]::NewGuid().ToString('N'))
 New-Item -ItemType Directory -Path $tempRoot | Out-Null
+$oldOneDrive = $env:OneDrive
 try {
     . $RunnerPath -StagingRoot $tempRoot -AsLibrary
 
@@ -56,7 +64,10 @@ try {
     $oneDriveRoot = Join-Path $fixtureRoot 'OneDrive'
     $runtimeRoot = Join-Path $fixtureRoot 'runtime'
     $sourceRoot = Join-Path $fixtureRoot 'sources'
-    New-Item -ItemType Directory -Path $oneDriveRoot,$runtimeRoot,$sourceRoot -Force | Out-Null
+    $evidenceRoot = Join-Path $fixtureRoot 'evidence'
+    $arbitraryRoot = Join-Path $fixtureRoot 'arbitrary-cloud-folder'
+    New-Item -ItemType Directory -Path $oneDriveRoot,$runtimeRoot,$sourceRoot,$evidenceRoot,$arbitraryRoot -Force | Out-Null
+    $env:OneDrive = $oneDriveRoot
     $accounts = @('10000001','10000002')
     $mappings = [Collections.Generic.List[object]]::new()
     foreach($account in $accounts) {
@@ -64,7 +75,9 @@ try {
         $destinationRoot = Join-Path $oneDriveRoot "AmmarTrading\Account_$account"
         New-Item -ItemType Directory -Path $destinationRoot -Force | Out-Null
         $destination = Join-Path $destinationRoot 'Baskets.csv'
-        [IO.File]::WriteAllText($source,"fixture-$account",[Text.UTF8Encoding]::new($false))
+        $rows = @(Import-Csv -LiteralPath (Join-Path (Split-Path -Parent $PSScriptRoot) 'tests\fixtures\AGOLD___Baskets_v3.csv'))
+        foreach($row in $rows) { $row.AccountNumber=$account; $row.BrokerName='Acceptance Broker' }
+        $rows | Export-Csv -LiteralPath $source -NoTypeInformation -Encoding utf8
         Copy-Item -LiteralPath $source -Destination $destination
         $hash = (Get-FileHash -LiteralPath $source -Algorithm SHA256).Hash.ToLowerInvariant()
         [ordered]@{
@@ -79,30 +92,101 @@ try {
     $configPath = Join-Path $runtimeRoot 'accounts.csv'
     $mappings | Export-Csv -LiteralPath $configPath -NoTypeInformation -Encoding utf8
 
-    $vpsEvidence = Get-AmmarTradingVpsAcceptanceEvidence -VpsName 'Demo VPS' -ExpectedAccountNumber $accounts -OneDriveRoot $oneDriveRoot -ConfigPath $configPath -TaskEvidenceProvider {
-        [pscustomobject]@{ TaskState='Ready'; LastTaskResult=0 }
-    }
+    Set-AmmarTradingAcceptanceTestContext -MachineIdentityHash ('a' * 64) -OneDriveProcessRunning $true -ReceiptAttributeValue 0 -TaskEvidenceProvider { [pscustomobject]@{ TaskState='Ready'; LastTaskResult=0 } }
+    $vpsEvidence = Get-AmmarTradingVpsAcceptanceEvidence -VpsName 'Demo VPS' -ExpectedAccountNumber $accounts -OneDriveRoot $oneDriveRoot -ConfigPath $configPath
     if($vpsEvidence.EvidenceRole -cne 'Vps' -or [bool]$vpsEvidence.CloudDeliveryVerified) {
         throw 'VPS evidence must be explicitly role-bound and must never claim cloud delivery.'
+    }
+    if($vpsEvidence.MachineIdentity.Scheme -cne 'sha256-domain-separated-machine-guid' -or $vpsEvidence.MachineIdentity.Version -ne 1 -or $vpsEvidence.MachineIdentity.Hash -cne ('a' * 64)) {
+        throw 'VPS evidence does not preserve the privacy-safe versioned machine identity contract.'
+    }
+    if($vpsEvidence.OneDrive.RootIdentity.Scheme -cne 'sha256-domain-separated-canonical-root' -or $vpsEvidence.OneDrive.RootIdentity.Version -ne 1 -or [string]::IsNullOrWhiteSpace($vpsEvidence.OneDrive.RootIdentity.Hash)) {
+        throw 'VPS evidence does not preserve the privacy-safe versioned OneDrive root identity contract.'
     }
     if(@($vpsEvidence.Accounts).Count -ne 2 -or @($vpsEvidence.Accounts | Where-Object { $_.SourceHash -cne $_.DestinationHash }).Count -ne 0) {
         throw 'VPS evidence must prove exactly two independently hash-matched account publications.'
     }
+    $shareableVpsJson=$vpsEvidence | ConvertTo-Json -Depth 10
+    foreach($privateValue in @($oneDriveRoot,$sourceRoot,[Environment]::MachineName)) {
+        if($shareableVpsJson -match [regex]::Escape($privateValue)) { throw 'VPS evidence leaked a raw machine name or filesystem path.' }
+    }
 
     $vpsEvidencePath = Join-Path $fixtureRoot 'vps-evidence.json'
     Write-AtomicAcceptanceReport -Path $vpsEvidencePath -Json ($vpsEvidence | ConvertTo-Json -Depth 8)
+    Set-AmmarTradingAcceptanceTestContext -MachineIdentityHash ('b' * 64) -OneDriveProcessRunning $true -ReceiptAttributeValue 0 -TaskEvidenceProvider { [pscustomobject]@{ TaskState='Ready'; LastTaskResult=0 } }
     $reportingEvidence = Get-AmmarTradingReportingAcceptanceEvidence -VpsName 'Demo VPS' -ExpectedAccountNumber $accounts -OneDriveRoot $oneDriveRoot -VpsEvidencePath $vpsEvidencePath
-    if($reportingEvidence.EvidenceRole -cne 'ReportingPc' -or -not [bool]$reportingEvidence.CloudDeliveryVerified) {
-        throw 'Only reporting-PC evidence may set CloudDeliveryVerified after physical local hash checks.'
+    if($reportingEvidence.EvidenceRole -cne 'ReportingPc' -or -not [bool]$reportingEvidence.PhysicalReceiptObserved -or $reportingEvidence.PSObject.Properties['CloudDeliveryVerified']) {
+        throw 'Reporting evidence must record a physical receipt observation without claiming provider-attested cloud delivery.'
     }
+    if(@($reportingEvidence.Accounts | Where-Object { $_.HydrationState -cne 'Hydrated' -or -not [bool]$_.PhysicalReceiptObserved }).Count -ne 0) { throw 'Reporting evidence did not prove hydrated readable local bytes.' }
+
+    Set-AmmarTradingAcceptanceTestContext -MachineIdentityHash ('a' * 64) -OneDriveProcessRunning $true -ReceiptAttributeValue 0 -TaskEvidenceProvider { [pscustomobject]@{ TaskState='Ready'; LastTaskResult=0 } }
+    $sameMachineRejected = $false
+    try { $null = Get-AmmarTradingReportingAcceptanceEvidence -VpsName 'Demo VPS' -ExpectedAccountNumber $accounts -OneDriveRoot $oneDriveRoot -VpsEvidencePath $vpsEvidencePath } catch { $sameMachineRejected = $true }
+    if(-not $sameMachineRejected) { throw 'Reporting acceptance claimed physical receipt on the same machine as the VPS.' }
+
+    Set-AmmarTradingAcceptanceTestContext -MachineIdentityHash ('b' * 64) -OneDriveProcessRunning $false -ReceiptAttributeValue 0 -TaskEvidenceProvider { [pscustomobject]@{ TaskState='Ready'; LastTaskResult=0 } }
+    $stoppedOneDriveRejected = $false
+    try { $null = Get-AmmarTradingReportingAcceptanceEvidence -VpsName 'Demo VPS' -ExpectedAccountNumber $accounts -OneDriveRoot $oneDriveRoot -VpsEvidencePath $vpsEvidencePath } catch { $stoppedOneDriveRejected = $true }
+    if(-not $stoppedOneDriveRejected) { throw 'Reporting acceptance claimed physical receipt while OneDrive was not running.' }
+
+    foreach($unhydratedAttribute in @([uint32]4096,[uint32]262144,[uint32]4194304)) {
+        Set-AmmarTradingAcceptanceTestContext -MachineIdentityHash ('b' * 64) -OneDriveProcessRunning $true -ReceiptAttributeValue $unhydratedAttribute -TaskEvidenceProvider { [pscustomobject]@{ TaskState='Ready'; LastTaskResult=0 } }
+        $recallRejected = $false
+        try { $null = Get-AmmarTradingReportingAcceptanceEvidence -VpsName 'Demo VPS' -ExpectedAccountNumber $accounts -OneDriveRoot $oneDriveRoot -VpsEvidencePath $vpsEvidencePath } catch { $recallRejected = $true }
+        if(-not $recallRejected) { throw "Reporting acceptance claimed physical receipt for offline/recall attribute $unhydratedAttribute." }
+    }
+
+    Set-AmmarTradingAcceptanceTestContext -MachineIdentityHash ('b' * 64) -OneDriveProcessRunning $true -ReceiptAttributeValue 0 -TaskEvidenceProvider { [pscustomobject]@{ TaskState='Ready'; LastTaskResult=0 } }
+    $arbitraryRejected = $false
+    try { $null = Get-AmmarTradingReportingAcceptanceEvidence -VpsName 'Demo VPS' -ExpectedAccountNumber $accounts -OneDriveRoot $arbitraryRoot -VpsEvidencePath $vpsEvidencePath } catch { $arbitraryRejected = $true }
+    if(-not $arbitraryRejected) { throw 'Reporting acceptance trusted an arbitrary local folder as OneDrive.' }
+
+    $uncRejected = $false
+    try { $null = Get-AmmarTradingReportingAcceptanceEvidence -VpsName 'Demo VPS' -ExpectedAccountNumber $accounts -OneDriveRoot '\\server\share' -VpsEvidencePath $vpsEvidencePath } catch { $uncRejected = $true }
+    if(-not $uncRejected) { throw 'Reporting acceptance accepted a UNC OneDrive root.' }
+
+    $junctionTarget = Join-Path $fixtureRoot 'junction-target'
+    $junctionRoot = Join-Path $fixtureRoot 'junction-root'
+    New-Item -ItemType Directory -Path $junctionTarget | Out-Null
+    New-Item -ItemType Junction -Path $junctionRoot -Target $junctionTarget | Out-Null
+    $env:OneDrive = $junctionRoot
+    $junctionRejected = $false
+    try { $null = Get-AmmarTradingReportingAcceptanceEvidence -VpsName 'Demo VPS' -ExpectedAccountNumber $accounts -OneDriveRoot $junctionRoot -VpsEvidencePath $vpsEvidencePath } catch { $junctionRejected = $true }
+    if(-not $junctionRejected) { throw 'Reporting acceptance accepted a junction OneDrive root.' }
+    $env:OneDrive = $oneDriveRoot
+
+    $setupModule = Get-Module MoneyMachineSyncSetup
+    & $setupModule { $script:AmmarTradingDriveTypeResolver = { param([string]$Root) [IO.DriveType]::Network } }
+    $mappedRejected = $false
+    try { $null = Get-AmmarTradingVpsAcceptanceEvidence -VpsName 'Demo VPS' -ExpectedAccountNumber $accounts -OneDriveRoot $oneDriveRoot -ConfigPath $configPath } catch { $mappedRejected = $true }
+    if(-not $mappedRejected) { throw 'VPS acceptance accepted a mapped/network volume.' }
+    & $setupModule { $script:AmmarTradingDriveTypeResolver = { param([string]$Root) (New-Object IO.DriveInfo($Root)).DriveType } }
+
+    $mismatchConfig = Join-Path $runtimeRoot 'mismatch.csv'
+    @($mappings[0], [pscustomobject]@{ Enabled='true'; VpsName='Demo VPS'; ExpectedMT4Login='99999999'; SourceCsv=$mappings[1].SourceCsv; OneDriveRoot=$oneDriveRoot }) | Export-Csv -LiteralPath $mismatchConfig -NoTypeInformation -Encoding utf8
+    $schemaMismatchRejected = $false
+    try { $null = Get-AmmarTradingVpsAcceptanceEvidence -VpsName 'Demo VPS' -ExpectedAccountNumber @('10000001','99999999') -OneDriveRoot $oneDriveRoot -ConfigPath $mismatchConfig } catch { $schemaMismatchRejected = $true }
+    if(-not $schemaMismatchRejected) { throw 'VPS acceptance accepted a source whose schema-v3 account identity differs from the expected account.' }
+
+    $safeOutput = Join-Path $evidenceRoot 'new-evidence.json'
+    Write-NewAmmarTradingAcceptanceEvidence -Path $safeOutput -Json '{"status":"pass"}' -OneDriveRoot $oneDriveRoot -ProtectedPaths (@($configPath) + @($mappings | ForEach-Object SourceCsv)) -InputPaths @($vpsEvidencePath)
+    $collisionRejected = $false
+    try { Write-NewAmmarTradingAcceptanceEvidence -Path $safeOutput -Json '{"status":"replacement"}' -OneDriveRoot $oneDriveRoot -ProtectedPaths @($configPath) -InputPaths @($vpsEvidencePath) } catch { $collisionRejected = $true }
+    if(-not $collisionRejected -or (Get-Content -LiteralPath $safeOutput -Raw) -notmatch 'pass') { throw 'Acceptance evidence overwrote an existing evidence target.' }
+    $oneDriveOutputRejected = $false
+    try { Write-NewAmmarTradingAcceptanceEvidence -Path (Join-Path $oneDriveRoot 'evidence.json') -Json '{}' -OneDriveRoot $oneDriveRoot -ProtectedPaths @($configPath) } catch { $oneDriveOutputRejected = $true }
+    if(-not $oneDriveOutputRejected) { throw 'Acceptance evidence was written inside OneDrive.' }
+    $overlapRejected = $false
+    try { Write-NewAmmarTradingAcceptanceEvidence -Path (Join-Path $sourceRoot 'evidence.json') -Json '{}' -OneDriveRoot $oneDriveRoot -ProtectedPaths (@($configPath) + @($mappings | ForEach-Object SourceCsv)) } catch { $overlapRejected = $true }
+    if(-not $overlapRejected) { throw 'Acceptance evidence was written beside protected source CSV data.' }
+    if(@(Get-ChildItem -LiteralPath $evidenceRoot -Filter '*.tmp' -Force -ErrorAction SilentlyContinue).Count -ne 0) { throw 'Acceptance evidence left an atomic-write temporary file.' }
 
     $duplicate = @($mappings + $mappings[0])
     $duplicate | Export-Csv -LiteralPath $configPath -NoTypeInformation -Encoding utf8
     $duplicateRejected = $false
     try {
-        $null = Get-AmmarTradingVpsAcceptanceEvidence -VpsName 'Demo VPS' -ExpectedAccountNumber $accounts -OneDriveRoot $oneDriveRoot -ConfigPath $configPath -TaskEvidenceProvider {
-            [pscustomobject]@{ TaskState='Ready'; LastTaskResult=0 }
-        }
+        $null = Get-AmmarTradingVpsAcceptanceEvidence -VpsName 'Demo VPS' -ExpectedAccountNumber $accounts -OneDriveRoot $oneDriveRoot -ConfigPath $configPath
     } catch { $duplicateRejected = $true }
     if(-not $duplicateRejected) { throw 'VPS evidence accepted duplicate mappings for one selected account.' }
 
@@ -147,5 +231,6 @@ try {
     Write-Host 'Windows production acceptance contract passed.'
 }
 finally {
+    if($null -ne $oldOneDrive) { $env:OneDrive=$oldOneDrive } else { Remove-Item Env:\OneDrive -ErrorAction SilentlyContinue }
     if(Test-Path -LiteralPath $tempRoot) { Remove-Item -LiteralPath $tempRoot -Recurse -Force }
 }
