@@ -26,6 +26,7 @@ import {
   accountNumber,
   buildSetupPayload,
   canContinueFromAccounts,
+  configuredAccountView,
   discoveryId,
   initialWizardState,
   isAccountEligible,
@@ -129,13 +130,8 @@ function LoadingState({ label }) {
 
 function SystemScreen({ state, busy, onRefresh, onContinue, dispatch }) {
   const rawChecks = arrayField(state.systemStatus, "checks", "Checks");
-  const checks = rawChecks.length ? rawChecks : [
-    { Name: "Windows and PowerShell", Ready: true, Message: "Compatible Windows tools are available." },
-    { Name: "MT4 terminal data", Ready: true, Message: "MT4 report locations can be checked securely." },
-    { Name: "OneDrive", Ready: true, Message: "Local OneDrive folders can be detected." },
-    { Name: "Automatic sync", Ready: true, Message: "Windows Scheduled Tasks are available." },
-  ];
-  const systemReady = field(state.systemStatus, "ready", "Ready", checks.every((check) => field(check, "ready", "Ready", false)));
+  const checks = rawChecks;
+  const systemReady = state.systemStatus !== null && field(state.systemStatus, "ready", "Ready", false) === true;
 
   return (
     <WizardLayout screen={screens.SYSTEM}>
@@ -159,6 +155,7 @@ function SystemScreen({ state, busy, onRefresh, onContinue, dispatch }) {
               </article>
             );
           })}
+          {checks.length === 0 && <div className="empty-inline"><WarningCircle /><span><b>System checks are unavailable</b>Open the installed Windows app and run the check again.</span></div>}
         </div>
       </section>
       <ErrorAlert message={state.error} />
@@ -275,19 +272,22 @@ function StageRow({ row }) {
   return <article className={`stage-row ${row.status}`}><span><Icon className={row.status === "running" ? "spin" : ""} weight="fill" /></span><div><h3>{row.label}</h3><p>{row.message}</p></div><strong>{row.status === "success" ? "Complete" : row.status === "error" ? "Needs attention" : row.status === "running" ? "Running" : "Pending"}</strong></article>;
 }
 
-function TestScreen({ state, validationState, setupBusy, onBack, onApply }) {
+function TestScreen({ state, validationState, setupBusy, activity, onBack, onApply }) {
   const stageRows = mapSetupStages(state.stages);
   const isReady = validationState === "ready";
   return (
     <WizardLayout screen={screens.TEST}>
       <PageHeading eyebrow="Step 4 of 5" title="Test and apply synchronization" copy="The selected sources are checked again before any configuration changes. Setup then publishes each CSV locally and enables automatic sync." />
       <section className="content-card test-card">
-        <div className={`test-hero ${isReady ? "ready" : state.error ? "error" : "working"}`} aria-live="polite">
-          {validationState === "checking" ? <SpinnerGap className="spin" /> : isReady ? <ShieldCheck weight="duotone" /> : <WarningCircle weight="duotone" />}
-          <div><h2>{validationState === "checking" ? "Validating selected accounts" : isReady ? "Selections are ready" : "Validation needs attention"}</h2><p>{validationState === "checking" ? "No settings are being changed yet." : isReady ? "Choose Apply setup to configure every selected account in one transaction." : "Review the message below, then return to the relevant step."}</p></div>
-        </div>
-        <div className="stage-list">
-          {stageRows.map((row) => <StageRow key={row.id} row={setupBusy && row.status === "pending" ? { ...row, status: "running", message: "Setup is processing this stage." } : row} />)}
+        <div className="setup-live-region" aria-live="polite" aria-atomic="true">
+          <div className="setup-activity">{activity}</div>
+          <div className={`test-hero ${isReady ? "ready" : state.error ? "error" : "working"}`}>
+            {validationState === "checking" || setupBusy ? <SpinnerGap className="spin" /> : isReady ? <ShieldCheck weight="duotone" /> : <WarningCircle weight="duotone" />}
+            <div><h2>{setupBusy ? "Applying setup" : validationState === "checking" ? "Validating selected accounts" : isReady ? "Selections are ready" : "Validation needs attention"}</h2><p>{setupBusy ? "The selected accounts are being configured in one transaction." : validationState === "checking" ? "No settings are being changed yet." : isReady ? "Choose Apply setup to configure every selected account in one transaction." : "Review the message below, then return to the relevant step."}</p></div>
+          </div>
+          <div className="stage-list">
+            {stageRows.map((row) => <StageRow key={row.id} row={setupBusy && row.status === "pending" ? { ...row, status: "running", message: "Setup is processing this stage." } : row} />)}
+          </div>
         </div>
         <div className="local-note"><Info weight="fill" /><span><b>No cloud-delivery claim</b>A successful test proves the local AmmarTrading file and Windows automation. It does not prove that OneDrive has uploaded the file.</span></div>
       </section>
@@ -298,7 +298,11 @@ function TestScreen({ state, validationState, setupBusy, onBack, onApply }) {
 }
 
 function ResultAccounts({ accounts }) {
-  return <div className="result-accounts">{accounts.map((account, index) => <article key={`${field(account, "accountNumber", "AccountNumber")}-${index}`}><span className="account-icon"><DesktopTower weight="duotone" /></span><div><h3>Account {field(account, "accountNumber", "AccountNumber")}</h3><p>{field(account, "brokerName", "BrokerName", "MT4 account")}</p><small>{field(account, "destination", "Destination", "Local AmmarTrading folder")}</small></div><span className="status-badge ready"><CheckCircle weight="fill" /> Published locally</span></article>)}</div>;
+  return <div className="result-accounts">{accounts.map((account, index) => {
+    const view = configuredAccountView(account);
+    const PublicationIcon = view.publication.tone === "success" ? CheckCircle : view.publication.tone === "error" ? XCircle : Info;
+    return <article key={`${view.accountNumber}-${index}`}><span className="account-icon"><DesktopTower weight="duotone" /></span><div className="result-account-copy"><h3>Account {view.accountNumber}</h3><p>{view.brokerName}</p><small>{view.destination}</small><div className="result-evidence"><span>{view.automation.label}</span><span>Freshness: {view.freshness}</span><span>Status: {view.status}</span></div>{view.failure && <div className="account-failure" role="alert">{view.failure}</div>}</div><span className={`status-badge ${view.publication.tone}`}><PublicationIcon weight="fill" /> {view.publication.label}</span></article>;
+  })}</div>;
 }
 
 function FinishScreen({ state, actionBusy, onOpen, onRun, onStatus, onAdd, onExport }) {
@@ -394,7 +398,7 @@ export function App() {
       else dispatch({ type: "ERROR_SET", error: safeMessage(systemResult.reason) });
       const configured = configuredResult.status === "fulfilled" ? arrayField(configuredResult.value, "accounts", "Accounts") : [];
       dispatch({ type: "CONFIGURED_LOADED", accounts: configured });
-      if (configured.length) dispatch({ type: "SCREEN_CHANGED", screen: screens.MONITOR });
+      if (systemResult.status === "fulfilled" && configured.length) dispatch({ type: "SCREEN_CHANGED", screen: screens.MONITOR });
       setActivity(configured.length ? "Configured account status loaded." : "System check complete.");
       setBusy((current) => ({ ...current, startup: false }));
     })();
@@ -523,7 +527,7 @@ export function App() {
       {state.screen === screens.SYSTEM && <SystemScreen state={state} busy={busy.startup} onRefresh={loadSystem} onContinue={() => discoverAccounts({ clear: true })} dispatch={dispatch} />}
       {state.screen === screens.ACCOUNTS && <AccountsScreen state={state} busy={busy.discovery} activity={activity} onRefresh={discoverAccounts} onBrowse={browseForCsv} onBack={() => dispatch({ type: "SCREEN_CHANGED", screen: screens.SYSTEM })} onContinue={openOneDrive} dispatch={dispatch} />}
       {state.screen === screens.ONEDRIVE && <OneDriveScreen state={state} busy={busy.roots} onBack={() => dispatch({ type: "SCREEN_CHANGED", screen: screens.ACCOUNTS })} onContinue={validateSelection} dispatch={dispatch} />}
-      {state.screen === screens.TEST && <TestScreen state={state} validationState={validationState} setupBusy={busy.setup} onBack={() => dispatch({ type: "SCREEN_CHANGED", screen: screens.ONEDRIVE })} onApply={applySetup} />}
+      {state.screen === screens.TEST && <TestScreen state={state} validationState={validationState} setupBusy={busy.setup} activity={activity} onBack={() => dispatch({ type: "SCREEN_CHANGED", screen: screens.ONEDRIVE })} onApply={applySetup} />}
       {state.screen === screens.FINISH && <FinishScreen state={state} actionBusy={busy.action} onOpen={openFolder} onRun={runSync} onStatus={viewStatus} onAdd={() => discoverAccounts({ clear: true })} onExport={exportReport} />}
       {state.screen === screens.MONITOR && <MonitorScreen state={state} loading={busy.action} activity={activity} onRefresh={viewStatus} onRun={runSync} onOpen={openFolder} onAdd={() => discoverAccounts({ clear: true })} onExport={exportReport} />}
       <footer><span>AmmarTrading Sync • Local Windows application</span><span><ShieldCheck weight="fill" /> Trading and Microsoft passwords are never requested</span></footer>

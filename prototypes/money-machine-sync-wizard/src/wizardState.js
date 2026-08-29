@@ -51,6 +51,47 @@ export function rootPath(root) {
   return String(value(root, "path", "Path") ?? root ?? "");
 }
 
+function normalizedEvidence(valueToNormalize, successValues, errorValues) {
+  const normalized = String(valueToNormalize ?? "").trim().toLowerCase();
+  if (successValues.includes(normalized)) return "success";
+  if (errorValues.includes(normalized)) return "error";
+  return "neutral";
+}
+
+export function configuredAccountView(account) {
+  const localPublished = value(account, "localPublished", "LocalPublished");
+  const taskState = String(value(account, "taskState", "TaskState") ?? "").trim();
+  const publication = localPublished === true
+    ? { tone: "success", label: "Published locally" }
+    : localPublished === false
+      ? { tone: "error", label: "Not published locally" }
+      : { tone: "neutral", label: "Local publication unknown" };
+  const taskTone = normalizedEvidence(
+    taskState,
+    ["registered", "ready", "running", "active", "success"],
+    ["failed", "error", "disabled", "unavailable"],
+  );
+
+  return {
+    accountNumber: accountNumber(account) || "Account unknown",
+    brokerName: String(value(account, "brokerName", "BrokerName") ?? "Broker unknown"),
+    destination: String(value(account, "destination", "Destination") ?? "Local destination unavailable"),
+    publication,
+    automation: {
+      tone: taskTone,
+      label: taskState ? `Automation ${taskState}` : "Automation unknown",
+    },
+    freshness: String(value(account, "freshness", "Freshness") ?? "Freshness unknown"),
+    status: String(value(account, "status", "Status") ?? "Status unknown"),
+    failure: String(
+      value(account, "failureReason", "FailureReason")
+      ?? value(account, "lastError", "LastError")
+      ?? value(account, "failure", "Failure")
+      ?? "",
+    ),
+  };
+}
+
 function isRecommendedRoot(root) {
   return ["isActive", "IsActive", "isDefault", "IsDefault", "recommended", "Recommended"]
     .some((key) => root?.[key] === true);
@@ -177,7 +218,7 @@ export function reduceWizard(state, action) {
         error: null,
       };
     case "CONFIGURED_LOADED":
-      return { ...state, configuredAccounts: Array.isArray(action.accounts) ? action.accounts : [], error: null };
+      return { ...state, configuredAccounts: Array.isArray(action.accounts) ? action.accounts : [] };
     case "ERROR_SET":
       return { ...state, error: String(action.error ?? "An unexpected error occurred.") };
     case "ERROR_CLEARED":

@@ -98,15 +98,44 @@ const browser = await chromium.launch({ executablePath: browserPath, headless: t
 
 async function capture(page, filename, heading) {
   await page.getByRole("heading", { name: heading }).waitFor();
+  await page.evaluate(() => window.scrollTo(0, 0));
+  await page.waitForFunction(() => window.scrollX === 0 && window.scrollY === 0);
+  const metrics = await page.evaluate(() => {
+    const rect = (selector) => {
+      const element = document.querySelector(selector);
+      if (!element) return null;
+      const bounds = element.getBoundingClientRect();
+      return { top: bounds.top, bottom: bounds.bottom, height: bounds.height };
+    };
+    const topbar = rect(".topbar");
+    const page = rect("main.page");
+    const footer = rect("footer");
+    const headerAction = rect(".header-action");
+    const viewportHeight = window.innerHeight;
+    const documentHeight = document.documentElement.scrollHeight;
+    return {
+      scrollX: window.scrollX,
+      scrollY: window.scrollY,
+      horizontalOverflow: document.documentElement.scrollWidth > document.documentElement.clientWidth,
+      verticalOverflow: documentHeight > viewportHeight + 1,
+      viewportWidth: window.innerWidth,
+      viewportHeight,
+      documentWidth: document.documentElement.scrollWidth,
+      documentHeight,
+      topbar,
+      page,
+      footer,
+      topbarVisible: Boolean(topbar && topbar.top >= 0 && topbar.bottom <= viewportHeight),
+      pageVerticallyClipped: Boolean(page && (page.top < 0 || page.bottom > viewportHeight)),
+      footerVisible: Boolean(footer && footer.top >= 0 && footer.bottom <= viewportHeight),
+      headerActionHeight: headerAction?.height ?? null,
+      headerActionMeetsMinimum: headerAction === null || headerAction.height >= 44,
+      hasArabic: /[\u0600-\u06ff]/.test(document.body.innerText),
+      direction: getComputedStyle(document.documentElement).direction,
+      language: document.documentElement.lang,
+    };
+  });
   await page.screenshot({ path: path.join(outputDir, filename) });
-  const metrics = await page.evaluate(() => ({
-    horizontalOverflow: document.documentElement.scrollWidth > document.documentElement.clientWidth,
-    scrollWidth: document.documentElement.scrollWidth,
-    clientWidth: document.documentElement.clientWidth,
-    hasArabic: /[\u0600-\u06ff]/.test(document.body.innerText),
-    direction: getComputedStyle(document.documentElement).direction,
-    language: document.documentElement.lang,
-  }));
   captures.push({ filename, heading, ...metrics });
 }
 
@@ -141,7 +170,19 @@ try {
   const qaResult = { viewport: "1440x900", screenshots: captures.length, captures, consoleErrors };
   await fs.writeFile(path.join(outputDir, "qa-results.json"), `${JSON.stringify(qaResult, null, 2)}\n`);
   process.stdout.write(`${JSON.stringify(qaResult, null, 2)}\n`);
-  if (consoleErrors.length || captures.some((item) => item.horizontalOverflow || item.hasArabic || item.direction !== "ltr" || item.language !== "en")) process.exitCode = 1;
+  if (consoleErrors.length || captures.some((item) => (
+    item.scrollX !== 0
+    || item.scrollY !== 0
+    || item.horizontalOverflow
+    || item.verticalOverflow
+    || !item.topbarVisible
+    || item.pageVerticallyClipped
+    || !item.footerVisible
+    || !item.headerActionMeetsMinimum
+    || item.hasArabic
+    || item.direction !== "ltr"
+    || item.language !== "en"
+  ))) process.exitCode = 1;
 } finally {
   await browser.close();
   await server.close();

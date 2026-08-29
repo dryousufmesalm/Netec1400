@@ -3,6 +3,7 @@ import test from "node:test";
 import {
   buildSetupPayload,
   canContinueFromAccounts,
+  configuredAccountView,
   initialWizardState,
   mapSetupStages,
   reduceWizard,
@@ -153,5 +154,66 @@ test("uses stable screen enum values for the five setup screens and monitor", ()
     TEST: "test",
     FINISH: "finish",
     MONITOR: "monitor",
+  });
+});
+
+test("configured account loading does not clear a fatal startup error", () => {
+  const failed = reduceWizard(initialWizardState, {
+    type: "ERROR_SET",
+    error: "AmmarTrading Sync must be opened from the installed Windows app.",
+  });
+  const loaded = reduceWizard(failed, { type: "CONFIGURED_LOADED", accounts: [] });
+
+  assert.equal(loaded.error, "AmmarTrading Sync must be opened from the installed Windows app.");
+  assert.equal(loaded.systemStatus, null);
+});
+
+test("normalizes configured account evidence without inventing success", () => {
+  assert.deepEqual(configuredAccountView({
+    AccountNumber: "7788451",
+    BrokerName: "Ammar Markets",
+    Destination: "C:\\OneDrive\\AmmarTrading\\Account_7788451\\Baskets.csv",
+    LocalPublished: true,
+    TaskState: "Registered",
+    Freshness: "Fresh",
+    Status: "Success",
+  }), {
+    accountNumber: "7788451",
+    brokerName: "Ammar Markets",
+    destination: "C:\\OneDrive\\AmmarTrading\\Account_7788451\\Baskets.csv",
+    publication: { tone: "success", label: "Published locally" },
+    automation: { tone: "success", label: "Automation Registered" },
+    freshness: "Fresh",
+    status: "Success",
+    failure: "",
+  });
+
+  assert.deepEqual(configuredAccountView({
+    accountNumber: "9912044",
+    localPublished: false,
+    taskState: "Failed",
+    freshness: "Stale",
+    status: "Error",
+    failureReason: "Scheduled task access was denied.",
+  }), {
+    accountNumber: "9912044",
+    brokerName: "Broker unknown",
+    destination: "Local destination unavailable",
+    publication: { tone: "error", label: "Not published locally" },
+    automation: { tone: "error", label: "Automation Failed" },
+    freshness: "Stale",
+    status: "Error",
+    failure: "Scheduled task access was denied.",
+  });
+
+  assert.deepEqual(configuredAccountView({ AccountNumber: "1122334" }), {
+    accountNumber: "1122334",
+    brokerName: "Broker unknown",
+    destination: "Local destination unavailable",
+    publication: { tone: "neutral", label: "Local publication unknown" },
+    automation: { tone: "neutral", label: "Automation unknown" },
+    freshness: "Freshness unknown",
+    status: "Status unknown",
+    failure: "",
   });
 });

@@ -52,6 +52,7 @@ export const wizardApi = {
   getConfiguredAccounts: async () => ({ Accounts: configuredAccounts }),
   validateSelection: async (payload) => ({ Stages: [{ Code: "Validated", Status: "Success", Message: payload.accounts.length + " selected sources are valid." }] }),
   applySetup: async (payload) => {
+    await new Promise((resolve) => setTimeout(resolve, 250));
     configuredAccounts = payload.accounts.map((account) => ({
       AccountNumber: account.expectedMT4Login,
       BrokerName: discoveredAccounts.find((item) => item.DiscoveryId === account.discoveryId).BrokerName,
@@ -79,6 +80,7 @@ test("the UI source uses the canonical AmmarTrading product and destination name
   assert.doesNotMatch(appSource, /Money Machine|OneDrive \/ AmarTrading/);
   assert.match(appSource, /OneDrive \/ AmmarTrading/);
   assert.doesNotMatch(appSource, /Start-MoneyMachineSyncWizard\.cmd/);
+  assert.match(appSource, /className="setup-live-region" aria-live="polite" aria-atomic="true"/);
 });
 
 test("the deployed WizardApp contains only canonical product-facing naming", () => {
@@ -154,6 +156,9 @@ test("the complete wizard renders in English from left to right", async (t) => {
   await assertEnglishScreen();
 
   await page.getByRole("button", { name: "Apply setup and run test sync" }).click();
+  const setupLiveRegion = page.locator(".setup-live-region");
+  await setupLiveRegion.getByText("Applying setup and publishing local CSV files…", { exact: true }).waitFor();
+  assert.match(await setupLiveRegion.innerText(), /Running/);
   await page.getByRole("heading", { name: "Local synchronization is ready" }).waitFor();
   assert.equal(await page.getByText("Published locally", { exact: true }).count(), 2);
   await page.getByText("Publication is local only.", { exact: true }).waitFor();
