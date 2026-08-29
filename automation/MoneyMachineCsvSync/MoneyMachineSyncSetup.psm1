@@ -116,6 +116,50 @@ function Resolve-AmmarTradingOneDriveRoot {
     return [string]$matches[0].Path
 }
 
+function Assert-AmmarTradingTrustedDestinationPath {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$OneDriveRoot,
+        [Parameter(Mandatory)][string]$Path,
+        [Parameter(Mandatory)][string]$Description
+    )
+
+    $canonicalRoot = Resolve-AmmarTradingLocalPath -Path $OneDriveRoot -PathType Container -Description 'OneDrive root'
+    $canonicalPath = [IO.Path]::GetFullPath($Path)
+    $rootPrefix = $canonicalRoot.TrimEnd([IO.Path]::DirectorySeparatorChar,[IO.Path]::AltDirectorySeparatorChar) + [IO.Path]::DirectorySeparatorChar
+    if(-not $canonicalPath.StartsWith($rootPrefix, [StringComparison]::OrdinalIgnoreCase)) {
+        throw "$Description must remain below the trusted OneDrive root."
+    }
+    Assert-AmmarTradingNoReparseAncestors -Path $canonicalPath -Description $Description
+    return $canonicalPath
+}
+
+function New-AmmarTradingTrustedDirectory {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$OneDriveRoot,
+        [Parameter(Mandatory)][string]$Path,
+        [Parameter(Mandatory)][string]$Description
+    )
+
+    $canonicalRoot = Resolve-AmmarTradingOneDriveRoot -Path $OneDriveRoot -RequireWritable
+    $canonicalPath = Assert-AmmarTradingTrustedDestinationPath -OneDriveRoot $canonicalRoot -Path $Path -Description $Description
+    $relativePath = $canonicalPath.Substring($canonicalRoot.Length).TrimStart([IO.Path]::DirectorySeparatorChar,[IO.Path]::AltDirectorySeparatorChar)
+    $current = $canonicalRoot
+    foreach($part in @($relativePath -split '[\\/]')) {
+        if([string]::IsNullOrWhiteSpace($part)) { continue }
+        $current = Join-Path $current $part
+        [void](Assert-AmmarTradingTrustedDestinationPath -OneDriveRoot $canonicalRoot -Path $current -Description $Description)
+        if(Test-Path -LiteralPath $current) {
+            if(-not (Test-Path -LiteralPath $current -PathType Container)) { throw "$Description is blocked by a non-directory path." }
+        } else {
+            [void][IO.Directory]::CreateDirectory($current)
+        }
+        [void](Assert-AmmarTradingTrustedDestinationPath -OneDriveRoot $canonicalRoot -Path $current -Description $Description)
+    }
+    return $canonicalPath
+}
+
 function Get-AmmarTradingDestinationPath {
     param(
         [Parameter(Mandatory)][string]$OneDriveRoot,
@@ -816,4 +860,4 @@ function Invoke-MoneyMachineSetup {
     }
 }
 
-Export-ModuleMember -Function Resolve-AmmarTradingLocalPath,Get-AmmarTradingWritableOneDriveRoots,Resolve-AmmarTradingOneDriveRoot,Start-AmmarTradingSetupTransaction,Restore-AmmarTradingSetupTransaction,Get-AmmarTradingMt4Accounts,Get-MoneyMachineSetupDiscovery,Test-MoneyMachineSetupRequest,Save-MoneyMachineAccountConfig,Save-AmmarTradingAccountBatch,Copy-AmmarTradingLegacyData,Invoke-AmmarTradingBatchSetup,Invoke-MoneyMachineSetup
+Export-ModuleMember -Function Resolve-AmmarTradingLocalPath,Get-AmmarTradingWritableOneDriveRoots,Resolve-AmmarTradingOneDriveRoot,Assert-AmmarTradingTrustedDestinationPath,New-AmmarTradingTrustedDirectory,Start-AmmarTradingSetupTransaction,Restore-AmmarTradingSetupTransaction,Get-AmmarTradingMt4Accounts,Get-MoneyMachineSetupDiscovery,Test-MoneyMachineSetupRequest,Save-MoneyMachineAccountConfig,Save-AmmarTradingAccountBatch,Copy-AmmarTradingLegacyData,Invoke-AmmarTradingBatchSetup,Invoke-MoneyMachineSetup

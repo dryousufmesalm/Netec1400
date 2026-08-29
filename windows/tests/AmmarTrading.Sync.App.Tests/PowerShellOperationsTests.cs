@@ -29,18 +29,31 @@ public sealed class PowerShellOperationsTests : IDisposable
         string? requestJson = null;
         Exception? requestReadError = null;
         var replacementSucceeded = false;
+        var overwriteSucceeded = false;
         var runner = FakeProcessRunner.Completes(invocation =>
         {
             var requestPath = ArgumentAfter(invocation, "-RequestPath");
             try
             {
-                requestJson = File.ReadAllText(requestPath);
+                requestJson = ReadRequestLikePowerShell(requestPath);
             }
             catch (Exception error)
             {
                 requestReadError = error;
             }
             AssertCurrentUserOnly(requestPath);
+            try
+            {
+                using var overwrite = new FileStream(
+                    requestPath,
+                    FileMode.Open,
+                    FileAccess.Write,
+                    FileShare.ReadWrite);
+                overwriteSucceeded = true;
+            }
+            catch (IOException)
+            {
+            }
             try
             {
                 File.Move(requestPath, requestPath + ".replacement");
@@ -63,6 +76,7 @@ public sealed class PowerShellOperationsTests : IDisposable
 
         Assert.Null(requestReadError);
         Assert.False(replacementSucceeded);
+        Assert.False(overwriteSucceeded);
         var invocation = Assert.Single(runner.Invocations);
         Assert.Equal("powershell.exe", invocation.FileName);
         Assert.Contains("-NoProfile", invocation.ArgumentList);
@@ -81,6 +95,94 @@ public sealed class PowerShellOperationsTests : IDisposable
     }
 
     [Fact]
+    public void SecureRequestFile_WhileCreatorIsWriting_DeniesConcurrentSameUserOverwrite()
+    {
+        var requestRoot = Path.Combine(_testRoot, "concurrent-overwrite");
+        SecureRuntimeFiles.EnsureCurrentUserOnlyDirectory(requestRoot);
+        using var payload = JsonDocument.Parse("{\"trusted\":true}");
+        var overwriteSucceeded = false;
+
+        using var request = SecureRequestFile.Create(
+            requestRoot,
+            payload.RootElement,
+            (stage, path) =>
+            {
+                if (stage != SecureRequestFileStage.BeforeAcl)
+                {
+                    return;
+                }
+
+                try
+                {
+                    using var attacker = new FileStream(
+                        path,
+                        FileMode.Open,
+                        FileAccess.Write,
+                        FileShare.ReadWrite);
+                    attacker.SetLength(0);
+                    overwriteSucceeded = true;
+                }
+                catch (IOException)
+                {
+                }
+            });
+
+        Assert.False(overwriteSucceeded);
+        Assert.Equal("{\"trusted\":true}", ReadRequestLikePowerShell(request.Path));
+        request.DeleteAndConfirm();
+    }
+
+    [Fact]
+    public void SecureRequestFile_WhenRequestRootHasUntrustedAcl_RejectsBeforeCreatingFile()
+    {
+        var requestRoot = Path.Combine(_testRoot, "untrusted-acl");
+        Directory.CreateDirectory(requestRoot);
+        var security = new DirectorySecurity();
+        security.SetAccessRuleProtection(isProtected: false, preserveInheritance: true);
+        new DirectoryInfo(requestRoot).SetAccessControl(security);
+        using var payload = JsonDocument.Parse("{}");
+
+        var error = Assert.Throws<SecureRequestFileException>(
+            () => SecureRequestFile.Create(requestRoot, payload.RootElement));
+
+        Assert.Equal("RequestDirectoryUntrusted", error.Code);
+        Assert.Empty(Directory.EnumerateFiles(requestRoot));
+    }
+
+    [Fact]
+    public void SecureRequestFile_WhenRequestRootOwnerIsNotCurrentUser_RejectsBeforeCreatingFile()
+    {
+        var requestRoot = Path.Combine(_testRoot, "untrusted-owner");
+        SecureRuntimeFiles.EnsureCurrentUserOnlyDirectory(requestRoot);
+        var security = new DirectoryInfo(requestRoot).GetAccessControl();
+        security.SetOwner(new SecurityIdentifier(WellKnownSidType.BuiltinAdministratorsSid, null));
+        new DirectoryInfo(requestRoot).SetAccessControl(security);
+        using var payload = JsonDocument.Parse("{}");
+
+        var error = Assert.Throws<SecureRequestFileException>(
+            () => SecureRequestFile.Create(requestRoot, payload.RootElement));
+
+        Assert.Equal("RequestDirectoryUntrusted", error.Code);
+        Assert.Empty(Directory.EnumerateFiles(requestRoot));
+    }
+
+    [Fact]
+    public void SecureRequestFile_WhenRequestRootAncestorIsJunction_RejectsWithoutExternalWrite()
+    {
+        var externalTarget = Path.Combine(_testRoot, "external-request-target");
+        Directory.CreateDirectory(externalTarget);
+        var junction = Path.Combine(_testRoot, "request-root-junction");
+        Directory.CreateSymbolicLink(junction, externalTarget);
+        using var payload = JsonDocument.Parse("{}");
+
+        var error = Assert.Throws<SecureRequestFileException>(
+            () => SecureRequestFile.Create(Path.Combine(junction, "requests"), payload.RootElement));
+
+        Assert.Equal("RequestDirectoryUntrusted", error.Code);
+        Assert.Empty(Directory.EnumerateFileSystemEntries(externalTarget));
+    }
+
+    [Fact]
     public async Task GetSystemStatus_WhenRequestDeletionIsBlocked_ReturnsStableCleanupErrorAndLogsMetadataOnly()
     {
         FileStream? deletionBlocker = null;
@@ -95,7 +197,7 @@ public sealed class PowerShellOperationsTests : IDisposable
                     requestPath,
                     FileMode.Open,
                     FileAccess.Read,
-                    FileShare.Read);
+                    FileShare.ReadWrite);
             }
             catch (Exception error)
             {
@@ -147,6 +249,7 @@ public sealed class PowerShellOperationsTests : IDisposable
     {
         var failureStage = (SecureRequestFileStage)failureStageValue;
         var requestRoot = Path.Combine(_testRoot, $"request-failure-{failureStage}");
+        SecureRuntimeFiles.EnsureCurrentUserOnlyDirectory(requestRoot);
         using var payload = JsonDocument.Parse("{\"account\":\"credential=never-log\"}");
 
         var error = Assert.Throws<SecureRequestFileException>(() =>
@@ -316,7 +419,7 @@ public sealed class PowerShellOperationsTests : IDisposable
         string? requestJson = null;
         var runner = FakeProcessRunner.Completes(invocation =>
         {
-            requestJson = File.ReadAllText(ArgumentAfter(invocation, "-RequestPath"));
+            requestJson = ReadRequestLikePowerShell(ArgumentAfter(invocation, "-RequestPath"));
             return Success("{\"Accounts\":[]}");
         });
         var operations = CreateOperations(runner, nativeDialogService: native);
@@ -522,6 +625,20 @@ public sealed class PowerShellOperationsTests : IDisposable
             TimeSpan.FromSeconds(120));
 
     private static ProcessResult Success(string json) => new(0, json, string.Empty);
+
+    private static string ReadRequestLikePowerShell(string path)
+    {
+        using var stream = new FileStream(
+            path,
+            FileMode.Open,
+            FileAccess.Read,
+            FileShare.ReadWrite);
+        using var reader = new StreamReader(
+            stream,
+            new System.Text.UTF8Encoding(false, true),
+            detectEncodingFromByteOrderMarks: false);
+        return reader.ReadToEnd();
+    }
 
     private static string ArgumentAfter(ProcessInvocation invocation, string name)
     {

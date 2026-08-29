@@ -129,7 +129,13 @@ try {
     if(-not $canonicalRequestPath.StartsWith($requestPrefix, [StringComparison]::OrdinalIgnoreCase) -or [IO.Path]::GetExtension($canonicalRequestPath) -ine '.json') { throw 'The request path is outside the runtime request directory.' }
     $requestFile = Get-Item -LiteralPath $canonicalRequestPath -Force -ErrorAction Stop
     if($requestFile.Length -gt 65536 -or ($requestFile.Attributes -band [IO.FileAttributes]::ReparsePoint)) { throw 'The operation request is not valid.' }
-    $requestText = [IO.File]::ReadAllText($canonicalRequestPath, $utf8)
+    $requestReadStream = [IO.File]::Open($canonicalRequestPath, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::ReadWrite)
+    try {
+        $requestReader = [IO.StreamReader]::new($requestReadStream, (New-Object Text.UTF8Encoding($false,$true)), $false, 4096, $true)
+        try { $requestText = $requestReader.ReadToEnd() } finally { $requestReader.Dispose() }
+    } finally {
+        $requestReadStream.Dispose()
+    }
     $request = if([string]::IsNullOrWhiteSpace($requestText)) { [pscustomobject]@{} } else { $requestText | ConvertFrom-Json -ErrorAction Stop }
     if($request -isnot [pscustomobject]) { throw 'The operation request must be a JSON object.' }
 

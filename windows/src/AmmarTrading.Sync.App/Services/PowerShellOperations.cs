@@ -871,17 +871,46 @@ internal sealed class SecureRequestFile : IDisposable
             throw new SecureRequestFileException("InvalidRequest", "The operation request is not valid.");
         }
 
+        requestRoot = System.IO.Path.GetFullPath(requestRoot);
         string? requestPath = null;
         FileStream? stream = null;
         try
         {
-            SecureRuntimeFiles.EnsureCurrentUserOnlyDirectory(requestRoot);
+            try
+            {
+                SecureRuntimeFiles.VerifyLocalDirectoryPath(requestRoot, requireFinalDirectory: false);
+            }
+            catch
+            {
+                throw new SecureRequestFileException(
+                    "RequestDirectoryUntrusted",
+                    "The private operation request directory is not trusted.");
+            }
+
+            if (!Directory.Exists(requestRoot))
+            {
+                throw new SecureRequestFileException(
+                    "RequestFileUnavailable",
+                    "A private operation request could not be created.");
+            }
+
+            try
+            {
+                SecureRuntimeFiles.VerifyCurrentUserOnlyDirectory(requestRoot);
+            }
+            catch
+            {
+                throw new SecureRequestFileException(
+                    "RequestDirectoryUntrusted",
+                    "The private operation request directory is not trusted.");
+            }
+
             requestPath = System.IO.Path.Combine(requestRoot, $"request.{Guid.NewGuid():N}.json");
             stream = new FileStream(
                 requestPath,
                 FileMode.CreateNew,
                 FileAccess.ReadWrite,
-                FileShare.ReadWrite,
+                FileShare.Read,
                 bufferSize: 4096,
                 FileOptions.WriteThrough);
             testObserver?.Invoke(SecureRequestFileStage.BeforeWrite, requestPath);
@@ -905,19 +934,12 @@ internal sealed class SecureRequestFile : IDisposable
             {
                 throw new InvalidOperationException("The request file protection could not be verified.");
             }
-
-            using var transition = new FileStream(
-                requestPath,
-                FileMode.Open,
-                FileAccess.Read,
-                FileShare.ReadWrite);
-            stream.Dispose();
-            stream = new FileStream(
-                requestPath,
-                FileMode.Open,
-                FileAccess.Read,
-                FileShare.Read);
             return new SecureRequestFile(requestPath, stream);
+        }
+        catch (SecureRequestFileException)
+        {
+            stream?.Dispose();
+            throw;
         }
         catch
         {
@@ -976,7 +998,10 @@ internal static class SecureRuntimeFiles
 {
     public static void EnsureCurrentUserOnlyDirectory(string path)
     {
-        Directory.CreateDirectory(path);
+        var canonicalPath = Path.GetFullPath(path);
+        VerifyLocalNonReparsePath(canonicalPath, requireFinalDirectory: false);
+        Directory.CreateDirectory(canonicalPath);
+        VerifyLocalNonReparsePath(canonicalPath, requireFinalDirectory: true);
         var currentUser = CurrentUser();
         var security = new DirectorySecurity();
         security.SetOwner(currentUser);
@@ -987,8 +1012,39 @@ internal static class SecureRuntimeFiles
             InheritanceFlags.ContainerInherit | InheritanceFlags.ObjectInherit,
             PropagationFlags.None,
             AccessControlType.Allow));
-        new DirectoryInfo(path).SetAccessControl(security);
+        new DirectoryInfo(canonicalPath).SetAccessControl(security);
+        VerifyCurrentUserOnlyDirectory(canonicalPath);
     }
+
+    public static void VerifyCurrentUserOnlyDirectory(string path)
+    {
+        var canonicalPath = Path.GetFullPath(path);
+        VerifyLocalNonReparsePath(canonicalPath, requireFinalDirectory: true);
+        var currentUser = CurrentUser();
+        var security = new DirectoryInfo(canonicalPath).GetAccessControl();
+        if (!security.AreAccessRulesProtected ||
+            !Equals(security.GetOwner(typeof(SecurityIdentifier)), currentUser))
+        {
+            throw new InvalidOperationException("The private directory protection could not be verified.");
+        }
+
+        var rules = security.GetAccessRules(
+                includeExplicit: true,
+                includeInherited: true,
+                typeof(SecurityIdentifier))
+            .Cast<FileSystemAccessRule>()
+            .ToArray();
+        if (rules.Length != 1 ||
+            rules[0].AccessControlType != AccessControlType.Allow ||
+            !rules[0].IdentityReference.Equals(currentUser) ||
+            (rules[0].FileSystemRights & FileSystemRights.FullControl) != FileSystemRights.FullControl)
+        {
+            throw new InvalidOperationException("The private directory ACL could not be verified.");
+        }
+    }
+
+    public static void VerifyLocalDirectoryPath(string path, bool requireFinalDirectory) =>
+        VerifyLocalNonReparsePath(Path.GetFullPath(path), requireFinalDirectory);
 
     public static void RestrictFileToCurrentUser(string path)
     {
@@ -1006,7 +1062,9 @@ internal static class SecureRuntimeFiles
     public static bool IsCurrentUserOnlyFile(string path)
     {
         var security = new FileInfo(path).GetAccessControl();
-        if (!security.AreAccessRulesProtected)
+        var currentUser = CurrentUser();
+        if (!security.AreAccessRulesProtected ||
+            !Equals(security.GetOwner(typeof(SecurityIdentifier)), currentUser))
         {
             return false;
         }
@@ -1018,7 +1076,45 @@ internal static class SecureRuntimeFiles
         var allowRules = rules.Cast<FileSystemAccessRule>()
             .Where(rule => rule.AccessControlType == AccessControlType.Allow)
             .ToArray();
-        return allowRules.Length == 1 && allowRules[0].IdentityReference.Equals(CurrentUser());
+        return allowRules.Length == 1 &&
+               allowRules[0].IdentityReference.Equals(currentUser) &&
+               (allowRules[0].FileSystemRights & FileSystemRights.FullControl) == FileSystemRights.FullControl;
+    }
+
+    private static void VerifyLocalNonReparsePath(string canonicalPath, bool requireFinalDirectory)
+    {
+        if (!Path.IsPathRooted(canonicalPath) || canonicalPath.StartsWith("\\\\", StringComparison.Ordinal))
+        {
+            throw new InvalidOperationException("The private directory must use a local filesystem path.");
+        }
+
+        var volumeRoot = Path.GetPathRoot(canonicalPath);
+        if (string.IsNullOrWhiteSpace(volumeRoot) || new DriveInfo(volumeRoot).DriveType == DriveType.Network)
+        {
+            throw new InvalidOperationException("The private directory must use a local filesystem volume.");
+        }
+
+        var current = volumeRoot;
+        foreach (var part in canonicalPath[volumeRoot.Length..].Split(
+                     [Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar],
+                     StringSplitOptions.RemoveEmptyEntries))
+        {
+            current = Path.Combine(current, part);
+            if (!File.Exists(current) && !Directory.Exists(current))
+            {
+                break;
+            }
+
+            if ((File.GetAttributes(current) & FileAttributes.ReparsePoint) != 0)
+            {
+                throw new InvalidOperationException("The private directory cannot contain a reparse point.");
+            }
+        }
+
+        if (requireFinalDirectory && !Directory.Exists(canonicalPath))
+        {
+            throw new InvalidOperationException("The private directory is unavailable.");
+        }
     }
 
     private static SecurityIdentifier CurrentUser() =>

@@ -168,6 +168,33 @@ try {
     if($missing[0].Status -ne 'Error') { throw 'An enabled missing source must return Error.' }
     if($missing[0].FailureCode -cne 'SourceUnavailable') { throw 'A missing source must return the stable SourceUnavailable code.' }
 
+    Copy-Item -LiteralPath $fixturePath -Destination $sourceCsv -Force
+    foreach($junctionCase in @('AmmarTrading','Account')) {
+        $junctionRoot = Join-Path $tempRoot ("junction-root-$junctionCase")
+        $externalTarget = Join-Path $tempRoot ("external-target-$junctionCase")
+        New-Item -ItemType Directory -Path $junctionRoot,$externalTarget -Force | Out-Null
+        if($junctionCase -ceq 'AmmarTrading') {
+            New-Item -ItemType Junction -Path (Join-Path $junctionRoot 'AmmarTrading') -Target $externalTarget | Out-Null
+        } else {
+            $productDirectory = Join-Path $junctionRoot 'AmmarTrading'
+            New-Item -ItemType Directory -Path $productDirectory -Force | Out-Null
+            New-Item -ItemType Junction -Path (Join-Path $productDirectory 'Account_892522910') -Target $externalTarget | Out-Null
+        }
+        $env:OneDrive = $junctionRoot
+        @([pscustomobject]@{ Enabled='true'; ExpectedMT4Login='892522910'; SourceCsv=$sourceCsv; OneDriveRoot=$junctionRoot }) |
+            Export-Csv -LiteralPath $testConfigPath -NoTypeInformation -Encoding utf8
+
+        $junctionResult = @(Invoke-MoneyMachineCsvSync -ConfigPath $testConfigPath -StableCheckSeconds 0 -MaxRetries 1 -RuntimeRoot $runtimeRoot)
+
+        if($junctionResult[0].Status -ne 'Error' -or $junctionResult[0].FailureCode -cne 'PublicationFailed') {
+            throw "A trusted OneDrive root with a $junctionCase junction must fail with PublicationFailed."
+        }
+        if(@(Get-ChildItem -LiteralPath $externalTarget -Force).Count -ne 0) {
+            throw "A $junctionCase junction redirected sync writes outside the trusted OneDrive root."
+        }
+    }
+    $env:OneDrive = $oneDrive
+
     $secretValue = 'credential=do-not-log-this-value'
     $secretPathFragment = 'password=do-not-log-this-path'
     $adversarialDirectory = Join-Path $tempRoot $secretPathFragment
