@@ -1,16 +1,15 @@
 [CmdletBinding()]
 param(
-    [Parameter(Mandatory)]
-    [ValidateNotNullOrEmpty()]
-    [string]$Installer,
-    [string]$InstallRoot
+    [Parameter(Mandatory)][ValidateNotNullOrEmpty()][string]$Installer,
+    [string]$FaultInstaller
 )
 
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version 3.0
 $ProgressPreference = 'SilentlyContinue'
+$uninstallSubKey = '{8F488698-AB96-45DB-A2BB-D9E868823F43}_is1'
 
-function Invoke-CheckedProcess {
+function Invoke-BoundedProcess {
     param(
         [Parameter(Mandatory)][string]$FilePath,
         [Parameter(Mandatory)][string[]]$ArgumentList
@@ -21,224 +20,255 @@ function Invoke-CheckedProcess {
         throw "Process exceeded the three-minute acceptance limit: $FilePath"
     }
     $process.Refresh()
-    if($process.ExitCode -ne 0) {
-        throw "Process failed with exit code $($process.ExitCode): $FilePath"
+    return $process.ExitCode
+}
+
+function Invoke-CheckedProcess {
+    param([string]$FilePath,[string[]]$ArgumentList)
+    $exitCode = Invoke-BoundedProcess -FilePath $FilePath -ArgumentList $ArgumentList
+    if($exitCode -ne 0) { throw "Process failed with exit code ${exitCode}: $FilePath" }
+}
+
+function Assert-NoReparsePoint {
+    param([Parameter(Mandatory)][string]$Path)
+    if((Get-Item -LiteralPath $Path -Force -ErrorAction Stop).Attributes -band [IO.FileAttributes]::ReparsePoint) {
+        throw 'Acceptance paths cannot contain reparse points.'
     }
 }
 
+function Assert-SafeAcceptancePath {
+    param(
+        [Parameter(Mandatory)][string]$Path,
+        [Parameter(Mandatory)][string]$AcceptanceRoot,
+        [switch]$AllowRoot
+    )
+    $canonicalRoot = [IO.Path]::GetFullPath($AcceptanceRoot).TrimEnd('\')
+    $canonicalPath = [IO.Path]::GetFullPath($Path).TrimEnd('\')
+    $rootPrefix = $canonicalRoot + '\'
+    if($canonicalPath -ieq $canonicalRoot) {
+        if(-not $AllowRoot) { throw 'The acceptance path cannot be the isolated root.' }
+    } elseif(-not $canonicalPath.StartsWith($rootPrefix,[StringComparison]::OrdinalIgnoreCase)) {
+        throw 'The acceptance path escaped its isolated root.'
+    }
+    if($canonicalPath -ieq [IO.Path]::GetPathRoot($canonicalPath)) { throw 'A drive root is never a valid acceptance path.' }
+
+    $cursor = $canonicalPath
+    while(-not [string]::IsNullOrWhiteSpace($cursor)) {
+        if(Test-Path -LiteralPath $cursor) { Assert-NoReparsePoint -Path $cursor }
+        if($cursor -ieq $canonicalRoot) { break }
+        $parent = [IO.Path]::GetDirectoryName($cursor)
+        if([string]::IsNullOrWhiteSpace($parent) -or $parent -ieq $cursor) {
+            throw 'The acceptance path escaped its isolated root.'
+        }
+        $cursor = $parent.TrimEnd('\')
+    }
+    if($cursor -ine $canonicalRoot) { throw 'The acceptance path escaped its isolated root.' }
+    return $canonicalPath
+}
+
 function Get-UninstallEntry {
-    $registryPaths = @(
-        'HKLM:\Software\Microsoft\Windows\CurrentVersion\Uninstall\*',
-        'HKLM:\Software\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*'
+    $keys = @(
+        "HKLM:\Software\Microsoft\Windows\CurrentVersion\Uninstall\$uninstallSubKey",
+        "HKLM:\Software\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\$uninstallSubKey"
     )
-    return @(
-        Get-ItemProperty -Path $registryPaths -ErrorAction SilentlyContinue |
-            Where-Object {
-                $null -ne $_.PSObject.Properties['DisplayName'] -and
-                [string]$_.DisplayName -ceq 'AmmarTrading Sync'
-            }
-    )
+    return @(Get-ItemProperty -LiteralPath $keys -ErrorAction SilentlyContinue)
+}
+
+function Assert-ExactUninstallEntry {
+    param([Parameter(Mandatory)][string]$ExpectedInstallRoot)
+    $entries = @(Get-UninstallEntry)
+    if($entries.Count -ne 1) { throw 'The exact AmmarTrading Sync uninstall key is missing or ambiguous.' }
+    $entry = $entries[0]
+    if([string]$entry.DisplayName -cne 'AmmarTrading Sync') { throw 'The uninstall display name is not canonical.' }
+    $registeredRoot = [IO.Path]::GetFullPath([string]$entry.InstallLocation).TrimEnd('\')
+    if($registeredRoot -ine $ExpectedInstallRoot.TrimEnd('\')) { throw 'Uninstall metadata points to the wrong installation directory.' }
+    return $entry
 }
 
 function Get-PeSubsystem {
     param([Parameter(Mandatory)][string]$Path)
-    $stream = [System.IO.File]::OpenRead($Path)
-    $reader = New-Object System.IO.BinaryReader($stream)
+    $stream = [IO.File]::OpenRead($Path)
+    $reader = New-Object IO.BinaryReader($stream)
     try {
         $stream.Position = 0x3c
         $peOffset = $reader.ReadInt32()
         $stream.Position = $peOffset
         if($reader.ReadUInt32() -ne 0x00004550) { throw 'Invalid PE signature.' }
-        $stream.Position = $peOffset + 4 + 20
+        $stream.Position = $peOffset + 24
         $magic = $reader.ReadUInt16()
-        $subsystemOffset = if($magic -in @(0x20b,0x10b)) { 0x44 } else { throw 'Unsupported PE optional header.' }
-        $stream.Position = $peOffset + 4 + 20 + $subsystemOffset
+        if($magic -notin @(0x20b,0x10b)) { throw 'Unsupported PE optional header.' }
+        $stream.Position = $peOffset + 24 + 0x44
         return $reader.ReadUInt16()
-    } finally {
-        $reader.Dispose()
-        $stream.Dispose()
+    } finally { $reader.Dispose(); $stream.Dispose() }
+}
+
+function Repair-FailedSetupAttempt {
+    param(
+        [Parameter(Mandatory)][string]$AcceptanceRoot,
+        [Parameter(Mandatory)][string]$InstallRoot,
+        [Parameter(Mandatory)][string]$StartMenuShortcut,
+        [Parameter(Mandatory)][string]$DesktopShortcut
+    )
+    $safeInstallRoot = Assert-SafeAcceptancePath -Path $InstallRoot -AcceptanceRoot $AcceptanceRoot
+    $entries = @(Get-UninstallEntry)
+    if($entries.Count -gt 1) { throw 'Cleanup refused ambiguous exact AppId registrations.' }
+    if($entries.Count -eq 1) {
+        $registeredRoot = [IO.Path]::GetFullPath([string]$entries[0].InstallLocation).TrimEnd('\')
+        if($registeredRoot -ine $safeInstallRoot) { throw 'Cleanup refused an AppId registered outside the isolated root.' }
+        $uninstaller = Join-Path $safeInstallRoot 'unins000.exe'
+        if(Test-Path -LiteralPath $uninstaller -PathType Leaf) {
+            Assert-SafeAcceptancePath -Path $uninstaller -AcceptanceRoot $AcceptanceRoot | Out-Null
+            Invoke-CheckedProcess -FilePath $uninstaller -ArgumentList @('/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART')
+        }
+    }
+    if(@(Get-UninstallEntry).Count -ne 0) { throw 'Failed setup cleanup left the exact AppId registered.' }
+    Remove-Item -LiteralPath $StartMenuShortcut -Force -ErrorAction SilentlyContinue
+    Remove-Item -LiteralPath $DesktopShortcut -Force -ErrorAction SilentlyContinue
+    if((Test-Path -LiteralPath $StartMenuShortcut) -or (Test-Path -LiteralPath $DesktopShortcut)) {
+        throw 'Failed setup cleanup left an AmmarTrading Sync shortcut.'
     }
 }
 
-$resolvedInstaller = [System.IO.Path]::GetFullPath($Installer)
-if(-not (Test-Path -LiteralPath $resolvedInstaller -PathType Leaf)) {
-    throw "Installer missing: $resolvedInstaller"
-}
-if([System.IO.Path]::GetFileName($resolvedInstaller) -cne 'AmmarTrading Sync Setup.exe') {
-    throw 'The installer filename is not canonical.'
-}
-$installerVersion = [System.Diagnostics.FileVersionInfo]::GetVersionInfo($resolvedInstaller)
+$resolvedInstaller = [IO.Path]::GetFullPath($Installer)
+if(-not (Test-Path -LiteralPath $resolvedInstaller -PathType Leaf)) { throw "Installer missing: $resolvedInstaller" }
+if([IO.Path]::GetFileName($resolvedInstaller) -cne 'AmmarTrading Sync Setup.exe') { throw 'The installer filename is not canonical.' }
+$installerVersion = [Diagnostics.FileVersionInfo]::GetVersionInfo($resolvedInstaller)
 if(([string]$installerVersion.ProductName).Trim() -cne 'AmmarTrading Sync') {
-    throw "Unexpected installer product name: $($installerVersion.ProductName)"
+    throw 'The installer product name is not canonical.'
 }
+if([string]::IsNullOrWhiteSpace($FaultInstaller)) {
+    $FaultInstaller = Join-Path (Split-Path -Parent $resolvedInstaller) '.acceptance\AmmarTrading Sync Upgrade Fault Test.exe'
+}
+$resolvedFaultInstaller = [IO.Path]::GetFullPath($FaultInstaller)
+if(-not (Test-Path -LiteralPath $resolvedFaultInstaller -PathType Leaf)) { throw "Fault-injection installer missing: $resolvedFaultInstaller" }
+if([IO.Path]::GetFileName($resolvedFaultInstaller) -cne 'AmmarTrading Sync Upgrade Fault Test.exe') { throw 'The fault installer filename is not test-scoped.' }
 
-$existingEntries = @(Get-UninstallEntry)
-if($existingEntries.Count -gt 0) {
-    throw 'AmmarTrading Sync is already installed. Acceptance refuses to modify an existing installation.'
-}
-if(Get-Process -Name 'AmmarTrading.Sync' -ErrorAction SilentlyContinue) {
-    throw 'AmmarTrading Sync is already running. Acceptance refuses to stop an existing process.'
-}
+if(@(Get-UninstallEntry).Count -gt 0) { throw 'AmmarTrading Sync is already installed.' }
+if(Get-Process -Name 'AmmarTrading.Sync' -ErrorAction SilentlyContinue) { throw 'AmmarTrading Sync is already running.' }
 
+$workerRoot = [IO.Path]::GetFullPath('C:\CodexWorker').TrimEnd('\')
+if(-not (Test-Path -LiteralPath $workerRoot -PathType Container)) { throw 'The configured Windows worker root is missing.' }
+Assert-NoReparsePoint -Path $workerRoot
 $acceptanceId = [Guid]::NewGuid().ToString('N')
-$acceptanceRoot = Join-Path 'C:\CodexWorker' "AmmarTrading-Sync-Acceptance-$acceptanceId"
-if([string]::IsNullOrWhiteSpace($InstallRoot)) {
-    $InstallRoot = Join-Path $acceptanceRoot 'Program Files\AmmarTrading Sync'
-} else {
-    $InstallRoot = [System.IO.Path]::GetFullPath($InstallRoot)
-}
+$acceptanceRoot = Join-Path $workerRoot "AmmarTrading-Sync-Acceptance-$acceptanceId"
+if(Test-Path -LiteralPath $acceptanceRoot) { throw 'The unique acceptance root already exists.' }
+New-Item -ItemType Directory -Path $acceptanceRoot | Out-Null
+Assert-SafeAcceptancePath -Path $acceptanceRoot -AcceptanceRoot $acceptanceRoot -AllowRoot | Out-Null
+$installRoot = Assert-SafeAcceptancePath -Path (Join-Path $acceptanceRoot 'Program Files\AmmarTrading Sync') -AcceptanceRoot $acceptanceRoot
+$oneDriveRoot = Assert-SafeAcceptancePath -Path (Join-Path $acceptanceRoot 'OneDrive') -AcceptanceRoot $acceptanceRoot
+$oneDriveSentinel = Assert-SafeAcceptancePath -Path (Join-Path $oneDriveRoot 'AmmarTrading\Account_10000001\Baskets.csv') -AcceptanceRoot $acceptanceRoot
+$setupLog = Assert-SafeAcceptancePath -Path (Join-Path $acceptanceRoot 'install.log') -AcceptanceRoot $acceptanceRoot
+$upgradeLog = Assert-SafeAcceptancePath -Path (Join-Path $acceptanceRoot 'upgrade.log') -AcceptanceRoot $acceptanceRoot
+$faultLog = Assert-SafeAcceptancePath -Path (Join-Path $acceptanceRoot 'failed-upgrade.log') -AcceptanceRoot $acceptanceRoot
+$uninstallLog = Assert-SafeAcceptancePath -Path (Join-Path $acceptanceRoot 'uninstall.log') -AcceptanceRoot $acceptanceRoot
+
 $runtimeRoot = Join-Path $env:LOCALAPPDATA 'AmmarTrading\Sync'
 $runtimeExisted = Test-Path -LiteralPath $runtimeRoot -PathType Container
 $runtimeSentinel = Join-Path $runtimeRoot "task9-acceptance-$acceptanceId.json"
-$oneDriveRoot = Join-Path $acceptanceRoot 'OneDrive'
-$oneDriveSentinel = Join-Path $oneDriveRoot 'AmmarTrading\Account_10000001\Baskets.csv'
 $taskName = "AmmarTrading-Task9-Acceptance-$acceptanceId"
 $launchTaskName = "$taskName-Launch"
 $startMenuShortcut = Join-Path $env:ProgramData 'Microsoft\Windows\Start Menu\Programs\AmmarTrading Sync.lnk'
 $desktopShortcut = Join-Path $env:PUBLIC 'Desktop\AmmarTrading Sync.lnk'
-$setupLog = Join-Path $acceptanceRoot 'install.log'
-$upgradeLog = Join-Path $acceptanceRoot 'upgrade.log'
-$uninstallLog = Join-Path $acceptanceRoot 'uninstall.log'
-$installedByAcceptance = $false
+if((Test-Path -LiteralPath $startMenuShortcut) -or (Test-Path -LiteralPath $desktopShortcut)) { throw 'Acceptance refuses pre-existing product shortcuts.' }
+
+$setupAttempted = $false
 $taskCreated = $false
 $launchTaskCreated = $false
 $launchedProcessId = $null
-
 try {
-    New-Item -ItemType Directory -Path $acceptanceRoot -Force | Out-Null
-    New-Item -ItemType Directory -Path $runtimeRoot -Force | Out-Null
+    Assert-SafeAcceptancePath -Path $oneDriveSentinel -AcceptanceRoot $acceptanceRoot | Out-Null
     New-Item -ItemType Directory -Path (Split-Path -Parent $oneDriveSentinel) -Force | Out-Null
-    [System.IO.File]::WriteAllText($runtimeSentinel, '{"preserve":true}', (New-Object Text.UTF8Encoding($false)))
-    [System.IO.File]::WriteAllText($oneDriveSentinel, 'acceptance-history', (New-Object Text.UTF8Encoding($false)))
+    New-Item -ItemType Directory -Path $runtimeRoot -Force | Out-Null
+    [IO.File]::WriteAllText($runtimeSentinel,'{"preserve":true}',(New-Object Text.UTF8Encoding($false)))
+    [IO.File]::WriteAllText($oneDriveSentinel,'acceptance-history',(New-Object Text.UTF8Encoding($false)))
 
-    $taskAction = New-ScheduledTaskAction -Execute "$env:SystemRoot\System32\cmd.exe" -Argument '/d /c exit 0'
     $currentIdentity = [Security.Principal.WindowsIdentity]::GetCurrent().Name
     $taskPrincipal = New-ScheduledTaskPrincipal -UserId $currentIdentity -LogonType Interactive -RunLevel Limited
+    $taskAction = New-ScheduledTaskAction -Execute "$env:SystemRoot\System32\cmd.exe" -Argument '/d /c exit 0'
     Register-ScheduledTask -TaskName $taskName -Action $taskAction -Principal $taskPrincipal -Force | Out-Null
     $taskCreated = $true
 
-    $installArguments = @(
-        '/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART','/SP-',
-        "/DIR=`"$InstallRoot`"",'/TASKS=desktopicon',"/LOG=`"$setupLog`""
-    )
-    Invoke-CheckedProcess -FilePath $resolvedInstaller -ArgumentList $installArguments
-    $installedByAcceptance = $true
-
-    $installedExe = Join-Path $InstallRoot 'AmmarTrading.Sync.exe'
+    Assert-SafeAcceptancePath -Path $installRoot -AcceptanceRoot $acceptanceRoot | Out-Null
+    $setupAttempted = $true
+    Invoke-CheckedProcess -FilePath $resolvedInstaller -ArgumentList @('/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART','/SP-',"/DIR=`"$installRoot`"",'/TASKS=desktopicon',"/LOG=`"$setupLog`"")
+    $installedExe = Assert-SafeAcceptancePath -Path (Join-Path $installRoot 'AmmarTrading.Sync.exe') -AcceptanceRoot $acceptanceRoot
     if(-not (Test-Path -LiteralPath $installedExe -PathType Leaf)) { throw 'Desktop executable is missing.' }
     if((Get-PeSubsystem -Path $installedExe) -ne 2) { throw 'Desktop executable is not a Windows GUI application.' }
-    if(Test-Path -LiteralPath (Join-Path $InstallRoot 'Start-MoneyMachineSyncWizard.cmd')) { throw 'Legacy browser launcher must not be installed.' }
-    if(Test-Path -LiteralPath (Join-Path $InstallRoot 'Start-MoneyMachineSyncWizard.ps1')) { throw 'Legacy HTTP host must not be installed.' }
-    if(@(Get-ChildItem -LiteralPath $InstallRoot -File -Recurse -Force | Where-Object {
-        $_.Extension -in @('.cmd','.bat','.map','.pdb','.cs','.csproj','.sln') -or
-        $_.FullName -match '[\\/](?:tests?|fixtures?)[\\/]'
-    }).Count -gt 0) { throw 'The installed payload contains development, legacy launcher, or test files.' }
-    if(-not (Test-Path -LiteralPath $startMenuShortcut -PathType Leaf)) { throw 'Start Menu shortcut is missing.' }
-    if(-not (Test-Path -LiteralPath $desktopShortcut -PathType Leaf)) { throw 'Opt-in desktop shortcut is missing.' }
-    $entry = @(Get-UninstallEntry)
-    if($entry.Count -ne 1 -or $entry[0].DisplayName -cne 'AmmarTrading Sync') { throw 'Uninstall metadata is missing or ambiguous.' }
-    if([string]$entry[0].InstallLocation -and ([System.IO.Path]::GetFullPath([string]$entry[0].InstallLocation).TrimEnd('\') -ine $InstallRoot.TrimEnd('\'))) {
-        throw 'Uninstall metadata points to the wrong installation directory.'
-    }
+    $allowedInstalledExecutables = @('AmmarTrading.Sync.exe','unins000.exe')
+    $actualInstalledExecutables = @(Get-ChildItem -LiteralPath $installRoot -File -Recurse -Filter '*.exe' | ForEach-Object Name | Sort-Object -Unique)
+    if(Compare-Object -ReferenceObject $allowedInstalledExecutables -DifferenceObject $actualInstalledExecutables) { throw 'Installed executable payload is not allowlisted.' }
+    if(@(Get-ChildItem -LiteralPath $installRoot -File -Recurse -Force | Where-Object { $_.Extension -in @('.cmd','.bat','.map','.pdb','.cs','.csproj','.sln') -or $_.FullName -match '[\\/](?:tests?|fixtures?)[\\/]' }).Count -gt 0) { throw 'Installed payload contains forbidden development content.' }
+    if(-not (Test-Path $startMenuShortcut) -or -not (Test-Path $desktopShortcut)) { throw 'Expected shortcuts are missing.' }
+    Assert-ExactUninstallEntry -ExpectedInstallRoot $installRoot | Out-Null
 
-    $edgeProcessIdsBefore = @(Get-Process -Name 'msedge' -ErrorAction SilentlyContinue | ForEach-Object Id)
-    $launchAction = New-ScheduledTaskAction -Execute $installedExe -WorkingDirectory $InstallRoot
+    $edgeBefore = @(Get-Process msedge -ErrorAction SilentlyContinue | ForEach-Object Id)
+    $launchAction = New-ScheduledTaskAction -Execute $installedExe -WorkingDirectory $installRoot
     Register-ScheduledTask -TaskName $launchTaskName -Action $launchAction -Principal $taskPrincipal -Force | Out-Null
     $launchTaskCreated = $true
     $registeredLaunchTask = Get-ScheduledTask -TaskName $launchTaskName -ErrorAction Stop
-    if([string]$registeredLaunchTask.Principal.RunLevel -cne 'Limited') { throw 'The application launch check is not configured for a limited token.' }
+    if(([string]$registeredLaunchTask.Principal.RunLevel) -cne 'Limited') { throw 'Launch task is not limited-token.' }
     $launchStartedUtc = [DateTime]::UtcNow
-    Start-ScheduledTask -TaskName $launchTaskName
+    Start-ScheduledTask $launchTaskName
     $deadline = [DateTime]::UtcNow.AddSeconds(30)
-    $launchedProcess = $null
-    while([DateTime]::UtcNow -lt $deadline -and $null -eq $launchedProcess) {
+    do {
         Start-Sleep -Milliseconds 250
-        $launchedProcess = @(Get-Process -Name 'AmmarTrading.Sync' -ErrorAction SilentlyContinue | Where-Object {
-            try { $_.Path -ieq $installedExe } catch { $false }
-        } | Select-Object -First 1)
+        $launchedProcess = @(Get-Process 'AmmarTrading.Sync' -ErrorAction SilentlyContinue | Where-Object { try { $_.Path -ieq $installedExe } catch { $false } } | Select-Object -First 1)
         if($launchedProcess -is [array]) { $launchedProcess = @($launchedProcess)[0] }
-    }
-    if($null -eq $launchedProcess) { throw 'The installed application did not start in the interactive limited-token test.' }
+    } while($null -eq $launchedProcess -and [DateTime]::UtcNow -lt $deadline)
+    if($null -eq $launchedProcess) { throw 'The installed application did not start.' }
     $launchedProcessId = $launchedProcess.Id
-    $interactiveSessionIds = @(Get-Process -Name 'explorer' -ErrorAction SilentlyContinue | ForEach-Object SessionId)
-    if($launchedProcess.SessionId -notin $interactiveSessionIds) { throw 'The installed application did not start in an interactive Windows session.' }
+    if($launchedProcess.SessionId -notin @(Get-Process explorer -ErrorAction SilentlyContinue | ForEach-Object SessionId)) { throw 'The app did not start interactively.' }
     $applicationLog = Join-Path $runtimeRoot 'Logs\application.jsonl'
-    $webViewInitialized = $false
-    $windowDeadline = [DateTime]::UtcNow.AddSeconds(30)
-    while([DateTime]::UtcNow -lt $windowDeadline -and -not $webViewInitialized) {
+    $initialized = $false
+    do {
         Start-Sleep -Milliseconds 250
-        if(Test-Path -LiteralPath $applicationLog -PathType Leaf) {
-            foreach($line in @(Get-Content -LiteralPath $applicationLog -Tail 40 -ErrorAction SilentlyContinue)) {
-                try {
-                    $event = $line | ConvertFrom-Json -ErrorAction Stop
-                    if([string]$event.eventCode -ceq 'WebViewInitialized' -and
-                       [DateTime]$event.timestampUtc -ge $launchStartedUtc) {
-                        $webViewInitialized = $true
-                        break
-                    }
-                } catch { }
-            }
+        foreach($line in @(Get-Content $applicationLog -Tail 40 -ErrorAction SilentlyContinue)) {
+            try { $event=$line|ConvertFrom-Json; if($event.eventCode -ceq 'WebViewInitialized' -and [DateTime]$event.timestampUtc -ge $launchStartedUtc){$initialized=$true;break} } catch { }
         }
-    }
-    if(-not $webViewInitialized) { throw 'The installed application did not initialize its interactive WebView window.' }
-    $newEdgeProcesses = @(Get-Process -Name 'msedge' -ErrorAction SilentlyContinue | Where-Object { $_.Id -notin $edgeProcessIdsBefore })
-    if($newEdgeProcesses.Count -gt 0) { throw 'Launching the desktop application opened Microsoft Edge.' }
-    [void]$launchedProcess.CloseMainWindow()
-    if(-not $launchedProcess.WaitForExit(5000)) { Stop-Process -Id $launchedProcess.Id -Force }
-    $launchedProcessId = $null
-    Unregister-ScheduledTask -TaskName $launchTaskName -Confirm:$false -ErrorAction Stop
-    $launchTaskCreated = $false
+    } while(-not $initialized -and [DateTime]::UtcNow -lt $deadline)
+    if(-not $initialized) { throw 'WebView did not initialize.' }
+    if(@(Get-Process msedge -ErrorAction SilentlyContinue | Where-Object { $_.Id -notin $edgeBefore }).Count) { throw 'The app opened Edge.' }
+    [void]$launchedProcess.CloseMainWindow(); if(-not $launchedProcess.WaitForExit(5000)){Stop-Process $launchedProcess.Id -Force}
+    $launchedProcessId=$null; Unregister-ScheduledTask $launchTaskName -Confirm:$false; $launchTaskCreated=$false
 
-    Invoke-CheckedProcess -FilePath $resolvedInstaller -ArgumentList @(
-        '/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART','/SP-',
-        "/DIR=`"$InstallRoot`"",'/TASKS=desktopicon',"/LOG=`"$upgradeLog`""
-    )
-    if(-not (Test-Path -LiteralPath $runtimeSentinel -PathType Leaf)) { throw 'Upgrade removed local mappings or runtime history.' }
-    if(-not (Test-Path -LiteralPath $oneDriveSentinel -PathType Leaf)) { throw 'Upgrade removed OneDrive history.' }
-    if($null -eq (Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue)) { throw 'Upgrade removed an existing scheduled task.' }
+    $priorExeHash = (Get-FileHash $installedExe -Algorithm SHA256).Hash
+    $priorEntry = Assert-ExactUninstallEntry -ExpectedInstallRoot $installRoot
+    $faultCollision = Assert-SafeAcceptancePath -Path (Join-Path $installRoot 'Task9UpgradeFault.blocked') -AcceptanceRoot $acceptanceRoot
+    if(Test-Path -LiteralPath $faultCollision) { throw 'The task-scoped fault collision path already exists.' }
+    New-Item -ItemType Directory -Path $faultCollision | Out-Null
+    $faultExit = Invoke-BoundedProcess -FilePath $resolvedFaultInstaller -ArgumentList @('/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART','/SP-',"/DIR=`"$installRoot`"",'/TASKS=desktopicon',"/LOG=`"$faultLog`"")
+    if($faultExit -eq 0) { throw 'Fault-injection installer unexpectedly succeeded.' }
+    Assert-SafeAcceptancePath -Path $faultCollision -AcceptanceRoot $acceptanceRoot | Out-Null
+    Remove-Item -LiteralPath $faultCollision -Force
+    if((Get-FileHash $installedExe -Algorithm SHA256).Hash -cne $priorExeHash) { throw 'Failed upgrade changed the installed executable.' }
+    if(-not (Test-Path -LiteralPath $runtimeSentinel) -or -not (Test-Path -LiteralPath $oneDriveSentinel) -or $null -eq (Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue)) { throw 'Failed upgrade removed preserved state.' }
+    $afterFaultEntry = Assert-ExactUninstallEntry -ExpectedInstallRoot $installRoot
+    if([string]$afterFaultEntry.UninstallString -cne [string]$priorEntry.UninstallString) { throw 'Failed upgrade changed uninstall registration.' }
 
-    $uninstaller = Join-Path $InstallRoot 'unins000.exe'
-    if(-not (Test-Path -LiteralPath $uninstaller -PathType Leaf)) { throw 'Uninstaller is missing.' }
-    Invoke-CheckedProcess -FilePath $uninstaller -ArgumentList @(
-        '/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART',"/LOG=`"$uninstallLog`""
-    )
-    $installedByAcceptance = $false
+    Invoke-CheckedProcess -FilePath $resolvedInstaller -ArgumentList @('/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART','/SP-',"/DIR=`"$installRoot`"",'/TASKS=desktopicon',"/LOG=`"$upgradeLog`"")
+    if(-not (Test-Path -LiteralPath $runtimeSentinel) -or -not (Test-Path -LiteralPath $oneDriveSentinel) -or $null -eq (Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue)) { throw 'Successful upgrade removed preserved state.' }
+    Assert-ExactUninstallEntry -ExpectedInstallRoot $installRoot | Out-Null
 
-    if(Test-Path -LiteralPath $installedExe -PathType Leaf) { throw 'Uninstall left the desktop executable behind.' }
-    if(Test-Path -LiteralPath $startMenuShortcut -PathType Leaf) { throw 'Uninstall left the Start Menu shortcut behind.' }
-    if(Test-Path -LiteralPath $desktopShortcut -PathType Leaf) { throw 'Uninstall left the desktop shortcut behind.' }
-    if(@(Get-UninstallEntry).Count -ne 0) { throw 'Uninstall metadata remains registered.' }
-    if(-not (Test-Path -LiteralPath $runtimeSentinel -PathType Leaf)) { throw 'Uninstall removed local mappings or runtime history.' }
-    if(-not (Test-Path -LiteralPath $oneDriveSentinel -PathType Leaf)) { throw 'Uninstall removed OneDrive history.' }
-    if($null -eq (Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue)) { throw 'Uninstall removed an existing scheduled task.' }
-
-    Write-Host 'AmmarTrading Sync install, upgrade, and uninstall acceptance passed.'
+    $uninstaller = Assert-SafeAcceptancePath -Path (Join-Path $installRoot 'unins000.exe') -AcceptanceRoot $acceptanceRoot
+    Invoke-CheckedProcess -FilePath $uninstaller -ArgumentList @('/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART',"/LOG=`"$uninstallLog`"")
+    $setupAttempted = $false
+    if((Test-Path -LiteralPath $installedExe) -or (Test-Path -LiteralPath $startMenuShortcut) -or (Test-Path -LiteralPath $desktopShortcut) -or @(Get-UninstallEntry).Count) { throw 'Uninstall did not remove product files and registration.' }
+    if(-not (Test-Path -LiteralPath $runtimeSentinel) -or -not (Test-Path -LiteralPath $oneDriveSentinel) -or $null -eq (Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue)) { throw 'Uninstall removed preserved state.' }
+    Write-Host 'AmmarTrading Sync install, failed-upgrade rollback, successful upgrade, and uninstall acceptance passed.'
 } finally {
     if($null -ne $launchedProcessId) {
-        $taskProcess = Get-Process -Id $launchedProcessId -ErrorAction SilentlyContinue
-        if($null -ne $taskProcess) {
+        $runningApp = Get-Process -Id $launchedProcessId -ErrorAction SilentlyContinue
+        if($null -ne $runningApp) {
             try {
-                if($taskProcess.Path -ieq (Join-Path $InstallRoot 'AmmarTrading.Sync.exe')) { Stop-Process -Id $launchedProcessId -Force }
+                if($runningApp.Path -ieq (Join-Path $installRoot 'AmmarTrading.Sync.exe')) { Stop-Process $runningApp.Id -Force }
             } catch { }
         }
     }
-    if($launchTaskCreated) {
-        Unregister-ScheduledTask -TaskName $launchTaskName -Confirm:$false -ErrorAction SilentlyContinue
-    }
-    if($installedByAcceptance -and (Test-Path -LiteralPath (Join-Path $InstallRoot 'unins000.exe') -PathType Leaf)) {
-        try {
-            Invoke-CheckedProcess -FilePath (Join-Path $InstallRoot 'unins000.exe') -ArgumentList @('/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART')
-        } catch { Write-Warning 'Acceptance cleanup could not uninstall its task-specific installation.' }
-    }
-    if($taskCreated) {
-        Unregister-ScheduledTask -TaskName $taskName -Confirm:$false -ErrorAction SilentlyContinue
-    }
+    if($launchTaskCreated) { Unregister-ScheduledTask -TaskName $launchTaskName -Confirm:$false -ErrorAction SilentlyContinue }
+    if($setupAttempted) { Repair-FailedSetupAttempt -AcceptanceRoot $acceptanceRoot -InstallRoot $installRoot -StartMenuShortcut $startMenuShortcut -DesktopShortcut $desktopShortcut }
+    if($taskCreated) { Unregister-ScheduledTask -TaskName $taskName -Confirm:$false -ErrorAction SilentlyContinue }
     Remove-Item -LiteralPath $runtimeSentinel -Force -ErrorAction SilentlyContinue
-    if(-not $runtimeExisted -and (Test-Path -LiteralPath $runtimeRoot -PathType Container) -and
-       @(Get-ChildItem -LiteralPath $runtimeRoot -Force -ErrorAction SilentlyContinue).Count -eq 0) {
-        Remove-Item -LiteralPath $runtimeRoot -Force -ErrorAction SilentlyContinue
-    }
-    if(Test-Path -LiteralPath $acceptanceRoot -PathType Container) {
-        Remove-Item -LiteralPath $acceptanceRoot -Recurse -Force -ErrorAction SilentlyContinue
-    }
+    if(-not $runtimeExisted -and (Test-Path $runtimeRoot) -and @(Get-ChildItem $runtimeRoot -Force -ErrorAction SilentlyContinue).Count -eq 0){Remove-Item $runtimeRoot -Force}
+    Assert-SafeAcceptancePath -Path $acceptanceRoot -AcceptanceRoot $acceptanceRoot -AllowRoot | Out-Null
+    if(Test-Path $acceptanceRoot){Remove-Item -LiteralPath $acceptanceRoot -Recurse -Force}
 }

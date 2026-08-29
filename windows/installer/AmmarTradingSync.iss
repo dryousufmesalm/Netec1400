@@ -12,6 +12,11 @@
 #define ProductVersion "1.0.0"
 #define ProductPublisher "AmmarTrading"
 #define ProductExe "AmmarTrading.Sync.exe"
+#ifdef AcceptanceFaultInjection
+  #define ProductOutputName "AmmarTrading Sync Upgrade Fault Test"
+#else
+  #define ProductOutputName "AmmarTrading Sync Setup"
+#endif
 
 [Setup]
 AppId={{8F488698-AB96-45DB-A2BB-D9E868823F43}
@@ -27,7 +32,7 @@ DefaultDirName={autopf}\AmmarTrading Sync
 DefaultGroupName=AmmarTrading Sync
 DisableProgramGroupPage=yes
 OutputDir={#OutputDir}
-OutputBaseFilename=AmmarTrading Sync Setup
+OutputBaseFilename={#ProductOutputName}
 Compression=lzma2/max
 SolidCompression=yes
 PrivilegesRequired=admin
@@ -48,6 +53,9 @@ Name: "desktopicon"; Description: "Create a &desktop shortcut"; GroupDescription
 [Files]
 Source: "{#PublishDir}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
 Source: "{#BootstrapperPath}"; DestDir: "{tmp}"; DestName: "MicrosoftEdgeWebView2Setup.exe"; Flags: deleteafterinstall
+#ifdef AcceptanceFaultInjection
+Source: "{#PublishDir}\AmmarTrading.Sync.exe"; DestDir: "{app}"; DestName: "Task9UpgradeFault.blocked"
+#endif
 
 [Icons]
 Name: "{autoprograms}\AmmarTrading Sync"; Filename: "{app}\{#ProductExe}"; WorkingDir: "{app}"

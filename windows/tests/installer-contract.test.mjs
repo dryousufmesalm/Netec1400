@@ -1,0 +1,48 @@
+import assert from "node:assert/strict";
+import { readFile } from "node:fs/promises";
+import path from "node:path";
+import test from "node:test";
+import { fileURLToPath } from "node:url";
+
+const testsRoot = path.dirname(fileURLToPath(import.meta.url));
+const windowsRoot = path.resolve(testsRoot, "..");
+const build = await readFile(path.join(windowsRoot, "scripts", "Build-AmmarTradingSync.ps1"), "utf8");
+const acceptance = await readFile(path.join(windowsRoot, "scripts", "Test-AmmarTradingSyncAcceptance.ps1"), "utf8");
+const installer = await readFile(path.join(windowsRoot, "installer", "AmmarTradingSync.iss"), "utf8");
+
+test("acceptance owns its isolated install root and validates containment before mutation", () => {
+  const topLevelParameters = acceptance.slice(0, acceptance.indexOf("$ErrorActionPreference"));
+  assert.doesNotMatch(topLevelParameters, /\[string\]\$InstallRoot/);
+  assert.match(acceptance, /function Assert-SafeAcceptancePath/);
+  assert.match(acceptance, /The acceptance path escaped its isolated root/);
+  assert.match(acceptance, /Acceptance paths cannot contain reparse points/);
+});
+
+test("release outputs are staged uniquely and promoted as one guarded operation", () => {
+  assert.match(build, /\.build-/);
+  assert.match(build, /function Publish-ReleaseArtifacts/);
+  assert.match(build, /Remove-CanonicalReleaseArtifacts/);
+  assert.match(build, /AmmarTrading Sync Upgrade Fault Test\.exe/);
+});
+
+test("published and installed executable payloads use explicit allowlists", () => {
+  assert.match(build, /\$createdumpPath\s*=\s*Join-Path[^\n]+'createdump\.exe'/);
+  assert.match(build, /Remove-Item -LiteralPath \$createdumpPath -Force/);
+  assert.match(build, /\$allowedExecutables\s*=\s*@\('AmmarTrading\.Sync\.exe'\)/);
+  assert.match(acceptance, /\$allowedInstalledExecutables\s*=\s*@\('AmmarTrading\.Sync\.exe','unins000\.exe'\)/);
+});
+
+test("acceptance cleanup is anchored to the exact AppId and attempted root", () => {
+  assert.match(acceptance, /\$uninstallSubKey\s*=\s*'\{8F488698-AB96-45DB-A2BB-D9E868823F43\}_is1'/);
+  assert.match(acceptance, /\$setupAttempted\s*=\s*\$true/);
+  assert.match(acceptance, /function Repair-FailedSetupAttempt/);
+});
+
+test("failed-upgrade rollback uses a compile-time-only fault installer", () => {
+  assert.match(installer, /#ifdef AcceptanceFaultInjection/);
+  assert.match(installer, /DestName: "Task9UpgradeFault\.blocked"/);
+  assert.doesNotMatch(installer, /RaiseException/);
+  assert.match(acceptance, /\$faultCollision/);
+  assert.match(acceptance, /Failed upgrade changed the installed executable/);
+  assert.match(acceptance, /Fault-injection installer unexpectedly succeeded/);
+});
