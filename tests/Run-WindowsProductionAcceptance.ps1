@@ -1,12 +1,20 @@
 [CmdletBinding()]
 param(
-    [Parameter(Mandatory)][string]$StagingRoot,
+    [string]$StagingRoot,
     [string]$MetaEditorPath,
     [string]$WorkbookPath,
     [string]$OutputPath,
     [switch]$RequireMetaEditor,
     [switch]$RequireExcel,
-    [switch]$AsLibrary
+    [switch]$AsLibrary,
+    [ValidateSet('Staging','Vps','ReportingPc')][string]$AcceptanceRole = 'Staging',
+    [switch]$StagingOnly,
+    [string]$VpsName,
+    [string[]]$ExpectedAccountNumber,
+    [string]$OneDriveRoot,
+    [string]$ConfigPath,
+    [string]$EvidenceOutputPath,
+    [string]$VpsEvidencePath
 )
 
 Set-StrictMode -Version Latest
@@ -158,7 +166,160 @@ function Add-NotRunCheck {
     $Checks.Add((New-AcceptanceCheck -Name $Name -Status NotRun -StartedUtc $now -Message $Message -Required $Required))
 }
 
+function Assert-AmmarTradingExpectedAccounts {
+    param([Parameter(Mandatory)][string[]]$ExpectedAccountNumber)
+    $accounts = @($ExpectedAccountNumber | ForEach-Object { ([string]$_).Trim() })
+    if($accounts.Count -lt 2) { throw 'End-to-end acceptance requires at least two expected account numbers.' }
+    foreach($account in $accounts) {
+        if($account -notmatch '^\d{4,20}$') { throw 'Expected account numbers must contain 4 to 20 digits.' }
+    }
+    if(@($accounts | Select-Object -Unique).Count -ne $accounts.Count) { throw 'Expected account numbers must be unique.' }
+    return $accounts
+}
+
+function Get-AmmarTradingScheduledTaskEvidence {
+    $taskNames = @('MoneyMachine-Baskets-To-OneDrive-Daily','MoneyMachine-Baskets-To-OneDrive-StartupCatchup')
+    $tasks = [Collections.Generic.List[object]]::new()
+    foreach($taskName in $taskNames) {
+        $task = Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
+        if($null -eq $task) { throw "Required synchronization task is missing: $taskName" }
+        $info = Get-ScheduledTaskInfo -TaskName $taskName -ErrorAction Stop
+        $state = [string]$task.State
+        $result = [int64]$info.LastTaskResult
+        if($state -cne 'Ready') { throw "Synchronization task is not ready: $taskName" }
+        if($result -ne 0) { throw "Synchronization task has not completed successfully: $taskName" }
+        $tasks.Add([pscustomobject]@{ Name=$taskName; State=$state; LastTaskResult=$result })
+    }
+    return [pscustomobject]@{ TaskState='Ready'; LastTaskResult=0; Tasks=@($tasks) }
+}
+
+function Get-AmmarTradingVpsAcceptanceEvidence {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$VpsName,
+        [Parameter(Mandatory)][string[]]$ExpectedAccountNumber,
+        [Parameter(Mandatory)][string]$OneDriveRoot,
+        [Parameter(Mandatory)][string]$ConfigPath,
+        [scriptblock]$TaskEvidenceProvider = ${function:Get-AmmarTradingScheduledTaskEvidence}
+    )
+    if([string]::IsNullOrWhiteSpace($VpsName)) { throw 'VPS name is required.' }
+    $accounts = @(Assert-AmmarTradingExpectedAccounts -ExpectedAccountNumber $ExpectedAccountNumber)
+    if(-not (Test-Path -LiteralPath $OneDriveRoot -PathType Container)) { throw 'The supplied OneDrive root is unavailable.' }
+    if(-not (Test-Path -LiteralPath $ConfigPath -PathType Leaf)) { throw 'The account mapping file is unavailable.' }
+    $canonicalRoot = [IO.Path]::GetFullPath((Resolve-Path -LiteralPath $OneDriveRoot).Path).TrimEnd('\')
+    $mappings = @(Import-Csv -LiteralPath $ConfigPath -ErrorAction Stop)
+    $taskEvidence = & $TaskEvidenceProvider
+    if([string]$taskEvidence.TaskState -cne 'Ready' -or [int64]$taskEvidence.LastTaskResult -ne 0) {
+        throw 'Synchronization automation is not in the required Ready state.'
+    }
+    $results = [Collections.Generic.List[object]]::new()
+    foreach($account in $accounts) {
+        $matches = @($mappings | Where-Object { ([string]$_.ExpectedMT4Login).Trim() -ceq $account })
+        if($matches.Count -ne 1) { throw "Expected exactly one mapping for account $account." }
+        $mapping = $matches[0]
+        if(([string]$mapping.Enabled).Trim() -notmatch '^(?i:true|1|yes)$') { throw "The mapping for account $account is not enabled." }
+        if(([string]$mapping.VpsName).Trim() -cne $VpsName.Trim()) { throw "The mapping for account $account belongs to a different VPS." }
+        $mappingRoot = [IO.Path]::GetFullPath([Environment]::ExpandEnvironmentVariables(([string]$mapping.OneDriveRoot).Trim())).TrimEnd('\')
+        if($mappingRoot -ine $canonicalRoot) { throw "The mapping for account $account uses a different OneDrive root." }
+        $source = [IO.Path]::GetFullPath([Environment]::ExpandEnvironmentVariables(([string]$mapping.SourceCsv).Trim()))
+        $destination = Join-Path $canonicalRoot "AmmarTrading\Account_$account\Baskets.csv"
+        if(-not (Test-Path -LiteralPath $source -PathType Leaf)) { throw "The source publication for account $account is missing." }
+        if(-not (Test-Path -LiteralPath $destination -PathType Leaf)) { throw "The local OneDrive publication for account $account is missing." }
+        $sourceHash = (Get-FileHash -LiteralPath $source -Algorithm SHA256).Hash.ToLowerInvariant()
+        $destinationHash = (Get-FileHash -LiteralPath $destination -Algorithm SHA256).Hash.ToLowerInvariant()
+        if($sourceHash -cne $destinationHash) { throw "Source and destination hashes differ for account $account." }
+        $heartbeatPath = Join-Path (Split-Path -Parent $destination) 'SyncStatus.json'
+        if(-not (Test-Path -LiteralPath $heartbeatPath -PathType Leaf)) { throw "Sync status is missing for account $account." }
+        $heartbeat = Get-Content -LiteralPath $heartbeatPath -Raw | ConvertFrom-Json
+        if([string]$heartbeat.AccountNumber -cne $account -or [string]$heartbeat.Status -cne 'Success') { throw "Sync status is invalid for account $account." }
+        if([bool]$heartbeat.CloudDeliveryVerified) { throw 'VPS publication evidence must not claim cloud delivery.' }
+        if([string]$heartbeat.SourceHash -cne $sourceHash -or [string]$heartbeat.DestinationHash -cne $destinationHash) { throw "Sync status hashes differ for account $account." }
+        $results.Add([pscustomobject][ordered]@{
+            AccountNumber=$account
+            SourceHash=$sourceHash
+            DestinationHash=$destinationHash
+            TaskState='Ready'
+            CloudDeliveryVerified=$false
+        })
+    }
+    return [pscustomobject][ordered]@{
+        SchemaVersion=1
+        EvidenceRole='Vps'
+        VpsName=$VpsName.Trim()
+        CapturedUtc=[DateTime]::UtcNow.ToString('o')
+        Accounts=@($results.ToArray())
+        CloudDeliveryVerified=$false
+        OverallStatus='Pass'
+    }
+}
+
+function Get-AmmarTradingReportingAcceptanceEvidence {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$VpsName,
+        [Parameter(Mandatory)][string[]]$ExpectedAccountNumber,
+        [Parameter(Mandatory)][string]$OneDriveRoot,
+        [Parameter(Mandatory)][string]$VpsEvidencePath
+    )
+    $accounts = @(Assert-AmmarTradingExpectedAccounts -ExpectedAccountNumber $ExpectedAccountNumber)
+    if(-not (Test-Path -LiteralPath $OneDriveRoot -PathType Container)) { throw 'The reporting-PC OneDrive root is unavailable.' }
+    if(-not (Test-Path -LiteralPath $VpsEvidencePath -PathType Leaf)) { throw 'The separate VPS evidence file is unavailable.' }
+    $vpsEvidence = Get-Content -LiteralPath $VpsEvidencePath -Raw | ConvertFrom-Json
+    if([string]$vpsEvidence.EvidenceRole -cne 'Vps' -or [bool]$vpsEvidence.CloudDeliveryVerified -or [string]$vpsEvidence.OverallStatus -cne 'Pass') {
+        throw 'The supplied evidence is not valid VPS-local acceptance evidence.'
+    }
+    if([string]$vpsEvidence.VpsName -cne $VpsName.Trim()) { throw 'The VPS evidence belongs to a different named VPS.' }
+    $canonicalRoot = [IO.Path]::GetFullPath((Resolve-Path -LiteralPath $OneDriveRoot).Path).TrimEnd('\')
+    $results = [Collections.Generic.List[object]]::new()
+    foreach($account in $accounts) {
+        $matches = @($vpsEvidence.Accounts | Where-Object { [string]$_.AccountNumber -ceq $account })
+        if($matches.Count -ne 1) { throw "VPS evidence does not contain exactly one result for account $account." }
+        $destination = Join-Path $canonicalRoot "AmmarTrading\Account_$account\Baskets.csv"
+        if(-not (Test-Path -LiteralPath $destination -PathType Leaf)) { throw "The reporting PC has not physically received account $account." }
+        $reportingHash = (Get-FileHash -LiteralPath $destination -Algorithm SHA256).Hash.ToLowerInvariant()
+        if($reportingHash -cne [string]$matches[0].DestinationHash) { throw "The reporting-PC hash differs from VPS evidence for account $account." }
+        $results.Add([pscustomobject][ordered]@{
+            AccountNumber=$account
+            VpsPublishedHash=[string]$matches[0].DestinationHash
+            ReportingPcHash=$reportingHash
+            CloudDeliveryVerified=$true
+        })
+    }
+    return [pscustomobject][ordered]@{
+        SchemaVersion=1
+        EvidenceRole='ReportingPc'
+        VpsName=$VpsName.Trim()
+        CapturedUtc=[DateTime]::UtcNow.ToString('o')
+        Accounts=@($results.ToArray())
+        CloudDeliveryVerified=$true
+        OverallStatus='Pass'
+    }
+}
+
 if($AsLibrary) { return }
+
+if($StagingOnly) { $AcceptanceRole = 'Staging' }
+if($AcceptanceRole -in @('Vps','ReportingPc')) {
+    if([string]::IsNullOrWhiteSpace($VpsName) -or $null -eq $ExpectedAccountNumber -or
+       [string]::IsNullOrWhiteSpace($OneDriveRoot) -or [string]::IsNullOrWhiteSpace($EvidenceOutputPath)) {
+        throw 'VPS name, expected account numbers, OneDrive root, and evidence output path are required for end-to-end acceptance.'
+    }
+    $evidence = if($AcceptanceRole -ceq 'Vps') {
+        if([string]::IsNullOrWhiteSpace($ConfigPath)) { throw 'The mapping configuration path is required for VPS acceptance.' }
+        Get-AmmarTradingVpsAcceptanceEvidence -VpsName $VpsName -ExpectedAccountNumber $ExpectedAccountNumber -OneDriveRoot $OneDriveRoot -ConfigPath $ConfigPath
+    } else {
+        if([string]::IsNullOrWhiteSpace($VpsEvidencePath)) { throw 'The separate VPS evidence path is required for reporting-PC acceptance.' }
+        Get-AmmarTradingReportingAcceptanceEvidence -VpsName $VpsName -ExpectedAccountNumber $ExpectedAccountNumber -OneDriveRoot $OneDriveRoot -VpsEvidencePath $VpsEvidencePath
+    }
+    $sensitive = @($OneDriveRoot,$ConfigPath,$EvidenceOutputPath,$VpsEvidencePath)
+    Write-AtomicAcceptanceReport -Path $EvidenceOutputPath -Json (ConvertTo-RedactedAcceptanceJson -Report $evidence -SensitiveValues $sensitive)
+    Write-Host "AmmarTrading $AcceptanceRole end-to-end acceptance: Pass"
+    exit 0
+}
+
+if([string]::IsNullOrWhiteSpace($StagingRoot)) {
+    $StagingRoot = Join-Path ([IO.Path]::GetTempPath()) ("AmmarTrading-StagingAcceptance-" + [guid]::NewGuid().ToString('N'))
+}
 
 $acceptanceStarted = [DateTime]::UtcNow.ToString('o')
 if(-not (Test-Path -LiteralPath $StagingRoot)) { New-Item -ItemType Directory -Path $StagingRoot -Force | Out-Null }
@@ -234,13 +395,19 @@ $sensitiveValues.Add($publicationSource)
 $sensitiveValues.Add($publicationOneDrive)
 $sensitiveValues.Add($publicationConfig)
 $sensitiveValues.Add((Get-Content -LiteralPath $publicationConfig -Raw))
-$publishedCsv = Join-Path $publicationOneDrive 'AmarTrading\Account_892522910\Baskets.csv'
-$publishedHeartbeat = Join-Path $publicationOneDrive 'AmarTrading\Account_892522910\SyncStatus.json'
+$publishedCsv = Join-Path $publicationOneDrive 'AmmarTrading\Account_892522910\Baskets.csv'
+$publishedHeartbeat = Join-Path $publicationOneDrive 'AmmarTrading\Account_892522910\SyncStatus.json'
 $publishedState = Join-Path $publicationRuntime 'state\last-run.json'
 Invoke-AcceptanceCheck -Checks $checks -Name 'isolated-atomic-publication' -PassMessage 'An isolated direct-process publication produced hash-consistent CSV, heartbeat, and state artifacts.' -Action {
-    $run = Invoke-AcceptancePowerShell -WindowsPowerShell $windowsPowerShell -ScriptPath (Join-Path $automationRoot 'Sync-BasketsToOneDrive.ps1') -Parameters ([ordered]@{
-        ConfigPath=$publicationConfig; StableCheckSeconds='0'; MaxRetries='1'; RuntimeRoot=$publicationRuntime; MutexWaitMilliseconds='5000'
-    }) -LogRoot $logRoot -LogName 'isolated-atomic-publication'
+    $previousOneDrive = $env:OneDrive
+    try {
+        $env:OneDrive = $publicationOneDrive
+        $run = Invoke-AcceptancePowerShell -WindowsPowerShell $windowsPowerShell -ScriptPath (Join-Path $automationRoot 'Sync-BasketsToOneDrive.ps1') -Parameters ([ordered]@{
+            ConfigPath=$publicationConfig; StableCheckSeconds='0'; MaxRetries='1'; RuntimeRoot=$publicationRuntime; MutexWaitMilliseconds='5000'
+        }) -LogRoot $logRoot -LogName 'isolated-atomic-publication'
+    } finally {
+        $env:OneDrive = $previousOneDrive
+    }
     if($run.ExitCode -ne 0) { throw "Direct sync process exited $($run.ExitCode)." }
     foreach($path in @($publishedCsv,$publishedHeartbeat,$publishedState)) {
         if(-not (Test-Path -LiteralPath $path -PathType Leaf)) { throw 'A required publication artifact is missing.' }

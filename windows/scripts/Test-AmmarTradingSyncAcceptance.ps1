@@ -1,7 +1,10 @@
 [CmdletBinding()]
 param(
     [Parameter(Mandatory)][ValidateNotNullOrEmpty()][string]$Installer,
-    [string]$FaultInstaller
+    [string]$FaultInstaller,
+    [string]$ExpectedInstallerSha256,
+    [switch]$ProductionInstallOnly,
+    [string]$ProductionInstallLogPath
 )
 
 $ErrorActionPreference = 'Stop'
@@ -214,6 +217,38 @@ if([IO.Path]::GetFileName($resolvedInstaller) -cne 'AmmarTrading Sync Setup.exe'
 $installerVersion = [Diagnostics.FileVersionInfo]::GetVersionInfo($resolvedInstaller)
 if(([string]$installerVersion.ProductName).Trim() -cne 'AmmarTrading Sync') {
     throw 'The installer product name is not canonical.'
+}
+if($ProductionInstallOnly) {
+    if($ExpectedInstallerSha256 -cnotmatch '^[0-9a-f]{64}$') {
+        throw 'Production installation requires an explicit lowercase SHA-256 pin.'
+    }
+    if(-not [string]::IsNullOrWhiteSpace($FaultInstaller)) { throw 'A fault-injection installer cannot be used for production installation.' }
+    $actualInstallerSha256 = (Get-FileHash -LiteralPath $resolvedInstaller -Algorithm SHA256).Hash.ToLowerInvariant()
+    if($actualInstallerSha256 -cne $ExpectedInstallerSha256) { throw 'The installer SHA-256 does not match the approved candidate.' }
+    if(Get-Process -Name 'AmmarTrading.Sync' -ErrorAction SilentlyContinue) {
+        throw 'Close AmmarTrading Sync before installing or upgrading the approved candidate.'
+    }
+    $arguments = @('/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART','/SP-')
+    if(-not [string]::IsNullOrWhiteSpace($ProductionInstallLogPath)) {
+        $logPath = [IO.Path]::GetFullPath($ProductionInstallLogPath)
+        $logDirectory = Split-Path -Parent $logPath
+        if(-not (Test-Path -LiteralPath $logDirectory -PathType Container)) { New-Item -ItemType Directory -Path $logDirectory -Force | Out-Null }
+        $arguments += "/LOG=`"$logPath`""
+    }
+    Invoke-CheckedProcess -FilePath $resolvedInstaller -ArgumentList $arguments
+    $entry = @(Get-UninstallEntry)
+    if($entry.Count -ne 1 -or [string]$entry[0].DisplayName -cne 'AmmarTrading Sync') { throw 'The approved candidate did not create the exact product registration.' }
+    $installRoot = [IO.Path]::GetFullPath([string]$entry[0].InstallLocation).TrimEnd('\')
+    $installedExe = Join-Path $installRoot 'AmmarTrading.Sync.exe'
+    if(-not (Test-Path -LiteralPath $installedExe -PathType Leaf)) { throw 'The approved candidate did not install the desktop executable.' }
+    [pscustomobject][ordered]@{
+        Status='Pass'
+        ProductName='AmmarTrading Sync'
+        InstallerSha256=$actualInstallerSha256
+        InstalledVersion=[string]$entry[0].DisplayVersion
+        CapturedUtc=[DateTime]::UtcNow.ToString('o')
+    } | ConvertTo-Json -Depth 3
+    exit 0
 }
 if([string]::IsNullOrWhiteSpace($FaultInstaller)) {
     $FaultInstaller = Join-Path (Split-Path -Parent $resolvedInstaller) '.acceptance\AmmarTrading Sync Upgrade Fault Test.exe'

@@ -1,6 +1,54 @@
 # Project Deliverables Checklist
 
-## ✅ All Deliverables Complete
+## AmmarTrading Sync release candidate
+
+The Windows desktop sync application is implemented as an internal, unsigned release candidate. Production Authenticode signing and the live two-account VPS/reporting-PC acceptance remain release gates; this document does not claim those gates have passed.
+
+| Item | Current evidence |
+|---|---|
+| Product | `AmmarTrading Sync` Windows x64 installer |
+| Installer | `AmmarTrading Sync Setup.exe`, version 1.0.0 |
+| Approved internal SHA-256 | `cc834fe2eec1b9367175f8b0c22b83156b89420434ff8bd5010aecaca4193399` |
+| Verified candidate location | Windows build worker: `C:\CodexWorker\AmmarTrading-Task9\repo\artifacts\windows\AmmarTrading Sync Setup.exe` |
+| Build/installer acceptance | Passed on the Windows 11 build worker; see the Task 9 report |
+| Demo VPS two-account acceptance | Pending secure automated access and two real eligible schema-v3 sources |
+| Reporting-PC OneDrive receipt | Pending separate physical receipt/hash verification |
+| Excel Master refresh | Pending receipt and availability of the customer workbook |
+| Code signing | Required before an external production release |
+
+End-to-end evidence is deliberately split into two files:
+
+- The VPS report proves one enabled mapping per selected account, source/destination SHA-256 equality, successful local heartbeat, and ready scheduled tasks. It always records `CloudDeliveryVerified=false`.
+- The reporting-PC report consumes the VPS report and may record `CloudDeliveryVerified=true` only after the physical local OneDrive files exist and their hashes match.
+
+Example acceptance commands (run from a trusted local checkout; keep evidence outside customer data):
+
+```powershell
+# Complete non-production staging regressions.
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File tests\Run-WindowsProductionAcceptance.ps1 -StagingOnly
+
+# VPS-local proof after setup and scheduled-task tests.
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File tests\Run-WindowsProductionAcceptance.ps1 `
+  -AcceptanceRole Vps -VpsName '<friendly VPS name>' `
+  -ExpectedAccountNumber '<account 1>','<account 2>' `
+  -OneDriveRoot '<signed-in local OneDrive root>' `
+  -ConfigPath "$env:LOCALAPPDATA\AmmarTrading\Sync\accounts.csv" `
+  -EvidenceOutputPath '<evidence root>\vps-acceptance.json'
+
+# Separate reporting-PC receipt proof.
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File tests\Run-WindowsProductionAcceptance.ps1 `
+  -AcceptanceRole ReportingPc -VpsName '<same friendly VPS name>' `
+  -ExpectedAccountNumber '<account 1>','<account 2>' `
+  -OneDriveRoot '<reporting-PC local OneDrive root>' `
+  -VpsEvidencePath '<transferred vps-acceptance.json>' `
+  -EvidenceOutputPath '<evidence root>\reporting-pc-acceptance.json'
+```
+
+The automation accepts no Microsoft or VPS password parameters. A workbook refresh must be recorded separately and cannot be inferred from OneDrive receipt.
+
+---
+
+## Legacy EA deliverables
 
 ---
 
