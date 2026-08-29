@@ -11,7 +11,7 @@ The Windows desktop sync application is implemented as an internal, unsigned rel
 | Approved internal SHA-256 | `cc834fe2eec1b9367175f8b0c22b83156b89420434ff8bd5010aecaca4193399` |
 | Verified candidate location | Windows build worker: `C:\CodexWorker\AmmarTrading-Task9\repo\artifacts\windows\AmmarTrading Sync Setup.exe` |
 | Build/installer acceptance | Passed on the Windows 11 build worker; see the Task 9 report |
-| Demo VPS two-account acceptance | Pending secure automated access and two real eligible schema-v3 sources |
+| Demo VPS two-account acceptance | Blocked: authorized read-only live scan found one eligible schema-v3 source; three other distinct MT4 accounts remain schema v2 and no verified current V3 EA binary is installed in their terminal roots |
 | Reporting-PC OneDrive receipt | Pending separate physical receipt/hash verification |
 | Excel Master refresh | Pending receipt and availability of the customer workbook |
 | Code signing | Required before an external production release |
