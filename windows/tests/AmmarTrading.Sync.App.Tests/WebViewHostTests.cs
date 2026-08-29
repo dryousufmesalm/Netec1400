@@ -1,6 +1,8 @@
 using System.Collections.Concurrent;
+using System.IO.Pipes;
 using System.Text.Json;
 using System.Threading.Channels;
+using System.Windows.Threading;
 using AmmarTrading.Sync.App.Bridge;
 using AmmarTrading.Sync.App.Hosting;
 using AmmarTrading.Sync.Core.Bridge;
@@ -98,12 +100,36 @@ public sealed class WebViewHostTests : IDisposable
     }
 
     [Fact]
+    public void DeferredWebMessageReceiver_DeliversOnlyAfterTheWebViewCallbackReturns()
+    {
+        var dispatcher = new ManualWebViewDispatcher();
+        var receiver = new DeferredWebMessageReceiver(
+            dispatcher,
+            new RecordingMetadataLogger());
+        var callbackReturned = false;
+        var observedAfterReturn = false;
+        receiver.MessageReceived += (_, _) => observedAfterReturn = callbackReturned;
+
+        receiver.Receive(
+            "https://ammartrading.app/",
+            """
+            {"version":1,"id":"request-1","command":"getSystemStatus","payload":{}}
+            """);
+
+        Assert.False(observedAfterReturn);
+        callbackReturned = true;
+        dispatcher.RunPostedCallback();
+        Assert.True(observedAfterReturn);
+    }
+
+    [Fact]
     public async Task WebMessageBridge_PostsExactlyOneLowercaseBridgeResponse()
     {
         var host = new FakeWebMessageHost();
         await using var bridge = new WebViewBridge(
             new BridgeCommandRouter(new ImmediateOperations()),
             host,
+            new InlineWebViewDispatcher(),
             new RecordingMetadataLogger());
 
         host.Receive("""
@@ -129,6 +155,7 @@ public sealed class WebViewHostTests : IDisposable
         var bridge = new WebViewBridge(
             new BridgeCommandRouter(operations),
             host,
+            new InlineWebViewDispatcher(),
             new RecordingMetadataLogger());
 
         for (var index = 0; index < 5; index++)
@@ -149,6 +176,80 @@ public sealed class WebViewHostTests : IDisposable
     }
 
     [Fact]
+    public async Task WebMessageBridge_InvokesAQueuedBrowseOnTheOwningStaDispatcher()
+    {
+        await using var dispatcherThread = new StaDispatcherThread();
+        var dispatcher = new WpfWebViewDispatcher(dispatcherThread.Dispatcher);
+        var operations = new SaturatedBrowseOperations(dispatcher);
+        var host = new FakeWebMessageHost();
+        var bridge = new WebViewBridge(
+            new BridgeCommandRouter(operations),
+            host,
+            dispatcher,
+            new RecordingMetadataLogger());
+
+        for (var index = 0; index < 4; index++)
+        {
+            host.Receive(
+                $"{{\"version\":1,\"id\":\"request-{index}\",\"command\":\"getSystemStatus\",\"payload\":{{}}}}");
+        }
+
+        await operations.FourStarted.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        host.Receive(
+            """
+            {"version":1,"id":"request-browse","command":"browseForCsv","payload":{}}
+            """);
+        await Task.Delay(100);
+        Assert.False(operations.BrowseAffinity.Task.IsCompleted);
+
+        operations.ReleaseOneSlot();
+        var affinity = await operations.BrowseAffinity.Task.WaitAsync(TimeSpan.FromSeconds(5));
+
+        Assert.Equal(ApartmentState.STA, affinity.ApartmentState);
+        Assert.True(affinity.HasDispatcherAccess);
+        await bridge.DisposeAsync();
+    }
+
+    [Fact]
+    public void WindowCloseState_CancelsRepeatedCloseUntilDrainIsApproved()
+    {
+        var state = new WindowCloseState();
+
+        var firstClose = state.RequestClose(canDrainBridge: true);
+        var secondClose = state.RequestClose(canDrainBridge: false);
+
+        Assert.True(firstClose.CancelClose);
+        Assert.True(firstClose.StartDrain);
+        Assert.True(secondClose.CancelClose);
+        Assert.False(secondClose.StartDrain);
+
+        state.ApproveClose();
+        var approvedClose = state.RequestClose(canDrainBridge: false);
+        Assert.False(approvedClose.CancelClose);
+        Assert.False(approvedClose.StartDrain);
+    }
+
+    [Fact]
+    public async Task WebMessageBridge_TearsDownTheHostOnItsDispatcherAndLogsFailure()
+    {
+        await using var dispatcherThread = new StaDispatcherThread();
+        var dispatcher = new WpfWebViewDispatcher(dispatcherThread.Dispatcher);
+        var logger = new RecordingMetadataLogger();
+        var host = new ThrowingDisposeWebMessageHost(dispatcher);
+        var bridge = new WebViewBridge(
+            new BridgeCommandRouter(new ImmediateOperations()),
+            host,
+            dispatcher,
+            logger);
+
+        await Task.Run(async () => await bridge.DisposeAsync());
+
+        Assert.True(host.UnsubscribeHadDispatcherAccess);
+        Assert.True(host.DisposeHadDispatcherAccess);
+        Assert.Contains(AppLogEvent.WebViewTeardownFailed, logger.Events);
+    }
+
+    [Fact]
     public async Task ActivationPipe_NotifiesTheExistingInstanceThroughLocalIpc()
     {
         var pipeName = $"AmmarTrading.Sync.Tests.{Guid.NewGuid():N}";
@@ -166,6 +267,51 @@ public sealed class WebViewHostTests : IDisposable
 
         Assert.True(signaled);
         await activated.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        cancellation.Cancel();
+        await listening;
+    }
+
+    [Fact]
+    public void SingleInstanceCoordinator_SeparatesActivationPipesByWindowsSession()
+    {
+        var firstSessionPipe = SingleInstanceCoordinator.PipeNameForSession(1);
+        var secondSessionPipe = SingleInstanceCoordinator.PipeNameForSession(2);
+
+        Assert.NotEqual(firstSessionPipe, secondSessionPipe);
+    }
+
+    [Fact]
+    public async Task ActivationPipe_BacksOffAfterAListenerCollision()
+    {
+        var pipeName = $"AmmarTrading.Sync.Tests.{Guid.NewGuid():N}";
+        using var occupiedServer = new NamedPipeServerStream(
+            pipeName,
+            PipeDirection.In,
+            maxNumberOfServerInstances: 1,
+            PipeTransmissionMode.Byte,
+            PipeOptions.Asynchronous | PipeOptions.CurrentUserOnly);
+        var logger = new RecordingMetadataLogger();
+        var backoffStarted = new TaskCompletionSource(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        var releaseBackoff = new TaskCompletionSource(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        await using var pipe = new ActivationPipe(
+            pipeName,
+            logger,
+            async token =>
+            {
+                backoffStarted.TrySetResult();
+                await releaseBackoff.Task.WaitAsync(token);
+            });
+        using var cancellation = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+
+        var listening = pipe.ListenAsync(() => { }, cancellation.Token);
+        await backoffStarted.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        await Task.Delay(100);
+
+        Assert.Equal(
+            1,
+            logger.Events.Count(eventCode => eventCode == AppLogEvent.ActivationListenerFailed));
         cancellation.Cancel();
         await listening;
     }
@@ -200,6 +346,115 @@ public sealed class WebViewHostTests : IDisposable
 
         public void Dispose()
         {
+        }
+    }
+
+    private sealed class ThrowingDisposeWebMessageHost : IWebViewMessageHost
+    {
+        private readonly IWebViewDispatcher _dispatcher;
+
+        public ThrowingDisposeWebMessageHost(IWebViewDispatcher dispatcher)
+        {
+            _dispatcher = dispatcher;
+        }
+
+        public event EventHandler<WebMessageJsonEventArgs>? MessageReceived
+        {
+            add { }
+            remove => UnsubscribeHadDispatcherAccess = _dispatcher.CheckAccess();
+        }
+
+        public bool DisposeHadDispatcherAccess { get; private set; }
+
+        public bool UnsubscribeHadDispatcherAccess { get; private set; }
+
+        public ValueTask PostWebMessageAsJsonAsync(string json, CancellationToken token) =>
+            ValueTask.CompletedTask;
+
+        public void Dispose()
+        {
+            DisposeHadDispatcherAccess = _dispatcher.CheckAccess();
+            throw new InvalidOperationException("sensitive teardown detail");
+        }
+    }
+
+    private sealed class ManualWebViewDispatcher : IWebViewDispatcher
+    {
+        private readonly Queue<Action> _postedCallbacks = new();
+
+        public bool CheckAccess() => true;
+
+        public void Post(Action callback) => _postedCallbacks.Enqueue(callback);
+
+        public Task InvokeAsync(Action callback, CancellationToken token)
+        {
+            token.ThrowIfCancellationRequested();
+            callback();
+            return Task.CompletedTask;
+        }
+
+        public Task<T> InvokeAsync<T>(Func<Task<T>> callback, CancellationToken token)
+        {
+            token.ThrowIfCancellationRequested();
+            return callback();
+        }
+
+        public void RunPostedCallback()
+        {
+            Assert.Single(_postedCallbacks);
+            _postedCallbacks.Dequeue()();
+        }
+    }
+
+    private sealed class InlineWebViewDispatcher : IWebViewDispatcher
+    {
+        public bool CheckAccess() => true;
+
+        public void Post(Action callback) => callback();
+
+        public Task InvokeAsync(Action callback, CancellationToken token)
+        {
+            token.ThrowIfCancellationRequested();
+            callback();
+            return Task.CompletedTask;
+        }
+
+        public Task<T> InvokeAsync<T>(Func<Task<T>> callback, CancellationToken token)
+        {
+            token.ThrowIfCancellationRequested();
+            return callback();
+        }
+    }
+
+    private sealed class StaDispatcherThread : IAsyncDisposable
+    {
+        private readonly Thread _thread;
+
+        public StaDispatcherThread()
+        {
+            var ready = new TaskCompletionSource<Dispatcher>(
+                TaskCreationOptions.RunContinuationsAsynchronously);
+            _thread = new Thread(() =>
+            {
+                ready.TrySetResult(System.Windows.Threading.Dispatcher.CurrentDispatcher);
+                System.Windows.Threading.Dispatcher.Run();
+            });
+            _thread.SetApartmentState(ApartmentState.STA);
+            _thread.Start();
+            Dispatcher = ready.Task.GetAwaiter().GetResult();
+        }
+
+        public Dispatcher Dispatcher { get; }
+
+        public ValueTask DisposeAsync()
+        {
+            Dispatcher.BeginInvokeShutdown(DispatcherPriority.Send);
+            if (!_thread.Join(TimeSpan.FromSeconds(5)))
+            {
+                throw new TimeoutException("The test STA dispatcher did not stop.");
+            }
+
+            return ValueTask.CompletedTask;
         }
     }
 
@@ -314,6 +569,71 @@ public sealed class WebViewHostTests : IDisposable
                     return;
                 }
             }
+        }
+    }
+
+    private sealed class SaturatedBrowseOperations : IAmmarTradingOperations
+    {
+        private static readonly object Result = JsonSerializer.SerializeToElement(new { ready = true });
+        private readonly IWebViewDispatcher _dispatcher;
+        private readonly SemaphoreSlim _release = new(0);
+        private int _started;
+
+        public SaturatedBrowseOperations(IWebViewDispatcher dispatcher)
+        {
+            _dispatcher = dispatcher;
+        }
+
+        public TaskCompletionSource<(ApartmentState ApartmentState, bool HasDispatcherAccess)> BrowseAffinity { get; } =
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        public TaskCompletionSource FourStarted { get; } =
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        public Task<object> GetSystemStatusAsync(CancellationToken token) => BlockAsync(token);
+
+        public Task<object> DiscoverMt4AccountsAsync(CancellationToken token) => Completed(token);
+
+        public Task<object> BrowseForCsvAsync(CancellationToken token)
+        {
+            token.ThrowIfCancellationRequested();
+            BrowseAffinity.TrySetResult((
+                Thread.CurrentThread.GetApartmentState(),
+                _dispatcher.CheckAccess()));
+            return Task.FromResult(Result);
+        }
+
+        public Task<object> GetOneDriveRootsAsync(CancellationToken token) => Completed(token);
+
+        public Task<object> GetConfiguredAccountsAsync(CancellationToken token) => Completed(token);
+
+        public Task<object> ValidateSelectionAsync(JsonElement payload, CancellationToken token) => Completed(token);
+
+        public Task<object> ApplySetupAsync(JsonElement payload, CancellationToken token) => Completed(token);
+
+        public Task<object> RunSyncNowAsync(JsonElement payload, CancellationToken token) => Completed(token);
+
+        public Task<object> OpenReportingFolderAsync(JsonElement payload, CancellationToken token) => Completed(token);
+
+        public Task<object> ExportSupportReportAsync(CancellationToken token) => Completed(token);
+
+        public void ReleaseOneSlot() => _release.Release();
+
+        private async Task<object> BlockAsync(CancellationToken token)
+        {
+            if (Interlocked.Increment(ref _started) == 4)
+            {
+                FourStarted.TrySetResult();
+            }
+
+            await _release.WaitAsync(token);
+            return Result;
+        }
+
+        private static Task<object> Completed(CancellationToken token)
+        {
+            token.ThrowIfCancellationRequested();
+            return Task.FromResult(Result);
         }
     }
 }

@@ -1,5 +1,4 @@
 using System.Text.Json;
-using System.Windows.Threading;
 using AmmarTrading.Sync.App.Hosting;
 using AmmarTrading.Sync.Core.Bridge;
 using Microsoft.Web.WebView2.Core;
@@ -26,38 +25,36 @@ internal interface IWebViewMessageHost : IDisposable
 internal sealed class CoreWebViewMessageHost : IWebViewMessageHost
 {
     private readonly CoreWebView2 _coreWebView;
-    private readonly Dispatcher _dispatcher;
-    private readonly IAppMetadataLogger _logger;
+    private readonly IWebViewDispatcher _dispatcher;
+    private readonly DeferredWebMessageReceiver _receiver;
     private int _disposed;
 
     public CoreWebViewMessageHost(
         CoreWebView2 coreWebView,
-        Dispatcher dispatcher,
+        IWebViewDispatcher dispatcher,
         IAppMetadataLogger logger)
     {
         _coreWebView = coreWebView ?? throw new ArgumentNullException(nameof(coreWebView));
         _dispatcher = dispatcher ?? throw new ArgumentNullException(nameof(dispatcher));
-        _logger = logger ?? throw new ArgumentNullException(nameof(logger));
+        _receiver = new DeferredWebMessageReceiver(
+            _dispatcher,
+            logger ?? throw new ArgumentNullException(nameof(logger)));
         _coreWebView.WebMessageReceived += OnWebMessageReceived;
     }
 
-    public event EventHandler<WebMessageJsonEventArgs>? MessageReceived;
+    public event EventHandler<WebMessageJsonEventArgs>? MessageReceived
+    {
+        add => _receiver.MessageReceived += value;
+        remove => _receiver.MessageReceived -= value;
+    }
 
     public async ValueTask PostWebMessageAsJsonAsync(string json, CancellationToken token)
     {
         ArgumentNullException.ThrowIfNull(json);
         token.ThrowIfCancellationRequested();
-        if (_dispatcher.CheckAccess())
-        {
-            _coreWebView.PostWebMessageAsJson(json);
-            return;
-        }
-
         await _dispatcher.InvokeAsync(
                 () => _coreWebView.PostWebMessageAsJson(json),
-                DispatcherPriority.Normal,
                 token)
-            .Task
             .ConfigureAwait(false);
     }
 
@@ -73,22 +70,7 @@ internal sealed class CoreWebViewMessageHost : IWebViewMessageHost
         object? sender,
         CoreWebView2WebMessageReceivedEventArgs eventArgs)
     {
-        if (!WebViewSecurityPolicy.IsAllowedAppAddress(eventArgs.Source))
-        {
-            _logger.Write(AppLogEvent.UntrustedWebMessageRejected);
-            return;
-        }
-
-        try
-        {
-            MessageReceived?.Invoke(
-                this,
-                new WebMessageJsonEventArgs(eventArgs.WebMessageAsJson));
-        }
-        catch
-        {
-            _logger.Write(AppLogEvent.BridgeMessageFailed);
-        }
+        _receiver.Receive(eventArgs.Source, eventArgs.WebMessageAsJson);
     }
 }
 
@@ -98,6 +80,7 @@ internal sealed class WebViewBridge : IAsyncDisposable
 
     private readonly HashSet<Task> _activeTasks = new();
     private readonly IWebViewMessageHost _host;
+    private readonly IWebViewDispatcher _dispatcher;
     private readonly IAppMetadataLogger _logger;
     private readonly BridgeCommandRouter _router;
     private readonly CancellationTokenSource _shutdown = new();
@@ -109,10 +92,12 @@ internal sealed class WebViewBridge : IAsyncDisposable
     public WebViewBridge(
         BridgeCommandRouter router,
         IWebViewMessageHost host,
+        IWebViewDispatcher dispatcher,
         IAppMetadataLogger logger)
     {
         _router = router ?? throw new ArgumentNullException(nameof(router));
         _host = host ?? throw new ArgumentNullException(nameof(host));
+        _dispatcher = dispatcher ?? throw new ArgumentNullException(nameof(dispatcher));
         _logger = logger ?? throw new ArgumentNullException(nameof(logger));
         _host.MessageReceived += OnMessageReceived;
     }
@@ -127,7 +112,6 @@ internal sealed class WebViewBridge : IAsyncDisposable
             }
 
             _accepting = false;
-            _host.MessageReceived -= OnMessageReceived;
             _shutdown.Cancel();
             _disposeTask = DrainAndDisposeAsync(_activeTasks.ToArray());
             return new ValueTask(_disposeTask);
@@ -158,7 +142,10 @@ internal sealed class WebViewBridge : IAsyncDisposable
         {
             await _slots.WaitAsync(_shutdown.Token).ConfigureAwait(false);
             entered = true;
-            var response = await _router.RouteAsync(json, _shutdown.Token).ConfigureAwait(false);
+            var response = await _dispatcher.InvokeAsync(
+                    () => _router.RouteAsync(json, _shutdown.Token),
+                    _shutdown.Token)
+                .ConfigureAwait(false);
             if (_shutdown.IsCancellationRequested)
             {
                 return;
@@ -224,9 +211,23 @@ internal sealed class WebViewBridge : IAsyncDisposable
         {
             _logger.Write(AppLogEvent.BridgeMessageFailed);
         }
+        try
+        {
+            await _dispatcher.InvokeAsync(
+                    () =>
+                    {
+                        _host.MessageReceived -= OnMessageReceived;
+                        _host.Dispose();
+                    },
+                    CancellationToken.None)
+                .ConfigureAwait(false);
+        }
+        catch
+        {
+            _logger.Write(AppLogEvent.WebViewTeardownFailed);
+        }
         finally
         {
-            _host.Dispose();
             _slots.Dispose();
             _shutdown.Dispose();
         }

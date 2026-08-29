@@ -1,5 +1,16 @@
 const BRIDGE_VERSION = 1;
-const DEFAULT_TIMEOUT_MS = 30_000;
+const NATIVE_COMMAND_TIMEOUT_MS = Object.freeze({
+  getSystemStatus: 60_000,
+  discoverMt4Accounts: 60_000,
+  browseForCsv: null,
+  getOneDriveRoots: 60_000,
+  getConfiguredAccounts: 60_000,
+  validateSelection: 150_000,
+  applySetup: 150_000,
+  runSyncNow: 150_000,
+  openReportingFolder: 60_000,
+  exportSupportReport: 180_000,
+});
 const HOST_UNAVAILABLE_MESSAGE = "The Windows host is unavailable. Close and reopen AmmarTrading Sync, then try again.";
 const MISSING_HOST_MESSAGE = "AmmarTrading Sync must be opened from the installed Windows app because the WebView2 host is unavailable.";
 const nativeCommands = Object.freeze([
@@ -44,11 +55,13 @@ function isValidNativeReply(reply) {
     && (reply.ok || typeof reply.message === "string");
 }
 
-export function createNativeWizardApi(webview, { timeoutMs = DEFAULT_TIMEOUT_MS, idFactory = createDefaultId } = {}) {
+export function createNativeWizardApi(webview, { timeoutMs, idFactory = createDefaultId } = {}) {
   if (!webview || typeof webview.postMessage !== "function" || typeof webview.addEventListener !== "function") {
     throw new TypeError("A WebView2 message bridge is required");
   }
-  if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) throw new TypeError("timeoutMs must be a positive number");
+  if (timeoutMs !== undefined && (!Number.isFinite(timeoutMs) || timeoutMs <= 0)) {
+    throw new TypeError("timeoutMs must be a positive number");
+  }
   if (typeof idFactory !== "function") throw new TypeError("idFactory must be a function");
 
   const pendingRequests = new Map();
@@ -62,7 +75,7 @@ export function createNativeWizardApi(webview, { timeoutMs = DEFAULT_TIMEOUT_MS,
     if (!pending) return;
 
     pendingRequests.delete(id);
-    clearTimeout(pending.timeout);
+    if (pending.timeout !== null) clearTimeout(pending.timeout);
 
     if (!isValidNativeReply(reply)) {
       pending.reject(nativeResponseError());
@@ -85,17 +98,18 @@ export function createNativeWizardApi(webview, { timeoutMs = DEFAULT_TIMEOUT_MS,
     }
 
     return new Promise((resolve, reject) => {
-      const timeout = setTimeout(() => {
+      const commandTimeoutMs = timeoutMs ?? NATIVE_COMMAND_TIMEOUT_MS[command];
+      const timeout = commandTimeoutMs === null ? null : setTimeout(() => {
         if (!pendingRequests.delete(id)) return;
         reject(new WizardApiError("The Windows host did not respond in time.", { code: "RequestTimedOut" }));
-      }, timeoutMs);
+      }, commandTimeoutMs);
       pendingRequests.set(id, { resolve, reject, timeout });
 
       try {
         webview.postMessage({ version: BRIDGE_VERSION, id, command, payload });
       } catch {
         pendingRequests.delete(id);
-        clearTimeout(timeout);
+        if (timeout !== null) clearTimeout(timeout);
         reject(new WizardApiError(HOST_UNAVAILABLE_MESSAGE, {
           code: "HostUnavailable",
         }));

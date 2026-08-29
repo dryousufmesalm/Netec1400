@@ -9,7 +9,7 @@
     "build:windows": "vite build --base=./",
     "package:windows": "npm run build:windows && node scripts/package-windows-wizard.mjs",
     "preview": "vite preview",
-    "test": "npm run build && node --test tests/*.test.mjs",
+    "test": "npm run build && node --test --test-concurrency=1 tests/*.test.mjs",
     "test:sites": "node --test tests/sites-worker.test.mjs"
   },
   "dependencies": {

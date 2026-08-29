@@ -47,12 +47,14 @@ internal enum AppLogEvent
     BridgeResponseSerializationFailed,
     SecondaryInstanceActivated,
     UntrustedWebMessageRejected,
+    WebViewTeardownFailed,
     WebViewAssetsMapped,
     WebViewControlInitialized,
     WebViewEnvironmentCreated,
     WebViewInitializationFailed,
     WebViewInitialized,
     WebViewPolicyConfigured,
+    WindowCloseApproved,
 }
 
 internal interface IAppMetadataLogger

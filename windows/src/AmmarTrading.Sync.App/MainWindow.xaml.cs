@@ -14,9 +14,8 @@ public partial class MainWindow : Window
     private readonly IAppMetadataLogger _logger;
     private readonly AppRuntimePaths _paths;
     private readonly BridgeCommandRouter _router;
+    private readonly WindowCloseState _closeState = new();
     private WebViewBridge? _bridge;
-    private bool _closeApproved;
-    private bool _closeDrainStarted;
     private bool _initializationStarted;
     private bool _windowClosed;
 
@@ -34,15 +33,12 @@ public partial class MainWindow : Window
 
     protected override void OnClosing(CancelEventArgs eventArgs)
     {
-        if (!_closeApproved && _bridge is not null)
+        var decision = _closeState.RequestClose(_bridge is not null);
+        eventArgs.Cancel = decision.CancelClose;
+        if (decision.StartDrain)
         {
-            eventArgs.Cancel = true;
-            if (!_closeDrainStarted)
-            {
-                _closeDrainStarted = true;
-                IsEnabled = false;
-                _ = CancelCommandsAndCloseAsync();
-            }
+            IsEnabled = false;
+            _ = CancelCommandsAndCloseAsync();
         }
 
         base.OnClosing(eventArgs);
@@ -90,8 +86,9 @@ public partial class MainWindow : Window
                 assetRoot,
                 CoreWebView2HostResourceAccessKind.DenyCors);
             _logger.Write(AppLogEvent.WebViewAssetsMapped);
-            var messageHost = new CoreWebViewMessageHost(coreWebView, Dispatcher, _logger);
-            _bridge = new WebViewBridge(_router, messageHost, _logger);
+            var bridgeDispatcher = new WpfWebViewDispatcher(Dispatcher);
+            var messageHost = new CoreWebViewMessageHost(coreWebView, bridgeDispatcher, _logger);
+            _bridge = new WebViewBridge(_router, messageHost, bridgeDispatcher, _logger);
             Browser.Source = new Uri($"{WebViewSecurityPolicy.AppOrigin}index.html");
             _logger.Write(AppLogEvent.WebViewInitialized);
         }
@@ -145,14 +142,24 @@ public partial class MainWindow : Window
     private async Task CancelCommandsAndCloseAsync()
     {
         var bridge = _bridge;
-        _bridge = null;
-        if (bridge is not null)
+        try
         {
-            await bridge.DisposeAsync();
+            if (bridge is not null)
+            {
+                await bridge.DisposeAsync();
+            }
         }
-
-        _closeApproved = true;
-        Close();
+        catch
+        {
+            _logger.Write(AppLogEvent.WebViewTeardownFailed);
+        }
+        finally
+        {
+            _bridge = null;
+            _closeState.ApproveClose();
+            _logger.Write(AppLogEvent.WindowCloseApproved);
+            Close();
+        }
     }
 
     private void ShowFatalInitializationPage(HostFatalPageContent content)

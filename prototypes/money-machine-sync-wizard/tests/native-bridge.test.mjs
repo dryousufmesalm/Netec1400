@@ -123,6 +123,65 @@ test("rejects timed out requests and clears their timer", async () => {
   webview.reply({ version: 1, id: "req-1", ok: true, code: "Success", data: {} });
 });
 
+test("uses deadlines beyond native execution limits without timing out the user file picker", async (t) => {
+  const originalSetTimeout = globalThis.setTimeout;
+  const originalClearTimeout = globalThis.clearTimeout;
+  const scheduled = [];
+  const cleared = [];
+  globalThis.setTimeout = (callback, delay) => {
+    const handle = { callback, delay };
+    scheduled.push(handle);
+    return handle;
+  };
+  globalThis.clearTimeout = (handle) => cleared.push(handle);
+  t.after(() => {
+    globalThis.setTimeout = originalSetTimeout;
+    globalThis.clearTimeout = originalClearTimeout;
+  });
+
+  const webview = createFakeWebView();
+  let nextId = 0;
+  const api = createNativeWizardApi(webview, {
+    idFactory: () => `deadline-${++nextId}`,
+  });
+  const cases = [
+    ["getSystemStatus", () => api.getSystemStatus(), 60_000],
+    ["discoverMt4Accounts", () => api.discoverMt4Accounts(), 60_000],
+    ["browseForCsv", () => api.browseForCsv(), null],
+    ["getOneDriveRoots", () => api.getOneDriveRoots(), 60_000],
+    ["getConfiguredAccounts", () => api.getConfiguredAccounts(), 60_000],
+    ["validateSelection", () => api.validateSelection({ accounts: [] }), 150_000],
+    ["applySetup", () => api.applySetup({ accounts: [] }), 150_000],
+    ["runSyncNow", () => api.runSyncNow({}), 150_000],
+    ["openReportingFolder", () => api.openReportingFolder({}), 60_000],
+    ["exportSupportReport", () => api.exportSupportReport(), 180_000],
+  ];
+
+  for (const [command, invoke, expectedDelay] of cases) {
+    const timersBeforeRequest = scheduled.length;
+    const pending = invoke();
+    const request = webview.sent.at(-1);
+    assert.equal(request.command, command);
+    if (expectedDelay === null) {
+      assert.equal(scheduled.length, timersBeforeRequest, `${command} must not schedule a client deadline`);
+    } else {
+      assert.equal(scheduled.length, timersBeforeRequest + 1);
+      assert.equal(scheduled.at(-1).delay, expectedDelay, `${command} scheduled an unsafe deadline`);
+    }
+
+    webview.reply({
+      version: 1,
+      id: request.id,
+      ok: true,
+      code: "Success",
+      data: {},
+    });
+    await pending;
+  }
+
+  assert.equal(cleared.length, 9);
+});
+
 test("production transport selects WebView2 when it is present", async () => {
   const webview = createFakeWebView();
   const api = createProductionWizardApi(webview);

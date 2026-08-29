@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.IO;
 using System.IO.Pipes;
 
@@ -8,15 +9,20 @@ internal sealed class ActivationPipe : IDisposable, IAsyncDisposable
     private const byte ActivationMessage = 0x41;
 
     private readonly CancellationTokenSource _disposeCancellation = new();
+    private readonly Func<CancellationToken, Task> _listenerFailureBackoff;
     private readonly IAppMetadataLogger _logger;
     private readonly string _pipeName;
     private int _disposed;
 
-    public ActivationPipe(string pipeName, IAppMetadataLogger logger)
+    public ActivationPipe(
+        string pipeName,
+        IAppMetadataLogger logger,
+        Func<CancellationToken, Task>? listenerFailureBackoff = null)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(pipeName);
         _pipeName = pipeName;
         _logger = logger ?? throw new ArgumentNullException(nameof(logger));
+        _listenerFailureBackoff = listenerFailureBackoff ?? DefaultListenerFailureBackoffAsync;
     }
 
     public async Task ListenAsync(Action activate, CancellationToken token = default)
@@ -50,13 +56,17 @@ internal sealed class ActivationPipe : IDisposable, IAsyncDisposable
             {
                 break;
             }
-            catch (IOException)
-            {
-                _logger.Write(AppLogEvent.ActivationListenerFailed);
-            }
             catch
             {
                 _logger.Write(AppLogEvent.ActivationListenerFailed);
+                try
+                {
+                    await _listenerFailureBackoff(linkedToken).ConfigureAwait(false);
+                }
+                catch (OperationCanceledException) when (linkedToken.IsCancellationRequested)
+                {
+                    break;
+                }
             }
         }
     }
@@ -134,22 +144,26 @@ internal sealed class ActivationPipe : IDisposable, IAsyncDisposable
         {
         }
     }
+
+    private static Task DefaultListenerFailureBackoffAsync(CancellationToken token) =>
+        Task.Delay(TimeSpan.FromMilliseconds(250), token);
 }
 
 internal sealed class SingleInstanceCoordinator : IDisposable
 {
     internal const string MutexName = @"Local\AmmarTrading.Sync";
-    internal const string PipeName = "AmmarTrading.Sync.Activation";
 
     private readonly ActivationPipe? _activationPipe;
     private readonly IAppMetadataLogger _logger;
     private readonly Mutex _mutex;
+    private readonly string _pipeName;
     private Task? _listener;
     private int _disposed;
 
     public SingleInstanceCoordinator(IAppMetadataLogger logger)
     {
         _logger = logger ?? throw new ArgumentNullException(nameof(logger));
+        _pipeName = PipeNameForSession(CurrentSessionId());
         _mutex = new Mutex(initiallyOwned: false, MutexName);
         try
         {
@@ -162,11 +176,21 @@ internal sealed class SingleInstanceCoordinator : IDisposable
 
         if (IsPrimary)
         {
-            _activationPipe = new ActivationPipe(PipeName, _logger);
+            _activationPipe = new ActivationPipe(_pipeName, _logger);
         }
     }
 
     public bool IsPrimary { get; }
+
+    internal static string PipeNameForSession(int sessionId)
+    {
+        if (sessionId < 0)
+        {
+            throw new ArgumentOutOfRangeException(nameof(sessionId));
+        }
+
+        return $"AmmarTrading.Sync.Activation.Session.{sessionId}";
+    }
 
     public void StartListening(Action activate)
     {
@@ -191,7 +215,7 @@ internal sealed class SingleInstanceCoordinator : IDisposable
         }
 
         var activated = await ActivationPipe.TrySignalAsync(
-            PipeName,
+            _pipeName,
             TimeSpan.FromSeconds(3),
             token).ConfigureAwait(false);
         _logger.Write(activated
@@ -220,5 +244,11 @@ internal sealed class SingleInstanceCoordinator : IDisposable
         }
 
         _mutex.Dispose();
+    }
+
+    private static int CurrentSessionId()
+    {
+        using var process = Process.GetCurrentProcess();
+        return process.SessionId;
     }
 }
