@@ -6,7 +6,8 @@
   "scripts": {
     "dev": "vite",
     "build": "vite build && node scripts/prepare-sites-build.mjs",
-    "package:windows": "npm run build && node scripts/package-windows-wizard.mjs",
+    "build:windows": "vite build --base=./",
+    "package:windows": "npm run build:windows && node scripts/package-windows-wizard.mjs",
     "preview": "vite preview",
     "test": "npm run build && node --test tests/*.test.mjs",
     "test:sites": "node --test tests/sites-worker.test.mjs"
