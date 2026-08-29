@@ -61,7 +61,8 @@ public sealed class NativeDialogService : INativeDialogService
         var fullPath = Path.GetFullPath(selected);
         if (!File.Exists(fullPath) ||
             !Path.GetExtension(fullPath).Equals(".csv", StringComparison.OrdinalIgnoreCase) ||
-            !IsLocalFileSystemPath(fullPath))
+            !IsLocalFileSystemPath(fullPath) ||
+            HasReparsePointInExistingPath(fullPath))
         {
             throw new PowerShellOperationException(
                 "InvalidPath",
@@ -150,8 +151,8 @@ public sealed class NativeDialogService : INativeDialogService
             !Path.GetFileName(accountDirectory).Equals($"Account_{accountNumber}", StringComparison.Ordinal) ||
             !Path.GetFileName(productDirectory).Equals("AmmarTrading", StringComparison.Ordinal) ||
             !Directory.Exists(accountDirectory) ||
-            IsReparsePoint(accountDirectory) ||
-            IsReparsePoint(productDirectory))
+            HasReparsePointInExistingPath(accountDirectory) ||
+            !IsLocalFileSystemPath(accountDirectory))
         {
             throw InvalidConfiguredFolder();
         }
@@ -182,8 +183,34 @@ public sealed class NativeDialogService : INativeDialogService
         }
     }
 
-    private static bool IsReparsePoint(string path) =>
-        (File.GetAttributes(path) & FileAttributes.ReparsePoint) != 0;
+    private static bool HasReparsePointInExistingPath(string path)
+    {
+        var fullPath = Path.GetFullPath(path);
+        var root = Path.GetPathRoot(fullPath);
+        if (string.IsNullOrWhiteSpace(root))
+        {
+            return true;
+        }
+
+        var current = root;
+        foreach (var part in fullPath[root.Length..].Split(
+                     [Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar],
+                     StringSplitOptions.RemoveEmptyEntries))
+        {
+            current = Path.Combine(current, part);
+            if (!File.Exists(current) && !Directory.Exists(current))
+            {
+                break;
+            }
+
+            if ((File.GetAttributes(current) & FileAttributes.ReparsePoint) != 0)
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
 
     private static JsonElement? GetProperty(JsonElement element, string firstName, string secondName)
     {

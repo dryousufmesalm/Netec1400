@@ -128,13 +128,35 @@ function Get-AmmarTradingConfiguredSyncStatus {
     $schemaModule = Join-Path $PSScriptRoot 'MoneyMachineCsvSchemaV3.psm1'
     if(-not (Test-Path -LiteralPath $schemaModule -PathType Leaf)) { throw 'The schema status component is missing.' }
     Import-Module -Name $schemaModule -Force -ErrorAction Stop
+    $setupModule = Join-Path $PSScriptRoot 'MoneyMachineSyncSetup.psm1'
+    if(-not (Test-Path -LiteralPath $setupModule -PathType Leaf)) { throw 'The path status component is missing.' }
+    Import-Module -Name $setupModule -ErrorAction Stop
     $taskEvidence = Get-AmmarTradingTaskEvidence
     $accounts = [System.Collections.Generic.List[object]]::new()
     foreach($configuration in @(Import-Csv -LiteralPath $ConfigPath -ErrorAction Stop)) {
         $accountNumber = ([string]$configuration.ExpectedMT4Login).Trim()
         if($accountNumber -notmatch '^\d{4,20}$') { continue }
-        $configuredRoot = [Environment]::ExpandEnvironmentVariables(([string]$configuration.OneDriveRoot).Trim())
-        if([string]::IsNullOrWhiteSpace($configuredRoot)) { continue }
+        $configuredRoot = $null
+        try {
+            $configuredRoot = Resolve-AmmarTradingOneDriveRoot -Path ([string]$configuration.OneDriveRoot)
+        } catch {
+            $accounts.Add([pscustomobject][ordered]@{
+                AccountNumber = $accountNumber
+                BrokerName = ''
+                SchemaVersion = ''
+                SourceCsv = ''
+                Destination = ''
+                LocalPublished = $false
+                LastWriteUtc = $null
+                Freshness = 'Unknown'
+                Status = 'Error'
+                StatusCode = 'UntrustedOneDriveRoot'
+                TaskState = [string]$taskEvidence.TaskState
+                TaskResultCode = [string]$taskEvidence.TaskResultCode
+                FailureReason = 'The configured OneDrive root is no longer trusted.'
+            })
+            continue
+        }
         $destination = Get-AmmarTradingDestinationPath -OneDriveRoot $configuredRoot -AccountNumber $accountNumber
         $heartbeat = Get-AmmarTradingHeartbeatStatus -OneDriveRoot $configuredRoot -AccountNumber $accountNumber -FreshnessHours $FreshnessHours
         $localPublished = Test-Path -LiteralPath $destination -PathType Leaf

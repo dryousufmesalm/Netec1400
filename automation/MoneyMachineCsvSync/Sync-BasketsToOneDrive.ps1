@@ -19,12 +19,25 @@ if([string]::IsNullOrWhiteSpace($RuntimeRoot)) { $RuntimeRoot = $ScriptRoot }
 $schemaModule = Join-Path $ScriptRoot 'MoneyMachineCsvSchemaV3.psm1'
 if(-not (Test-Path -LiteralPath $schemaModule -PathType Leaf)) { throw "Schema module not found: $schemaModule" }
 Import-Module -Name $schemaModule -Force -ErrorAction Stop
+$setupModule = Join-Path $ScriptRoot 'MoneyMachineSyncSetup.psm1'
+if(-not (Test-Path -LiteralPath $setupModule -PathType Leaf)) { throw 'The sync path validation component is unavailable.' }
+if(-not (Get-Command Resolve-AmmarTradingOneDriveRoot -ErrorAction SilentlyContinue)) {
+    Import-Module -Name $setupModule -ErrorAction Stop
+}
 
 function Write-SyncLog {
-    param([string]$Level, [string]$Message, [string]$RuntimeRoot = $ScriptRoot)
+    param(
+        [Parameter(Mandatory)][ValidateSet('INFO','ERROR','FATAL')][string]$Level,
+        [Parameter(Mandatory)][ValidateSet('Published','AccountDisabled','AlreadyPublished','MissingConfiguration','UntrustedOneDriveRoot','SourceUnavailable','SourceUnstable','SchemaValidationFailed','PublicationFailed','FatalSyncFailure')][string]$Code,
+        [string]$AccountNumber = '',
+        [int]$RowCount = -1,
+        [int]$Attempt = 0,
+        [string]$RuntimeRoot = $ScriptRoot
+    )
     $logDir = Join-Path $RuntimeRoot 'logs'
     if(-not (Test-Path -LiteralPath $logDir)) { New-Item -ItemType Directory -Path $logDir -Force | Out-Null }
-    $line = '{0:yyyy-MM-dd HH:mm:ss} [{1}] {2}' -f (Get-Date), $Level, $Message
+    $safeAccount = if($AccountNumber -match '^\d{4,20}$') { $AccountNumber } else { '' }
+    $line = '{0:yyyy-MM-dd HH:mm:ss} [{1}] Code={2} Account={3} RowCount={4} Attempt={5}' -f (Get-Date),$Level,$Code,$safeAccount,$RowCount,$Attempt
     $logPath = Join-Path $logDir 'sync.log'
     $lineBytes = [Text.Encoding]::UTF8.GetByteCount($line + [Environment]::NewLine)
     $currentBytes = if(Test-Path -LiteralPath $logPath) { (Get-Item -LiteralPath $logPath).Length } else { 0 }
@@ -39,6 +52,18 @@ function Write-SyncLog {
         }
     }
     Add-Content -LiteralPath $logPath -Value $line -Encoding utf8
+}
+
+function Get-SyncFailureMessage {
+    param([Parameter(Mandatory)][string]$Code)
+    switch($Code) {
+        'UntrustedOneDriveRoot' { return 'The configured OneDrive root is not currently trusted.' }
+        'SourceUnavailable' { return 'The configured source CSV is unavailable.' }
+        'SourceUnstable' { return 'The source CSV changed during validation.' }
+        'SchemaValidationFailed' { return 'The source CSV did not pass schema validation.' }
+        'PublicationFailed' { return 'The local publication could not be completed safely.' }
+        default { return 'The configured account could not be synchronized.' }
+    }
 }
 
 function Get-FileIdentity {
@@ -138,8 +163,8 @@ function Save-LastRunSummary {
 }
 
 function Write-FatalSyncError {
-    param([Parameter(Mandatory)][string]$Message, [string]$RuntimeRoot = $ScriptRoot)
-    $line = '{0:yyyy-MM-dd HH:mm:ss} [FATAL] {1}' -f (Get-Date), $Message
+    param([Parameter(Mandatory)][ValidateSet('FatalSyncFailure')][string]$Code, [string]$RuntimeRoot = $ScriptRoot)
+    $line = '{0:yyyy-MM-dd HH:mm:ss} [FATAL] Code={1}' -f (Get-Date), $Code
     foreach($path in @((Join-Path $RuntimeRoot 'task-error.log'), (Join-Path $env:TEMP 'MoneyMachineCsvSync-task-error.log'))) {
         try { Add-Content -LiteralPath $path -Value $line -Encoding utf8 } catch { }
     }
@@ -162,7 +187,7 @@ function Invoke-MoneyMachineCsvSync {
     if($StableCheckSeconds -lt 0) { throw 'StableCheckSeconds must be zero or greater.' }
     if($MaxRetries -lt 1) { throw 'MaxRetries must be at least one.' }
     if($MutexWaitMilliseconds -lt 0) { throw 'MutexWaitMilliseconds must be zero or greater.' }
-    if(-not (Test-Path -LiteralPath $ConfigPath)) { throw "Configuration file not found: $ConfigPath" }
+    if(-not (Test-Path -LiteralPath $ConfigPath)) { throw 'The sync configuration is unavailable.' }
 
     $hasAccountFilter = $PSBoundParameters.ContainsKey('AccountNumbers')
     $accountFilter = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::Ordinal)
@@ -187,31 +212,43 @@ function Invoke-MoneyMachineCsvSync {
         foreach($account in @(Import-Csv -LiteralPath $ConfigPath -ErrorAction Stop)) {
             $expectedLogin = ([string]$account.ExpectedMT4Login).Trim()
             if($hasAccountFilter -and -not $accountFilter.Contains($expectedLogin)) { continue }
+            if($expectedLogin -notmatch '^\d{4,20}$') {
+                $results.Add([pscustomobject]@{ AccountNumber=''; Status='Error'; FailureCode='MissingConfiguration'; Message='The account configuration is incomplete.' })
+                continue
+            }
             $enabled = ([string]$account.Enabled).Trim().ToLowerInvariant() -in @('true','1','yes','y')
             if(-not $enabled) {
-                $results.Add([pscustomobject]@{ AccountNumber=$expectedLogin; Status='Skipped'; Message='Disabled in accounts.csv' })
+                $results.Add([pscustomobject]@{ AccountNumber=$expectedLogin; Status='Skipped'; FailureCode=''; Message='This account is disabled.' })
                 continue
             }
             $sourceCsv = [Environment]::ExpandEnvironmentVariables(([string]$account.SourceCsv).Trim())
             $oneDriveRoot = [Environment]::ExpandEnvironmentVariables(([string]$account.OneDriveRoot).Trim())
             if([string]::IsNullOrWhiteSpace($expectedLogin) -or [string]::IsNullOrWhiteSpace($sourceCsv) -or [string]::IsNullOrWhiteSpace($oneDriveRoot)) {
-                $results.Add([pscustomobject]@{ AccountNumber=$expectedLogin; Status='Error'; Message='Missing required configuration value' })
+                $results.Add([pscustomobject]@{ AccountNumber=$expectedLogin; Status='Error'; FailureCode='MissingConfiguration'; Message='The account configuration is incomplete.' })
                 continue
             }
             if($StartupCatchup -and $state.ContainsKey($expectedLogin) -and [string]$state[$expectedLogin].Status -eq 'Success' -and [string]$state[$expectedLogin].SuccessDate -eq $today) {
-                $results.Add([pscustomobject]@{ AccountNumber=$expectedLogin; Status='Skipped'; Message='Already copied successfully today' })
+                $results.Add([pscustomobject]@{ AccountNumber=$expectedLogin; Status='Skipped'; FailureCode=''; Message='This account was already published today.' })
                 continue
             }
 
             $published = $false
-            $message = ''
+            $failureCode = 'PublicationFailed'
             $result = $null
+            $lastAttempt = 0
             for($attempt = 1; $attempt -le $MaxRetries -and -not $published; $attempt++) {
+                $lastAttempt = $attempt
                 try {
-                    if(-not (Test-Path -LiteralPath $sourceCsv)) { throw "Source CSV not found: $sourceCsv" }
+                    $failureCode = 'UntrustedOneDriveRoot'
+                    $oneDriveRoot = Resolve-AmmarTradingOneDriveRoot -Path $oneDriveRoot -RequireWritable
+                    $failureCode = 'SourceUnavailable'
+                    $sourceCsv = Resolve-AmmarTradingLocalPath -Path $sourceCsv -PathType Leaf -Description 'Source CSV'
+                    $failureCode = 'SourceUnstable'
                     if(-not (Test-StableFile -Path $sourceCsv -Seconds $StableCheckSeconds)) { throw 'Source changed during stable-file check.' }
                     $sourceBefore = Get-FileIdentity -Path $sourceCsv
+                    $failureCode = 'SchemaValidationFailed'
                     $validation = Read-MoneyMachineBasketsCsv -Path $sourceCsv -ExpectedLogin $expectedLogin
+                    $failureCode = 'PublicationFailed'
                     $destination = Get-AmmarTradingDestinationPath -OneDriveRoot $oneDriveRoot -AccountNumber $expectedLogin
                     $destinationDir = Split-Path -Parent $destination
                     $temporary = Join-Path $destinationDir ("Baskets.csv.$([guid]::NewGuid().ToString('N')).source.tmp")
@@ -238,25 +275,24 @@ function Invoke-MoneyMachineCsvSync {
                             CloudDeliveryVerified = $false
                         }
                         Write-AtomicText -Path (Join-Path $destinationDir 'SyncStatus.json') -Content ($heartbeat | ConvertTo-Json -Depth 5)
-                        $result = [pscustomobject]@{ AccountNumber=$expectedLogin; Status='Success'; Message='Published latest cumulative Baskets.csv'; RowCount=$temporaryValidation.RowCount; SourceHash=$sourceBefore.Hash; DestinationHash=$destinationIdentity.Hash; PublishedUtc=$publicationUtc }
+                        $result = [pscustomobject]@{ AccountNumber=$expectedLogin; Status='Success'; FailureCode=''; Message='Published the latest cumulative Baskets.csv.'; RowCount=$temporaryValidation.RowCount; SourceHash=$sourceBefore.Hash; DestinationHash=$destinationIdentity.Hash; PublishedUtc=$publicationUtc }
                         $published = $true
                     } finally {
                         if(Test-Path -LiteralPath $temporary) { Remove-Item -LiteralPath $temporary -Force -ErrorAction SilentlyContinue }
                     }
                 } catch {
-                    $message = $_.Exception.Message
                     if($attempt -lt $MaxRetries) { Start-Sleep -Seconds 1 }
                 }
             }
             if($published) {
                 $state[$expectedLogin] = [ordered]@{ Status='Success'; SuccessDate=$today; RowCount=$result.RowCount; SourceHash=$result.SourceHash; DestinationHash=$result.DestinationHash; PublishedUtc=$result.PublishedUtc }
                 $results.Add($result)
-                Write-SyncLog -Level 'INFO' -Message "Published account '$expectedLogin' successfully. Rows=$($result.RowCount)." -RuntimeRoot $RuntimeRoot
+                Write-SyncLog -Level 'INFO' -Code Published -AccountNumber $expectedLogin -RowCount $result.RowCount -Attempt $lastAttempt -RuntimeRoot $RuntimeRoot
             } else {
-                $result = [pscustomobject]@{ AccountNumber=$expectedLogin; Status='Error'; Message=$message }
-                $state[$expectedLogin] = [ordered]@{ Status='Error'; SuccessDate=$today; Message=$message }
+                $result = [pscustomobject]@{ AccountNumber=$expectedLogin; Status='Error'; FailureCode=$failureCode; Message=(Get-SyncFailureMessage -Code $failureCode) }
+                $state[$expectedLogin] = [ordered]@{ Status='Error'; SuccessDate=$today; FailureCode=$failureCode }
                 $results.Add($result)
-                Write-SyncLog -Level 'ERROR' -Message "Account '$expectedLogin' failed: $message" -RuntimeRoot $RuntimeRoot
+                Write-SyncLog -Level 'ERROR' -Code $failureCode -AccountNumber $expectedLogin -RowCount -1 -Attempt $lastAttempt -RuntimeRoot $RuntimeRoot
             }
         }
         Save-LastRunSummary -State $state -Results @($results) -StartedUtc $startedUtc -RuntimeRoot $RuntimeRoot
@@ -282,7 +318,7 @@ if(-not $AsLibrary) {
         $runResults | Format-Table -AutoSize
         if(@($runResults | Where-Object { $_.Status -eq 'Error' }).Count -gt 0) { exit 1 }
     } catch {
-        Write-FatalSyncError -Message $_.Exception.ToString() -RuntimeRoot $RuntimeRoot
+        Write-FatalSyncError -Code FatalSyncFailure -RuntimeRoot $RuntimeRoot
         throw
     }
 }

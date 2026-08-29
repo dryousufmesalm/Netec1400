@@ -38,45 +38,8 @@ function Assert-RequestProperties {
     }
 }
 
-function Resolve-LocalDirectory {
-    param([Parameter(Mandatory)][string]$Path,[Parameter(Mandatory)][string]$Description)
-
-    $expanded = [Environment]::ExpandEnvironmentVariables($Path.Trim())
-    if([string]::IsNullOrWhiteSpace($expanded) -or $expanded -match '^(?:[^:]+::)?[\\/]{2}') { throw "$Description must be a local directory." }
-    if(-not (Test-Path -LiteralPath $expanded -PathType Container)) { throw "$Description was not found." }
-    $resolved = Resolve-Path -LiteralPath $expanded -ErrorAction Stop
-    if($resolved.Provider.Name -cne 'FileSystem' -or [string]$resolved.ProviderPath -match '^(?:[^:]+::)?[\\/]{2}') { throw "$Description must be a local directory." }
-    $volumeRoot = [IO.Path]::GetPathRoot([string]$resolved.ProviderPath)
-    if([string]::IsNullOrWhiteSpace($volumeRoot) -or (New-Object IO.DriveInfo($volumeRoot)).DriveType -eq [IO.DriveType]::Network) { throw "$Description must be on a local volume." }
-    return [IO.Path]::GetFullPath([string]$resolved.ProviderPath)
-}
-
 function Get-LocalOneDriveRoots {
-    $roots = [System.Collections.Generic.List[object]]::new()
-    $seen = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::OrdinalIgnoreCase)
-    foreach($candidate in @($env:OneDrive,$env:OneDriveCommercial,$env:OneDriveConsumer)) {
-        if([string]::IsNullOrWhiteSpace([string]$candidate)) { continue }
-        try { $resolved = Resolve-LocalDirectory -Path ([string]$candidate) -Description 'OneDrive root' } catch { continue }
-        if(-not $seen.Add($resolved)) { continue }
-        $writable = $false
-        $probe = Join-Path $resolved (".$([guid]::NewGuid().ToString('N')).ammartrading-write-test.tmp")
-        try {
-            [IO.File]::WriteAllText($probe, '', $utf8)
-            $writable = $true
-        } catch {
-            $writable = $false
-        } finally {
-            if(Test-Path -LiteralPath $probe) { Remove-Item -LiteralPath $probe -Force -ErrorAction SilentlyContinue }
-        }
-        $roots.Add([pscustomobject][ordered]@{
-            Name = Split-Path -Leaf $resolved
-            Path = $resolved
-            Available = $true
-            IsActive = $true
-            IsWritable = $writable
-        })
-    }
-    return @($roots)
+    return @(Get-AmmarTradingWritableOneDriveRoots)
 }
 
 function Get-DesktopSystemStatus {
@@ -173,6 +136,7 @@ try {
     $setupModule = Join-Path $PSScriptRoot 'MoneyMachineSyncSetup.psm1'
     Import-Module -Name $setupModule -Force -ErrorAction Stop | Out-Null
     $configPath = Join-Path $canonicalRuntimeRoot 'accounts.csv'
+    [void](Restore-AmmarTradingSetupTransaction -RuntimeRoot $canonicalRuntimeRoot -ConfigPath $configPath)
 
     $result = switch($Operation) {
         'SystemStatus' {
@@ -217,9 +181,9 @@ try {
             $syncScript = Join-Path $PSScriptRoot 'Sync-BasketsToOneDrive.ps1'
             . $syncScript -AsLibrary -ConfigPath $configPath -RuntimeRoot $canonicalRuntimeRoot
             [string[]]$accountNumbers = if($null -eq $request.PSObject.Properties['accountNumbers']) { @() } else { @($request.accountNumbers | ForEach-Object { ([string]$_).Trim() }) }
-            if(@($accountNumbers | Where-Object { $_ -notmatch '^\d{4,20}$' }).Count -gt 0 -or @($accountNumbers | Select-Object -Unique).Count -ne $accountNumbers.Count) { throw 'The account selection is invalid.' }
+            if(@($accountNumbers | Where-Object { $_ -notmatch '^\d{4,20}$' }).Count -gt 0 -or @($accountNumbers | Select-Object -Unique).Count -ne @($accountNumbers).Count) { throw 'The account selection is invalid.' }
             $syncParameters = @{ ConfigPath=$configPath; StableCheckSeconds=2; MaxRetries=1; RuntimeRoot=$canonicalRuntimeRoot }
-            if($accountNumbers.Count -gt 0) { $syncParameters['AccountNumbers'] = $accountNumbers }
+            if(@($accountNumbers).Count -gt 0) { $syncParameters['AccountNumbers'] = $accountNumbers }
             $results = @(Invoke-MoneyMachineCsvSync @syncParameters)
             if(@($results | Where-Object Status -eq 'Error').Count -gt 0) { throw 'One or more configured accounts could not be synchronized.' }
             [pscustomobject]@{ Status='Success'; Results=$results; CloudDeliveryVerified=$false }

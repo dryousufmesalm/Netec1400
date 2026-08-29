@@ -9,6 +9,9 @@ if([string]::IsNullOrWhiteSpace($ModulePath)) {
     $ModulePath = Join-Path (Split-Path -Parent $MyInvocation.MyCommand.Path) '..\automation\MoneyMachineCsvSync\MoneyMachineSyncSetup.psm1'
 }
 $tempRoot = Join-Path ([IO.Path]::GetTempPath()) ("MoneyMachineSyncSetupTest_" + [guid]::NewGuid().ToString('N'))
+$originalOneDrive = $env:OneDrive
+$originalOneDriveCommercial = $env:OneDriveCommercial
+$originalOneDriveConsumer = $env:OneDriveConsumer
 
 function Assert-ThrowsLike {
     param([scriptblock]$Action,[string]$Expected)
@@ -27,6 +30,9 @@ try {
     $terminalRoot = Join-Path $tempRoot 'MetaQuotes\Terminal'
     $sourceDir = Join-Path $terminalRoot 'ABC123\MQL4\Files'
     New-Item -ItemType Directory -Path $oneDriveRoot,$sourceDir -Force | Out-Null
+    $env:OneDrive = $oneDriveRoot
+    $env:OneDriveCommercial = $null
+    $env:OneDriveConsumer = $null
     $sourceCsv = Join-Path $sourceDir 'AGOLD___Baskets.csv'
     Set-Content -LiteralPath $sourceCsv -Value 'discovery-only-fixture' -Encoding utf8
 
@@ -103,8 +109,9 @@ try {
     $blockedOneDrive = Join-Path $tempRoot 'blocked-onedrive'
     New-Item -ItemType Directory -Path $blockedOneDrive -Force | Out-Null
     Set-Content -LiteralPath (Join-Path $blockedOneDrive 'AmmarTrading') -Value 'blocks destination directory creation' -Encoding utf8
+    $env:OneDrive = $blockedOneDrive
     $blockedRequest = Test-MoneyMachineSetupRequest -VpsName 'Blocked VPS' -ExpectedMT4Login '892522910' -SourceCsv $sourceCsv -OneDriveRoot $blockedOneDrive
-    Assert-ThrowsLike -Expected 'AmmarTrading' -Action {
+    Assert-ThrowsLike -Expected 'local publication could not be completed safely' -Action {
         Invoke-MoneyMachineSetup -Request $blockedRequest -ConfigPath $rollbackConfig -RuntimeRoot (Join-Path $tempRoot 'rollback-runtime') -SkipTaskRegistration -StableCheckSeconds 0 | Out-Null
     }
     $afterRollback = (Get-FileHash -LiteralPath $rollbackConfig -Algorithm SHA256).Hash
@@ -113,5 +120,8 @@ try {
     Write-Host 'MoneyMachine setup discovery, validation, config, publication, and rollback tests passed.'
 }
 finally {
+    $env:OneDrive = $originalOneDrive
+    $env:OneDriveCommercial = $originalOneDriveCommercial
+    $env:OneDriveConsumer = $originalOneDriveConsumer
     if(Test-Path -LiteralPath $tempRoot) { Remove-Item -LiteralPath $tempRoot -Recurse -Force }
 }

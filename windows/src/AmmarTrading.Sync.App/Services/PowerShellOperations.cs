@@ -2,9 +2,11 @@ using System.Diagnostics;
 using System.IO;
 using System.Security.AccessControl;
 using System.Security.Principal;
+using System.Runtime.InteropServices;
 using System.Text;
 using System.Text.Json;
 using AmmarTrading.Sync.Core.Services;
+using Microsoft.Win32.SafeHandles;
 
 namespace AmmarTrading.Sync.App.Services;
 
@@ -20,7 +22,23 @@ public interface IRunningProcess : IDisposable
 {
     Task<ProcessResult> Completion { get; }
 
-    void Kill();
+    Task TerminateAndConfirmAsync();
+}
+
+public sealed class ProcessOutputLimitException : Exception
+{
+    public ProcessOutputLimitException()
+        : base("A redirected process stream exceeded its byte limit.")
+    {
+    }
+}
+
+public sealed class ProcessOutputEncodingException : Exception
+{
+    public ProcessOutputEncodingException()
+        : base("A redirected process stream was not valid UTF-8.")
+    {
+    }
 }
 
 public interface IProcessRunner
@@ -197,31 +215,42 @@ public sealed class PowerShellOperations : IAmmarTradingOperations
                 "A required application file is missing. Reinstall AmmarTrading Sync.");
         }
 
-        var requestPath = CreateRequestFile(payload);
-        var invocation = new ProcessInvocation(
-            "powershell.exe",
-            new[]
-            {
-                "-NoLogo",
-                "-NoProfile",
-                "-NonInteractive",
-                "-ExecutionPolicy",
-                "Bypass",
-                "-File",
-                _entryPointPath,
-                "-Operation",
-                operation.ToString(),
-                "-RequestPath",
-                requestPath,
-                "-RuntimeRoot",
-                _runtimeRoot,
-            },
-            Path.GetDirectoryName(_entryPointPath)!,
-            timeout);
-
+        SecureRequestFile? requestFile = null;
         IRunningProcess? runningProcess = null;
+        var operationFailed = false;
         try
         {
+            try
+            {
+                requestFile = SecureRequestFile.Create(_requestRoot, payload);
+            }
+            catch (SecureRequestFileException error)
+            {
+                WriteDiagnostic(operation, error.Code, null, 0, 0);
+                throw new PowerShellOperationException(error.Code, error.SafeMessage);
+            }
+
+            var invocation = new ProcessInvocation(
+                "powershell.exe",
+                new[]
+                {
+                    "-NoLogo",
+                    "-NoProfile",
+                    "-NonInteractive",
+                    "-ExecutionPolicy",
+                    "Bypass",
+                    "-File",
+                    _entryPointPath,
+                    "-Operation",
+                    operation.ToString(),
+                    "-RequestPath",
+                    requestFile.Path,
+                    "-RuntimeRoot",
+                    _runtimeRoot,
+                },
+                Path.GetDirectoryName(_entryPointPath)!,
+                timeout);
+
             try
             {
                 runningProcess = _processRunner.Start(invocation);
@@ -241,7 +270,7 @@ public sealed class PowerShellOperations : IAmmarTradingOperations
             }
             catch (TimeoutException)
             {
-                KillWithoutMasking(runningProcess);
+                await ConfirmTerminationAsync(runningProcess, operation).ConfigureAwait(false);
                 WriteDiagnostic(operation, "OperationTimedOut", null, 0, 0);
                 throw new PowerShellOperationException(
                     "OperationTimedOut",
@@ -249,9 +278,33 @@ public sealed class PowerShellOperations : IAmmarTradingOperations
             }
             catch (OperationCanceledException) when (token.IsCancellationRequested)
             {
-                KillWithoutMasking(runningProcess);
+                await ConfirmTerminationAsync(runningProcess, operation).ConfigureAwait(false);
                 WriteDiagnostic(operation, "OperationCancelled", null, 0, 0);
                 throw;
+            }
+            catch (ProcessOutputLimitException)
+            {
+                await ConfirmTerminationAsync(runningProcess, operation).ConfigureAwait(false);
+                WriteDiagnostic(operation, "OutputLimitExceeded", null, MaximumResponseBytes, MaximumResponseBytes);
+                throw new PowerShellOperationException(
+                    "OutputLimitExceeded",
+                    "The operation produced too much output.");
+            }
+            catch (ProcessOutputEncodingException)
+            {
+                await ConfirmTerminationAsync(runningProcess, operation).ConfigureAwait(false);
+                WriteDiagnostic(operation, "InvalidPowerShellResponse", null, 0, 0);
+                throw new PowerShellOperationException(
+                    "InvalidPowerShellResponse",
+                    "The operation returned an unreadable response.");
+            }
+            catch
+            {
+                await ConfirmTerminationAsync(runningProcess, operation).ConfigureAwait(false);
+                WriteDiagnostic(operation, "ProcessExecutionFailed", null, 0, 0);
+                throw new PowerShellOperationException(
+                    "PowerShellFailed",
+                    "The operation could not be completed.");
             }
 
             if (result.ExitCode != 0 || result.StandardError.Length > 0)
@@ -300,36 +353,36 @@ public sealed class PowerShellOperations : IAmmarTradingOperations
                     "The operation returned an unreadable response.");
             }
         }
+        catch
+        {
+            operationFailed = true;
+            throw;
+        }
         finally
         {
             runningProcess?.Dispose();
-            DeleteRequestWithoutMasking(requestPath);
+            if (requestFile is not null)
+            {
+                try
+                {
+                    requestFile.DeleteAndConfirm();
+                }
+                catch
+                {
+                    WriteDiagnostic(operation, "RequestCleanupFailed", null, 0, 0);
+                    if (!operationFailed)
+                    {
+                        throw new PowerShellOperationException(
+                            "RequestCleanupFailed",
+                            "The private operation request could not be removed safely.");
+                    }
+                }
+                finally
+                {
+                    requestFile.Dispose();
+                }
+            }
         }
-    }
-
-    private string CreateRequestFile(JsonElement payload)
-    {
-        if (payload.ValueKind != JsonValueKind.Object)
-        {
-            throw new PowerShellOperationException("InvalidRequest", "The operation request is not valid.");
-        }
-
-        SecureRuntimeFiles.EnsureCurrentUserOnlyDirectory(_requestRoot);
-        var requestPath = Path.Combine(_requestRoot, $"request.{Guid.NewGuid():N}.json");
-        using (var stream = new FileStream(
-            requestPath,
-            FileMode.CreateNew,
-            FileAccess.Write,
-            FileShare.None,
-            bufferSize: 4096,
-            FileOptions.WriteThrough))
-        using (var writer = new StreamWriter(stream, new UTF8Encoding(false)))
-        {
-            writer.Write(payload.GetRawText());
-        }
-
-        SecureRuntimeFiles.RestrictFileToCurrentUser(requestPath);
-        return requestPath;
     }
 
     private void WriteDiagnostic(
@@ -362,27 +415,18 @@ public sealed class PowerShellOperations : IAmmarTradingOperations
         }
     }
 
-    private static void KillWithoutMasking(IRunningProcess process)
+    private async Task ConfirmTerminationAsync(IRunningProcess process, DesktopOperation operation)
     {
         try
         {
-            process.Kill();
+            await process.TerminateAndConfirmAsync().ConfigureAwait(false);
         }
         catch
         {
-            // Preserve the timeout or cancellation that triggered the kill.
-        }
-    }
-
-    private static void DeleteRequestWithoutMasking(string requestPath)
-    {
-        try
-        {
-            File.Delete(requestPath);
-        }
-        catch
-        {
-            // Do not obscure the operation result with cleanup errors.
+            WriteDiagnostic(operation, "TerminationUnconfirmed", null, 0, 0);
+            throw new PowerShellOperationException(
+                "TerminationUnconfirmed",
+                "The operation process could not be stopped safely.");
         }
     }
 
@@ -410,6 +454,29 @@ public sealed class PowerShellOperations : IAmmarTradingOperations
 
 public sealed class SystemProcessRunner : IProcessRunner
 {
+    private const int DefaultStreamLimitBytes = 1024 * 1024;
+
+    private readonly int _standardOutputLimitBytes;
+    private readonly int _standardErrorLimitBytes;
+
+    public SystemProcessRunner(
+        int standardOutputLimitBytes = DefaultStreamLimitBytes,
+        int standardErrorLimitBytes = DefaultStreamLimitBytes)
+    {
+        if (standardOutputLimitBytes <= 0)
+        {
+            throw new ArgumentOutOfRangeException(nameof(standardOutputLimitBytes));
+        }
+
+        if (standardErrorLimitBytes <= 0)
+        {
+            throw new ArgumentOutOfRangeException(nameof(standardErrorLimitBytes));
+        }
+
+        _standardOutputLimitBytes = standardOutputLimitBytes;
+        _standardErrorLimitBytes = standardErrorLimitBytes;
+    }
+
     public IRunningProcess Start(ProcessInvocation invocation)
     {
         ArgumentNullException.ThrowIfNull(invocation);
@@ -421,8 +488,6 @@ public sealed class SystemProcessRunner : IProcessRunner
             CreateNoWindow = true,
             RedirectStandardOutput = true,
             RedirectStandardError = true,
-            StandardOutputEncoding = new UTF8Encoding(false),
-            StandardErrorEncoding = new UTF8Encoding(false),
         };
         foreach (var argument in invocation.ArgumentList)
         {
@@ -434,33 +499,84 @@ public sealed class SystemProcessRunner : IProcessRunner
             StartInfo = startInfo,
             EnableRaisingEvents = true,
         };
+        var job = WindowsJobObject.Create();
         if (!process.Start())
         {
+            job.Dispose();
             process.Dispose();
             throw new InvalidOperationException("The process did not start.");
         }
 
-        return new SystemRunningProcess(process);
+        try
+        {
+            job.Assign(process);
+            return new SystemRunningProcess(
+                process,
+                job,
+                _standardOutputLimitBytes,
+                _standardErrorLimitBytes);
+        }
+        catch
+        {
+            try
+            {
+                if (!process.HasExited)
+                {
+                    process.Kill(entireProcessTree: true);
+                    process.WaitForExit(5000);
+                }
+            }
+            finally
+            {
+                job.Dispose();
+                process.Dispose();
+            }
+
+            throw;
+        }
     }
 
     private sealed class SystemRunningProcess : IRunningProcess
     {
-        private readonly Process _process;
-        private int _disposeScheduled;
+        private static readonly UTF8Encoding StrictUtf8 = new(false, true);
 
-        public SystemRunningProcess(Process process)
+        private readonly Process _process;
+        private readonly WindowsJobObject _job;
+        private readonly int _standardOutputLimitBytes;
+        private readonly int _standardErrorLimitBytes;
+        private int _disposeScheduled;
+        private int _terminationRequested;
+
+        public SystemRunningProcess(
+            Process process,
+            WindowsJobObject job,
+            int standardOutputLimitBytes,
+            int standardErrorLimitBytes)
         {
             _process = process;
+            _job = job;
+            _standardOutputLimitBytes = standardOutputLimitBytes;
+            _standardErrorLimitBytes = standardErrorLimitBytes;
             Completion = CompleteAsync();
         }
 
         public Task<ProcessResult> Completion { get; }
 
-        public void Kill()
+        public async Task TerminateAndConfirmAsync()
         {
-            if (!_process.HasExited)
+            if (Interlocked.Exchange(ref _terminationRequested, 1) == 0)
             {
-                _process.Kill(entireProcessTree: true);
+                _job.Terminate();
+            }
+
+            using var confirmationTimeout = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+            await Task.WhenAll(
+                    _process.WaitForExitAsync(confirmationTimeout.Token),
+                    _job.WaitForEmptyAsync(confirmationTimeout.Token))
+                .ConfigureAwait(false);
+            if (!_process.HasExited || _job.ActiveProcessCount != 0)
+            {
+                throw new InvalidOperationException("Process-tree termination was not confirmed.");
             }
         }
 
@@ -473,12 +589,17 @@ public sealed class SystemProcessRunner : IProcessRunner
 
             if (Completion.IsCompleted)
             {
+                _job.Dispose();
                 _process.Dispose();
                 return;
             }
 
             _ = Completion.ContinueWith(
-                _ => _process.Dispose(),
+                _ =>
+                {
+                    _job.Dispose();
+                    _process.Dispose();
+                },
                 CancellationToken.None,
                 TaskContinuationOptions.ExecuteSynchronously,
                 TaskScheduler.Default);
@@ -486,15 +607,369 @@ public sealed class SystemProcessRunner : IProcessRunner
 
         private async Task<ProcessResult> CompleteAsync()
         {
-            var standardOutput = _process.StandardOutput.ReadToEndAsync();
-            var standardError = _process.StandardError.ReadToEndAsync();
-            await _process.WaitForExitAsync().ConfigureAwait(false);
-            return new ProcessResult(
-                _process.ExitCode,
-                await standardOutput.ConfigureAwait(false),
-                await standardError.ConfigureAwait(false));
+            var standardOutput = ReadBoundedAsync(
+                _process.StandardOutput.BaseStream,
+                _standardOutputLimitBytes);
+            var standardError = ReadBoundedAsync(
+                _process.StandardError.BaseStream,
+                _standardErrorLimitBytes);
+            var processExit = _process.WaitForExitAsync();
+            try
+            {
+                await Task.WhenAll(standardOutput, standardError, processExit).ConfigureAwait(false);
+                return new ProcessResult(
+                    _process.ExitCode,
+                    StrictUtf8.GetString(await standardOutput.ConfigureAwait(false)),
+                    StrictUtf8.GetString(await standardError.ConfigureAwait(false)));
+            }
+            catch (ProcessOutputLimitException)
+            {
+                await TerminateAndConfirmAsync().ConfigureAwait(false);
+                throw;
+            }
+            catch (DecoderFallbackException)
+            {
+                await TerminateAndConfirmAsync().ConfigureAwait(false);
+                throw new ProcessOutputEncodingException();
+            }
+        }
+
+        private async Task<byte[]> ReadBoundedAsync(Stream stream, int maximumBytes)
+        {
+            using var output = new MemoryStream(Math.Min(maximumBytes, 16 * 1024));
+            var buffer = new byte[8192];
+            while (true)
+            {
+                var read = await stream.ReadAsync(buffer).ConfigureAwait(false);
+                if (read == 0)
+                {
+                    return output.ToArray();
+                }
+
+                if (output.Length + read > maximumBytes)
+                {
+                    if (Interlocked.Exchange(ref _terminationRequested, 1) == 0)
+                    {
+                        _job.Terminate();
+                    }
+
+                    throw new ProcessOutputLimitException();
+                }
+
+                output.Write(buffer, 0, read);
+            }
         }
     }
+}
+
+internal sealed class WindowsJobObject : IDisposable
+{
+    private const uint JobObjectLimitKillOnJobClose = 0x00002000;
+    private readonly SafeFileHandle _handle;
+
+    private WindowsJobObject(SafeFileHandle handle)
+    {
+        _handle = handle;
+    }
+
+    public static WindowsJobObject Create()
+    {
+        var handle = NativeMethods.CreateJobObject(IntPtr.Zero, null);
+        if (handle.IsInvalid)
+        {
+            throw new InvalidOperationException("A Windows Job Object could not be created.");
+        }
+
+        var information = new NativeMethods.JobObjectExtendedLimitInformation
+        {
+            BasicLimitInformation = new NativeMethods.JobObjectBasicLimitInformation
+            {
+                LimitFlags = JobObjectLimitKillOnJobClose,
+            },
+        };
+        var length = Marshal.SizeOf<NativeMethods.JobObjectExtendedLimitInformation>();
+        var pointer = Marshal.AllocHGlobal(length);
+        try
+        {
+            Marshal.StructureToPtr(information, pointer, false);
+            if (!NativeMethods.SetInformationJobObject(handle, 9, pointer, (uint)length))
+            {
+                throw new InvalidOperationException("The Windows Job Object could not be configured.");
+            }
+        }
+        finally
+        {
+            Marshal.FreeHGlobal(pointer);
+        }
+
+        return new WindowsJobObject(handle);
+    }
+
+    public void Assign(Process process)
+    {
+        if (!NativeMethods.AssignProcessToJobObject(_handle, process.Handle))
+        {
+            throw new InvalidOperationException("The operation process could not be assigned to its Windows Job Object.");
+        }
+    }
+
+    public void Terminate()
+    {
+        if (!NativeMethods.TerminateJobObject(_handle, 1))
+        {
+            throw new InvalidOperationException("The Windows Job Object could not be terminated.");
+        }
+    }
+
+    public uint ActiveProcessCount
+    {
+        get
+        {
+            var information = new NativeMethods.JobObjectBasicAccountingInformation();
+            if (!NativeMethods.QueryInformationJobObject(
+                    _handle,
+                    1,
+                    ref information,
+                    (uint)Marshal.SizeOf<NativeMethods.JobObjectBasicAccountingInformation>(),
+                    out _))
+            {
+                throw new InvalidOperationException("The Windows Job Object state could not be queried.");
+            }
+
+            return information.ActiveProcesses;
+        }
+    }
+
+    public async Task WaitForEmptyAsync(CancellationToken token)
+    {
+        while (ActiveProcessCount != 0)
+        {
+            await Task.Delay(25, token).ConfigureAwait(false);
+        }
+    }
+
+    public void Dispose() => _handle.Dispose();
+
+    private static class NativeMethods
+    {
+        [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+        internal static extern SafeFileHandle CreateJobObject(IntPtr jobAttributes, string? name);
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        internal static extern bool SetInformationJobObject(
+            SafeFileHandle job,
+            int informationClass,
+            IntPtr information,
+            uint informationLength);
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        internal static extern bool AssignProcessToJobObject(SafeFileHandle job, IntPtr process);
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        internal static extern bool TerminateJobObject(SafeFileHandle job, uint exitCode);
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        internal static extern bool QueryInformationJobObject(
+            SafeFileHandle job,
+            int informationClass,
+            ref JobObjectBasicAccountingInformation jobObjectInformation,
+            uint jobObjectInformationLength,
+            out uint returnLength);
+
+        [StructLayout(LayoutKind.Sequential)]
+        internal struct JobObjectBasicLimitInformation
+        {
+            internal long PerProcessUserTimeLimit;
+            internal long PerJobUserTimeLimit;
+            internal uint LimitFlags;
+            internal UIntPtr MinimumWorkingSetSize;
+            internal UIntPtr MaximumWorkingSetSize;
+            internal uint ActiveProcessLimit;
+            internal UIntPtr Affinity;
+            internal uint PriorityClass;
+            internal uint SchedulingClass;
+        }
+
+        [StructLayout(LayoutKind.Sequential)]
+        internal struct JobObjectBasicAccountingInformation
+        {
+            internal long TotalUserTime;
+            internal long TotalKernelTime;
+            internal long ThisPeriodTotalUserTime;
+            internal long ThisPeriodTotalKernelTime;
+            internal uint TotalPageFaultCount;
+            internal uint TotalProcesses;
+            internal uint ActiveProcesses;
+            internal uint TotalTerminatedProcesses;
+        }
+
+        [StructLayout(LayoutKind.Sequential)]
+        internal struct IoCounters
+        {
+            internal ulong ReadOperationCount;
+            internal ulong WriteOperationCount;
+            internal ulong OtherOperationCount;
+            internal ulong ReadTransferCount;
+            internal ulong WriteTransferCount;
+            internal ulong OtherTransferCount;
+        }
+
+        [StructLayout(LayoutKind.Sequential)]
+        internal struct JobObjectExtendedLimitInformation
+        {
+            internal JobObjectBasicLimitInformation BasicLimitInformation;
+            internal IoCounters IoInfo;
+            internal UIntPtr ProcessMemoryLimit;
+            internal UIntPtr JobMemoryLimit;
+            internal UIntPtr PeakProcessMemoryUsed;
+            internal UIntPtr PeakJobMemoryUsed;
+        }
+    }
+}
+
+internal sealed class SecureRequestFileException : Exception
+{
+    public SecureRequestFileException(string code, string safeMessage)
+        : base(safeMessage)
+    {
+        Code = code;
+        SafeMessage = safeMessage;
+    }
+
+    public string Code { get; }
+
+    public string SafeMessage { get; }
+}
+
+internal sealed class SecureRequestFile : IDisposable
+{
+    private FileStream? _handle;
+    private int _deleted;
+
+    private SecureRequestFile(string path, FileStream handle)
+    {
+        Path = path;
+        _handle = handle;
+    }
+
+    public string Path { get; }
+
+    public static SecureRequestFile Create(string requestRoot, JsonElement payload) =>
+        Create(requestRoot, payload, null);
+
+    internal static SecureRequestFile Create(
+        string requestRoot,
+        JsonElement payload,
+        Action<SecureRequestFileStage, string>? testObserver)
+    {
+        if (payload.ValueKind != JsonValueKind.Object)
+        {
+            throw new SecureRequestFileException("InvalidRequest", "The operation request is not valid.");
+        }
+
+        string? requestPath = null;
+        FileStream? stream = null;
+        try
+        {
+            SecureRuntimeFiles.EnsureCurrentUserOnlyDirectory(requestRoot);
+            requestPath = System.IO.Path.Combine(requestRoot, $"request.{Guid.NewGuid():N}.json");
+            stream = new FileStream(
+                requestPath,
+                FileMode.CreateNew,
+                FileAccess.ReadWrite,
+                FileShare.ReadWrite,
+                bufferSize: 4096,
+                FileOptions.WriteThrough);
+            testObserver?.Invoke(SecureRequestFileStage.BeforeWrite, requestPath);
+            using (var writer = new StreamWriter(
+                       stream,
+                       new UTF8Encoding(false, true),
+                       bufferSize: 4096,
+                       leaveOpen: true))
+            {
+                writer.Write(payload.GetRawText());
+                writer.Flush();
+            }
+
+            stream.Flush(flushToDisk: true);
+            stream.Position = 0;
+            testObserver?.Invoke(SecureRequestFileStage.BeforeAcl, requestPath);
+            SecureRuntimeFiles.RestrictFileToCurrentUser(requestPath);
+            var attributes = File.GetAttributes(requestPath);
+            if ((attributes & FileAttributes.ReparsePoint) != 0 ||
+                !SecureRuntimeFiles.IsCurrentUserOnlyFile(requestPath))
+            {
+                throw new InvalidOperationException("The request file protection could not be verified.");
+            }
+
+            using var transition = new FileStream(
+                requestPath,
+                FileMode.Open,
+                FileAccess.Read,
+                FileShare.ReadWrite);
+            stream.Dispose();
+            stream = new FileStream(
+                requestPath,
+                FileMode.Open,
+                FileAccess.Read,
+                FileShare.Read);
+            return new SecureRequestFile(requestPath, stream);
+        }
+        catch
+        {
+            stream?.Dispose();
+            if (requestPath is not null && File.Exists(requestPath))
+            {
+                try
+                {
+                    File.Delete(requestPath);
+                }
+                catch
+                {
+                    throw new SecureRequestFileException(
+                        "RequestCleanupFailed",
+                        "The private operation request could not be removed safely.");
+                }
+            }
+
+            throw new SecureRequestFileException(
+                "RequestFileUnavailable",
+                "A private operation request could not be created.");
+        }
+    }
+
+    public void DeleteAndConfirm()
+    {
+        if (Interlocked.Exchange(ref _deleted, 1) != 0)
+        {
+            return;
+        }
+
+        _handle?.Dispose();
+        _handle = null;
+        File.Delete(Path);
+        if (File.Exists(Path))
+        {
+            throw new IOException("Request deletion was not confirmed.");
+        }
+    }
+
+    public void Dispose()
+    {
+        _handle?.Dispose();
+        _handle = null;
+    }
+
+}
+
+internal enum SecureRequestFileStage
+{
+    BeforeWrite,
+    BeforeAcl,
 }
 
 internal static class SecureRuntimeFiles
@@ -526,6 +1001,24 @@ internal static class SecureRuntimeFiles
             FileSystemRights.FullControl,
             AccessControlType.Allow));
         new FileInfo(path).SetAccessControl(security);
+    }
+
+    public static bool IsCurrentUserOnlyFile(string path)
+    {
+        var security = new FileInfo(path).GetAccessControl();
+        if (!security.AreAccessRulesProtected)
+        {
+            return false;
+        }
+
+        var rules = security.GetAccessRules(
+            includeExplicit: true,
+            includeInherited: false,
+            typeof(SecurityIdentifier));
+        var allowRules = rules.Cast<FileSystemAccessRule>()
+            .Where(rule => rule.AccessControlType == AccessControlType.Allow)
+            .ToArray();
+        return allowRules.Length == 1 && allowRules[0].IdentityReference.Equals(CurrentUser());
     }
 
     private static SecurityIdentifier CurrentUser() =>

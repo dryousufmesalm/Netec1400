@@ -10,6 +10,9 @@ if([string]::IsNullOrWhiteSpace($ScriptPath)) {
 $ScriptPath = (Resolve-Path -LiteralPath $ScriptPath).Path
 $windowsPowerShell = Join-Path $env:WINDIR 'System32\WindowsPowerShell\v1.0\powershell.exe'
 $tempRoot = Join-Path ([IO.Path]::GetTempPath()) ("MoneyMachineCsvSyncTest_" + [guid]::NewGuid().ToString('N'))
+$previousOneDrive = $env:OneDrive
+$previousOneDriveCommercial = $env:OneDriveCommercial
+$previousOneDriveConsumer = $env:OneDriveConsumer
 New-Item -ItemType Directory -Path $tempRoot | Out-Null
 
 try {
@@ -23,6 +26,9 @@ try {
     $oneDrive = Join-Path $tempRoot 'oneDrive'
     $runtimeRoot = Join-Path $tempRoot 'runtime'
     New-Item -ItemType Directory -Path $sourceDir,$oneDrive,$runtimeRoot | Out-Null
+    $env:OneDrive = $oneDrive
+    $env:OneDriveCommercial = ''
+    $env:OneDriveConsumer = ''
     $sourceCsv = Join-Path $sourceDir 'AGOLD___Baskets.csv'
     $fixturePath = Join-Path $PSScriptRoot 'fixtures\AGOLD___Baskets_v3.csv'
     Copy-Item -LiteralPath $fixturePath -Destination $sourceCsv
@@ -72,7 +78,7 @@ try {
     $logDir = Join-Path $runtimeRoot 'logs'
     New-Item -ItemType Directory -Path $logDir -Force | Out-Null
     [IO.File]::WriteAllBytes((Join-Path $logDir 'sync.log'), (New-Object byte[] (5MB - 5)))
-    Write-SyncLog -Level 'INFO' -Message ('x' * 100) -RuntimeRoot $runtimeRoot
+    Write-SyncLog -Level 'INFO' -Code Published -AccountNumber '892522910' -RowCount 1 -RuntimeRoot $runtimeRoot
     if(-not (Test-Path -LiteralPath (Join-Path $logDir 'sync.log.1'))) { throw 'A log that cannot fit the next line within 5 MiB must rotate before the write.' }
     if((Get-Item -LiteralPath (Join-Path $logDir 'sync.log')).Length -gt 5MB) { throw 'The active sync log must never exceed 5 MiB.' }
 
@@ -97,26 +103,26 @@ try {
 
     $baselineHash = (Get-FileHash -LiteralPath $destination -Algorithm SHA256).Hash
     $invalidCases = @(
-        @{ Name='duplicate key'; Expected='duplicate'; Build={ $rows=@(Import-Csv -LiteralPath $fixturePath); @($rows[0],$rows[0]) } },
-        @{ Name='direction enum'; Expected='Direction'; Build={ $rows=@(Import-Csv -LiteralPath $fixturePath); $rows[0].Direction='SIDEWAYS'; $rows } },
-        @{ Name='duration type'; Expected='DurationSeconds'; Build={ $rows=@(Import-Csv -LiteralPath $fixturePath); $rows[0].DurationSeconds='not-an-integer'; $rows } },
-        @{ Name='max orders type'; Expected='MaxOrdersInBasket'; Build={ $rows=@(Import-Csv -LiteralPath $fixturePath); $rows[0].MaxOrdersInBasket='not-an-integer'; $rows } },
-        @{ Name='decimal type'; Expected='TotalLots'; Build={ $rows=@(Import-Csv -LiteralPath $fixturePath); $rows[0].TotalLots='not-a-decimal'; $rows } },
-        @{ Name='boolean value'; Expected='UseBasketTrailingTP'; Build={ $rows=@(Import-Csv -LiteralPath $fixturePath); $rows[0].UseBasketTrailingTP='true'; $rows } },
-        @{ Name='timestamp type'; Expected='StartTime'; Build={ $rows=@(Import-Csv -LiteralPath $fixturePath); $rows[0].StartTime='27/07/2026 03:00'; $rows } },
-        @{ Name='end before start'; Expected='EndTime'; Build={ $rows=@(Import-Csv -LiteralPath $fixturePath); $rows[0].EndTime='2026-07-27 02:59:59'; $rows } },
-        @{ Name='duration agreement'; Expected='DurationSeconds'; Build={ $rows=@(Import-Csv -LiteralPath $fixturePath); $rows[0].DurationSeconds='301'; $rows } },
-        @{ Name='trade date agreement'; Expected='TradeDate'; Build={ $rows=@(Import-Csv -LiteralPath $fixturePath); $rows[0].TradeDate='1999-01-01'; $rows } },
-        @{ Name='missing run key'; Expected='RunID'; Build={ $rows=@(Import-Csv -LiteralPath $fixturePath); $rows[0].RunID=''; $rows } },
-        @{ Name='missing basket key'; Expected='BasketID'; Build={ $rows=@(Import-Csv -LiteralPath $fixturePath); $rows[0].BasketID=''; $rows } },
-        @{ Name='mixed account'; Expected='AccountNumber'; Build={ $rows=@(Import-Csv -LiteralPath $fixturePath); $rows[0].AccountNumber='999'; $rows } },
-        @{ Name='wrong schema'; Expected='CsvSchemaVersion'; Build={ $rows=@(Import-Csv -LiteralPath $fixturePath); $rows[0].CsvSchemaVersion='2'; $rows } }
+        @{ Name='duplicate key'; Build={ $rows=@(Import-Csv -LiteralPath $fixturePath); @($rows[0],$rows[0]) } },
+        @{ Name='direction enum'; Build={ $rows=@(Import-Csv -LiteralPath $fixturePath); $rows[0].Direction='SIDEWAYS'; $rows } },
+        @{ Name='duration type'; Build={ $rows=@(Import-Csv -LiteralPath $fixturePath); $rows[0].DurationSeconds='not-an-integer'; $rows } },
+        @{ Name='max orders type'; Build={ $rows=@(Import-Csv -LiteralPath $fixturePath); $rows[0].MaxOrdersInBasket='not-an-integer'; $rows } },
+        @{ Name='decimal type'; Build={ $rows=@(Import-Csv -LiteralPath $fixturePath); $rows[0].TotalLots='not-a-decimal'; $rows } },
+        @{ Name='boolean value'; Build={ $rows=@(Import-Csv -LiteralPath $fixturePath); $rows[0].UseBasketTrailingTP='true'; $rows } },
+        @{ Name='timestamp type'; Build={ $rows=@(Import-Csv -LiteralPath $fixturePath); $rows[0].StartTime='27/07/2026 03:00'; $rows } },
+        @{ Name='end before start'; Build={ $rows=@(Import-Csv -LiteralPath $fixturePath); $rows[0].EndTime='2026-07-27 02:59:59'; $rows } },
+        @{ Name='duration agreement'; Build={ $rows=@(Import-Csv -LiteralPath $fixturePath); $rows[0].DurationSeconds='301'; $rows } },
+        @{ Name='trade date agreement'; Build={ $rows=@(Import-Csv -LiteralPath $fixturePath); $rows[0].TradeDate='1999-01-01'; $rows } },
+        @{ Name='missing run key'; Build={ $rows=@(Import-Csv -LiteralPath $fixturePath); $rows[0].RunID=''; $rows } },
+        @{ Name='missing basket key'; Build={ $rows=@(Import-Csv -LiteralPath $fixturePath); $rows[0].BasketID=''; $rows } },
+        @{ Name='mixed account'; Build={ $rows=@(Import-Csv -LiteralPath $fixturePath); $rows[0].AccountNumber='999'; $rows } },
+        @{ Name='wrong schema'; Build={ $rows=@(Import-Csv -LiteralPath $fixturePath); $rows[0].CsvSchemaVersion='2'; $rows } }
     )
     foreach($case in $invalidCases) {
         @(& $case.Build) | Export-Csv -LiteralPath $sourceCsv -NoTypeInformation -Encoding utf8
         $invalid = @(Invoke-MoneyMachineCsvSync -ConfigPath $testConfigPath -StableCheckSeconds 0 -MaxRetries 1 -RuntimeRoot $runtimeRoot)
         if($invalid[0].Status -ne 'Error') { throw "Invalid case '$($case.Name)' must return Error." }
-        if($invalid[0].Message -notmatch [regex]::Escape($case.Expected)) { throw "Invalid case '$($case.Name)' did not identify '$($case.Expected)': $($invalid[0].Message)" }
+        if($invalid[0].FailureCode -cne 'SchemaValidationFailed') { throw "Invalid case '$($case.Name)' must return the stable SchemaValidationFailed code." }
         if((Get-FileHash -LiteralPath $destination -Algorithm SHA256).Hash -ne $baselineHash) { throw "Invalid case '$($case.Name)' overwrote the valid destination." }
     }
 
@@ -160,6 +166,29 @@ try {
         Export-Csv -LiteralPath $missingConfig -NoTypeInformation -Encoding utf8
     $missing = @(Invoke-MoneyMachineCsvSync -ConfigPath $missingConfig -StableCheckSeconds 0 -MaxRetries 1 -RuntimeRoot $runtimeRoot)
     if($missing[0].Status -ne 'Error') { throw 'An enabled missing source must return Error.' }
+    if($missing[0].FailureCode -cne 'SourceUnavailable') { throw 'A missing source must return the stable SourceUnavailable code.' }
+
+    $secretValue = 'credential=do-not-log-this-value'
+    $secretPathFragment = 'password=do-not-log-this-path'
+    $adversarialDirectory = Join-Path $tempRoot $secretPathFragment
+    New-Item -ItemType Directory -Path $adversarialDirectory -Force | Out-Null
+    $adversarialCsv = Join-Path $adversarialDirectory 'AGOLD___Baskets.csv'
+    $adversarialRows = @(Import-Csv -LiteralPath $fixturePath)
+    $adversarialRows[0].RunID = $secretValue
+    $adversarialRows[0].BasketID = $secretValue
+    $adversarialRows[0].Direction = 'SIDEWAYS'
+    $adversarialRows | Export-Csv -LiteralPath $adversarialCsv -NoTypeInformation -Encoding utf8
+    @([pscustomobject]@{ Enabled='true'; ExpectedMT4Login='892522910'; SourceCsv=$adversarialCsv; OneDriveRoot=$oneDrive }) |
+        Export-Csv -LiteralPath $testConfigPath -NoTypeInformation -Encoding utf8
+    $adversarialResult = @(Invoke-MoneyMachineCsvSync -ConfigPath $testConfigPath -StableCheckSeconds 0 -MaxRetries 1 -RuntimeRoot $runtimeRoot)
+    $diagnosticText = @(
+        ($adversarialResult | ConvertTo-Json -Depth 8 -Compress),
+        (Get-Content -LiteralPath (Join-Path $runtimeRoot 'state\last-run.json') -Raw),
+        (Get-Content -LiteralPath (Join-Path $runtimeRoot 'logs\sync.log') -Raw)
+    ) -join [Environment]::NewLine
+    foreach($secret in @($secretValue,$secretPathFragment,'SIDEWAYS')) {
+        if($diagnosticText.Contains($secret)) { throw "Sync diagnostics exposed adversarial content '$secret'." }
+    }
 
     $missingProcess = Start-Process -FilePath $windowsPowerShell -ArgumentList @(
         '-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass',
@@ -201,5 +230,8 @@ try {
     Write-Host 'MoneyMachine CSV sync tests passed.'
 }
 finally {
+    $env:OneDrive = $previousOneDrive
+    $env:OneDriveCommercial = $previousOneDriveCommercial
+    $env:OneDriveConsumer = $previousOneDriveConsumer
     if(Test-Path -LiteralPath $tempRoot) { Remove-Item -LiteralPath $tempRoot -Recurse -Force }
 }

@@ -11,6 +11,27 @@ function Test-AmmarTradingUncPath {
     return $Path -match '^(?:[^:]+::)?[\\/]{2}'
 }
 
+function Assert-AmmarTradingNoReparseAncestors {
+    param(
+        [Parameter(Mandatory)][string]$Path,
+        [Parameter(Mandatory)][string]$Description
+    )
+
+    $fullPath = [IO.Path]::GetFullPath($Path)
+    $volumeRoot = [IO.Path]::GetPathRoot($fullPath)
+    if([string]::IsNullOrWhiteSpace($volumeRoot)) { throw "$Description must use a local filesystem volume." }
+    $current = $volumeRoot
+    foreach($part in @($fullPath.Substring($volumeRoot.Length) -split '[\\/]')) {
+        if([string]::IsNullOrWhiteSpace($part)) { continue }
+        $current = Join-Path $current $part
+        if(-not (Test-Path -LiteralPath $current)) { break }
+        $item = Get-Item -LiteralPath $current -Force -ErrorAction Stop
+        if(($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+            throw "$Description contains a reparse point."
+        }
+    }
+}
+
 function Resolve-AmmarTradingLocalPath {
     param(
         [Parameter(Mandatory)][string]$Path,
@@ -46,7 +67,53 @@ function Resolve-AmmarTradingLocalPath {
         throw "$Description must use a local filesystem volume; mapped network drives are not allowed."
     }
 
+    Assert-AmmarTradingNoReparseAncestors -Path $providerPath -Description $Description
+
     return [IO.Path]::GetFullPath($providerPath)
+}
+
+function Get-AmmarTradingWritableOneDriveRoots {
+    $roots = [System.Collections.Generic.List[object]]::new()
+    $seen = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::OrdinalIgnoreCase)
+    foreach($candidate in @($env:OneDrive,$env:OneDriveCommercial,$env:OneDriveConsumer)) {
+        if([string]::IsNullOrWhiteSpace([string]$candidate)) { continue }
+        try {
+            $resolved = Resolve-AmmarTradingLocalPath -Path ([string]$candidate) -PathType Container -Description 'OneDrive root'
+        } catch {
+            continue
+        }
+        if(-not $seen.Add($resolved)) { continue }
+        $probe = Join-Path $resolved (".$([guid]::NewGuid().ToString('N')).ammartrading-write-test.tmp")
+        try {
+            [IO.File]::WriteAllText($probe, '', (New-Object Text.UTF8Encoding($false)))
+            $roots.Add([pscustomobject][ordered]@{
+                Name = Split-Path -Leaf $resolved
+                Path = $resolved
+                Available = $true
+                IsActive = $true
+                IsWritable = $true
+            })
+        } catch {
+            # A signed-in root that cannot accept the bounded probe is not eligible.
+        } finally {
+            if(Test-Path -LiteralPath $probe) { Remove-Item -LiteralPath $probe -Force -ErrorAction SilentlyContinue }
+        }
+    }
+    return @($roots)
+}
+
+function Resolve-AmmarTradingOneDriveRoot {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$Path,
+        [switch]$RequireWritable
+    )
+
+    $resolved = Resolve-AmmarTradingLocalPath -Path $Path -PathType Container -Description 'OneDrive root'
+    $matches = @(Get-AmmarTradingWritableOneDriveRoots | Where-Object { $_.Path -ieq $resolved })
+    if($matches.Count -ne 1) { throw 'OneDrive root must exactly match a currently signed-in OneDrive root.' }
+    if($RequireWritable -and -not [bool]$matches[0].IsWritable) { throw 'OneDrive root is not writable.' }
+    return [string]$matches[0].Path
 }
 
 function Get-AmmarTradingDestinationPath {
@@ -179,27 +246,22 @@ function Get-MoneyMachineSetupDiscovery {
         [string]$TerminalDataRoot
     )
 
-    if($null -eq $OneDriveCandidates) {
-        $OneDriveCandidates = @($env:OneDrive,$env:OneDriveCommercial,$env:OneDriveConsumer)
-    }
+    $useSignedInRoots = $null -eq $OneDriveCandidates
     if([string]::IsNullOrWhiteSpace($TerminalDataRoot)) {
         $TerminalDataRoot = Join-Path $env:APPDATA 'MetaQuotes\Terminal'
     }
 
-    $seenRoots = @{}
     $roots = [System.Collections.Generic.List[object]]::new()
-    foreach($candidate in @($OneDriveCandidates)) {
-        if([string]::IsNullOrWhiteSpace([string]$candidate)) { continue }
-        $expanded = [Environment]::ExpandEnvironmentVariables(([string]$candidate).Trim())
-        if(-not (Test-Path -LiteralPath $expanded -PathType Container)) { continue }
-        $resolved = (Resolve-Path -LiteralPath $expanded).Path
-        $key = $resolved.ToLowerInvariant()
-        if($seenRoots.ContainsKey($key)) { continue }
-        $seenRoots[$key] = $true
-        $roots.Add([pscustomobject]@{
-            Path = $resolved
-            Name = Split-Path -Leaf $resolved
-        })
+    if($useSignedInRoots) {
+        foreach($root in @(Get-AmmarTradingWritableOneDriveRoots)) { $roots.Add($root) }
+    } else {
+        $seenRoots = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::OrdinalIgnoreCase)
+        foreach($candidate in @($OneDriveCandidates)) {
+            if([string]::IsNullOrWhiteSpace([string]$candidate)) { continue }
+            try { $resolved = Resolve-AmmarTradingLocalPath -Path ([string]$candidate) -PathType Container -Description 'OneDrive root' } catch { continue }
+            if(-not $seenRoots.Add($resolved)) { continue }
+            $roots.Add([pscustomobject]@{ Path=$resolved; Name=Split-Path -Leaf $resolved })
+        }
     }
 
     $sources = [System.Collections.Generic.List[object]]::new()
@@ -246,9 +308,7 @@ function Test-MoneyMachineSetupRequest {
     if([IO.Path]::GetExtension($expandedSource) -ine '.csv') { throw 'Source file must use the .csv extension.' }
     $resolvedSource = Resolve-AmmarTradingLocalPath -Path $expandedSource -PathType Leaf -Description 'Source CSV'
 
-    $expandedOneDrive = [Environment]::ExpandEnvironmentVariables($OneDriveRoot.Trim())
-    if(-not (Test-Path -LiteralPath $expandedOneDrive -PathType Container)) { throw "OneDrive root was not found: $expandedOneDrive" }
-    $resolvedOneDrive = (Resolve-Path -LiteralPath $expandedOneDrive).Path
+    $resolvedOneDrive = Resolve-AmmarTradingOneDriveRoot -Path $OneDriveRoot -RequireWritable
 
     $schemaModule = Join-Path $PSScriptRoot 'MoneyMachineCsvSchemaV3.psm1'
     if(-not (Test-Path -LiteralPath $schemaModule -PathType Leaf)) { throw "Schema validator was not found: $schemaModule" }
@@ -350,6 +410,128 @@ function Save-MoneyMachineAccountConfig {
     )
 
     return (Save-AmmarTradingAccountBatch -ConfigPath $ConfigPath -Accounts @($Account))
+}
+
+function Get-AmmarTradingSetupTransactionPaths {
+    param([Parameter(Mandatory)][string]$RuntimeRoot)
+
+    $stateDirectory = Join-Path ([IO.Path]::GetFullPath($RuntimeRoot)) 'state'
+    return [pscustomobject]@{
+        StateDirectory = $stateDirectory
+        Marker = Join-Path $stateDirectory 'setup-transaction.json'
+        Snapshot = Join-Path $stateDirectory 'setup-config.snapshot'
+    }
+}
+
+function Flush-AmmarTradingFileToDisk {
+    param([Parameter(Mandatory)][string]$Path)
+
+    $stream = [IO.File]::Open($Path, [IO.FileMode]::Open, [IO.FileAccess]::Write, [IO.FileShare]::None)
+    try { $stream.Flush($true) } finally { $stream.Dispose() }
+}
+
+function Write-AmmarTradingAtomicUtf8 {
+    param([Parameter(Mandatory)][string]$Path,[Parameter(Mandatory)][string]$Content)
+
+    $directory = Split-Path -Parent $Path
+    if(-not (Test-Path -LiteralPath $directory -PathType Container)) { New-Item -ItemType Directory -Path $directory -Force | Out-Null }
+    $temporary = "$Path.$([guid]::NewGuid().ToString('N')).tmp"
+    try {
+        [IO.File]::WriteAllText($temporary, $Content, (New-Object Text.UTF8Encoding($false)))
+        Flush-AmmarTradingFileToDisk -Path $temporary
+        if(Test-Path -LiteralPath $Path -PathType Leaf) {
+            $backup = "$Path.$([guid]::NewGuid().ToString('N')).bak"
+            try { [IO.File]::Replace($temporary, $Path, $backup, $true) }
+            finally { if(Test-Path -LiteralPath $backup) { Remove-Item -LiteralPath $backup -Force -ErrorAction SilentlyContinue } }
+        } else {
+            [IO.File]::Move($temporary, $Path)
+        }
+    } finally {
+        if(Test-Path -LiteralPath $temporary) { Remove-Item -LiteralPath $temporary -Force -ErrorAction SilentlyContinue }
+    }
+}
+
+function Complete-AmmarTradingSetupTransaction {
+    param([Parameter(Mandatory)][string]$RuntimeRoot)
+
+    $paths = Get-AmmarTradingSetupTransactionPaths -RuntimeRoot $RuntimeRoot
+    foreach($path in @($paths.Marker,$paths.Snapshot)) {
+        if(Test-Path -LiteralPath $path) { Remove-Item -LiteralPath $path -Force -ErrorAction Stop }
+    }
+}
+
+function Restore-AmmarTradingSetupTransaction {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$RuntimeRoot,
+        [Parameter(Mandatory)][string]$ConfigPath
+    )
+
+    $paths = Get-AmmarTradingSetupTransactionPaths -RuntimeRoot $RuntimeRoot
+    if(-not (Test-Path -LiteralPath $paths.Marker -PathType Leaf)) { return $false }
+    $marker = Get-Content -LiteralPath $paths.Marker -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
+    $expectedConfig = [IO.Path]::GetFullPath([Environment]::ExpandEnvironmentVariables($ConfigPath))
+    if([int]$marker.Version -ne 1 -or [string]$marker.ConfigPath -cne $expectedConfig) {
+        throw 'The setup recovery marker is invalid.'
+    }
+
+    $restoreTemporary = "$expectedConfig.$([guid]::NewGuid().ToString('N')).recovery.tmp"
+    $replaceBackup = "$expectedConfig.$([guid]::NewGuid().ToString('N')).recovery.bak"
+    try {
+        if([bool]$marker.ConfigExisted) {
+            if(-not (Test-Path -LiteralPath $paths.Snapshot -PathType Leaf)) { throw 'The setup recovery snapshot is missing.' }
+            $configDirectory = Split-Path -Parent $expectedConfig
+            if(-not (Test-Path -LiteralPath $configDirectory -PathType Container)) { New-Item -ItemType Directory -Path $configDirectory -Force | Out-Null }
+            [IO.File]::Copy($paths.Snapshot, $restoreTemporary, $false)
+            Flush-AmmarTradingFileToDisk -Path $restoreTemporary
+            if(Test-Path -LiteralPath $expectedConfig -PathType Leaf) {
+                [IO.File]::Replace($restoreTemporary, $expectedConfig, $replaceBackup, $true)
+            } else {
+                [IO.File]::Move($restoreTemporary, $expectedConfig)
+            }
+        } elseif(Test-Path -LiteralPath $expectedConfig -PathType Leaf) {
+            Remove-Item -LiteralPath $expectedConfig -Force -ErrorAction Stop
+        }
+        Complete-AmmarTradingSetupTransaction -RuntimeRoot $RuntimeRoot
+        return $true
+    } finally {
+        if(Test-Path -LiteralPath $restoreTemporary) { Remove-Item -LiteralPath $restoreTemporary -Force -ErrorAction SilentlyContinue }
+        if(Test-Path -LiteralPath $replaceBackup) { Remove-Item -LiteralPath $replaceBackup -Force -ErrorAction SilentlyContinue }
+    }
+}
+
+function Start-AmmarTradingSetupTransaction {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$RuntimeRoot,
+        [Parameter(Mandatory)][string]$ConfigPath
+    )
+
+    $fullConfigPath = [IO.Path]::GetFullPath([Environment]::ExpandEnvironmentVariables($ConfigPath))
+    [void](Restore-AmmarTradingSetupTransaction -RuntimeRoot $RuntimeRoot -ConfigPath $fullConfigPath)
+    $paths = Get-AmmarTradingSetupTransactionPaths -RuntimeRoot $RuntimeRoot
+    if(-not (Test-Path -LiteralPath $paths.StateDirectory -PathType Container)) { New-Item -ItemType Directory -Path $paths.StateDirectory -Force | Out-Null }
+    $configExisted = Test-Path -LiteralPath $fullConfigPath -PathType Leaf
+    if($configExisted) {
+        $snapshotTemporary = "$($paths.Snapshot).$([guid]::NewGuid().ToString('N')).tmp"
+        $snapshotBackup = "$($paths.Snapshot).$([guid]::NewGuid().ToString('N')).bak"
+        try {
+            [IO.File]::Copy($fullConfigPath, $snapshotTemporary, $false)
+            Flush-AmmarTradingFileToDisk -Path $snapshotTemporary
+            if(Test-Path -LiteralPath $paths.Snapshot -PathType Leaf) {
+                [IO.File]::Replace($snapshotTemporary, $paths.Snapshot, $snapshotBackup, $true)
+            } else {
+                [IO.File]::Move($snapshotTemporary, $paths.Snapshot)
+            }
+        } finally {
+            if(Test-Path -LiteralPath $snapshotTemporary) { Remove-Item -LiteralPath $snapshotTemporary -Force -ErrorAction SilentlyContinue }
+            if(Test-Path -LiteralPath $snapshotBackup) { Remove-Item -LiteralPath $snapshotBackup -Force -ErrorAction SilentlyContinue }
+        }
+    } elseif(Test-Path -LiteralPath $paths.Snapshot) {
+        Remove-Item -LiteralPath $paths.Snapshot -Force -ErrorAction Stop
+    }
+    $marker = [ordered]@{ Version=1; ConfigPath=$fullConfigPath; ConfigExisted=$configExisted; State='Prepared' }
+    Write-AmmarTradingAtomicUtf8 -Path $paths.Marker -Content ($marker | ConvertTo-Json -Depth 3 -Compress)
 }
 
 function Test-AmmarTradingReparsePoint {
@@ -490,9 +672,7 @@ function Invoke-AmmarTradingBatchSetup {
     $vpsName = ([string]$Request.VpsName).Trim()
     if([string]::IsNullOrWhiteSpace($vpsName)) { throw 'VPS name is required.' }
     if($vpsName.Length -gt 100) { throw 'VPS name must be 100 characters or fewer.' }
-    $oneDriveValue = [Environment]::ExpandEnvironmentVariables(([string]$Request.OneDriveRoot).Trim())
-    if(-not (Test-Path -LiteralPath $oneDriveValue -PathType Container)) { throw "OneDrive root was not found: $oneDriveValue" }
-    $oneDriveRoot = (Resolve-Path -LiteralPath $oneDriveValue -ErrorAction Stop).Path
+    $oneDriveRoot = Resolve-AmmarTradingOneDriveRoot -Path ([string]$Request.OneDriveRoot) -RequireWritable
     $requestedAccounts = @($Request.Accounts)
     if($requestedAccounts.Count -eq 0) { throw 'At least one MT4 account must be selected.' }
 
@@ -542,18 +722,21 @@ function Invoke-AmmarTradingBatchSetup {
     $stages.Add([pscustomobject]@{ Code='LegacyMigrated'; Status='Success'; Message="Legacy migration copied $($migration.Copied) file(s); $($migration.AlreadyPresent) were already present." })
 
     $fullConfigPath = [IO.Path]::GetFullPath([Environment]::ExpandEnvironmentVariables($ConfigPath))
-    $saved = $null
-    $allPublished = $false
-    $restored = $false
+    $transactionStarted = $false
     try {
-        $saved = Save-AmmarTradingAccountBatch -ConfigPath $fullConfigPath -Accounts @($normalizedAccounts)
+        Start-AmmarTradingSetupTransaction -RuntimeRoot $RuntimeRoot -ConfigPath $fullConfigPath
+        $transactionStarted = $true
+        [void](Save-AmmarTradingAccountBatch -ConfigPath $fullConfigPath -Accounts @($normalizedAccounts))
         $stages.Add([pscustomobject]@{ Code='Configured'; Status='Success'; Message='Selected account configurations were saved in one atomic batch.' })
 
         $syncScript = Join-Path $PSScriptRoot 'Sync-BasketsToOneDrive.ps1'
         if(-not (Test-Path -LiteralPath $syncScript -PathType Leaf)) { throw "Sync script was not found: $syncScript" }
-        . $syncScript -AsLibrary
         $selectedLogins = @($normalizedAccounts | ForEach-Object ExpectedMT4Login)
-        $syncResults = @(Invoke-MoneyMachineCsvSync -ConfigPath $fullConfigPath -AccountNumbers $selectedLogins -StableCheckSeconds $StableCheckSeconds -MaxRetries 1 -MutexWaitMilliseconds $MutexWaitMilliseconds -RuntimeRoot $RuntimeRoot)
+        $syncResults = @(& {
+            param($LibraryPath,$SyncConfigPath,$SyncAccounts,$SyncStableSeconds,$SyncMutexWaitMilliseconds,$SyncRuntimeRoot)
+            . $LibraryPath -AsLibrary
+            Invoke-MoneyMachineCsvSync -ConfigPath $SyncConfigPath -AccountNumbers $SyncAccounts -StableCheckSeconds $SyncStableSeconds -MaxRetries 1 -MutexWaitMilliseconds $SyncMutexWaitMilliseconds -RuntimeRoot $SyncRuntimeRoot
+        } $syncScript $fullConfigPath $selectedLogins $StableCheckSeconds $MutexWaitMilliseconds $RuntimeRoot)
         $failed = @($syncResults | Where-Object Status -eq 'Error')
         if($failed.Count -gt 0) { throw (($failed | ForEach-Object { "Account $($_.AccountNumber): $($_.Message)" }) -join '; ') }
         foreach($account in $normalizedAccounts) {
@@ -561,7 +744,6 @@ function Invoke-AmmarTradingBatchSetup {
             if($expectedResult.Count -ne 1 -or $expectedResult[0].Status -ne 'Success') { throw "Account '$($account.ExpectedMT4Login)' did not complete its first local publication." }
         }
 
-        $allPublished = $true
         $stages.Add([pscustomobject]@{ Code='LocalPublished'; Status='Success'; Message="Published the first local CSV snapshot for $($normalizedAccounts.Count) selected account(s)." })
 
         if($SkipTaskRegistration) {
@@ -585,6 +767,8 @@ function Invoke-AmmarTradingBatchSetup {
                 TaskState = $taskState
             })
         }
+        Complete-AmmarTradingSetupTransaction -RuntimeRoot $RuntimeRoot
+        $transactionStarted = $false
         return [pscustomobject]@{
             Status = 'Success'
             Accounts = @($accountResults)
@@ -592,13 +776,8 @@ function Invoke-AmmarTradingBatchSetup {
             CloudDeliveryVerified = $false
         }
     } catch {
-        if(-not $allPublished -and -not $restored -and $null -ne $saved -and $saved.Changed) {
-            $restored = $true
-            if($saved.ConfigExisted -and -not [string]::IsNullOrWhiteSpace([string]$saved.BackupPath) -and (Test-Path -LiteralPath $saved.BackupPath -PathType Leaf)) {
-                Copy-Item -LiteralPath $saved.BackupPath -Destination $fullConfigPath -Force
-            } elseif(-not $saved.ConfigExisted -and (Test-Path -LiteralPath $fullConfigPath -PathType Leaf)) {
-                Remove-Item -LiteralPath $fullConfigPath -Force
-            }
+        if($transactionStarted) {
+            [void](Restore-AmmarTradingSetupTransaction -RuntimeRoot $RuntimeRoot -ConfigPath $fullConfigPath)
         }
         throw
     }
@@ -637,4 +816,4 @@ function Invoke-MoneyMachineSetup {
     }
 }
 
-Export-ModuleMember -Function Get-AmmarTradingMt4Accounts,Get-MoneyMachineSetupDiscovery,Test-MoneyMachineSetupRequest,Save-MoneyMachineAccountConfig,Save-AmmarTradingAccountBatch,Copy-AmmarTradingLegacyData,Invoke-AmmarTradingBatchSetup,Invoke-MoneyMachineSetup
+Export-ModuleMember -Function Resolve-AmmarTradingLocalPath,Get-AmmarTradingWritableOneDriveRoots,Resolve-AmmarTradingOneDriveRoot,Start-AmmarTradingSetupTransaction,Restore-AmmarTradingSetupTransaction,Get-AmmarTradingMt4Accounts,Get-MoneyMachineSetupDiscovery,Test-MoneyMachineSetupRequest,Save-MoneyMachineAccountConfig,Save-AmmarTradingAccountBatch,Copy-AmmarTradingLegacyData,Invoke-AmmarTradingBatchSetup,Invoke-MoneyMachineSetup

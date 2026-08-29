@@ -27,11 +27,28 @@ public sealed class PowerShellOperationsTests : IDisposable
     {
         const string userValue = "C:\\MT4\\value'; Invoke-Expression 'credential=secret";
         string? requestJson = null;
+        Exception? requestReadError = null;
+        var replacementSucceeded = false;
         var runner = FakeProcessRunner.Completes(invocation =>
         {
             var requestPath = ArgumentAfter(invocation, "-RequestPath");
-            requestJson = File.ReadAllText(requestPath);
+            try
+            {
+                requestJson = File.ReadAllText(requestPath);
+            }
+            catch (Exception error)
+            {
+                requestReadError = error;
+            }
             AssertCurrentUserOnly(requestPath);
+            try
+            {
+                File.Move(requestPath, requestPath + ".replacement");
+                replacementSucceeded = true;
+            }
+            catch (IOException)
+            {
+            }
             return Success("{\"Stages\":[]}");
         });
         var operations = CreateOperations(runner);
@@ -44,6 +61,8 @@ public sealed class PowerShellOperationsTests : IDisposable
 
         await operations.ValidateSelectionAsync(payload.RootElement, default);
 
+        Assert.Null(requestReadError);
+        Assert.False(replacementSucceeded);
         var invocation = Assert.Single(runner.Invocations);
         Assert.Equal("powershell.exe", invocation.FileName);
         Assert.Contains("-NoProfile", invocation.ArgumentList);
@@ -62,6 +81,91 @@ public sealed class PowerShellOperationsTests : IDisposable
     }
 
     [Fact]
+    public async Task GetSystemStatus_WhenRequestDeletionIsBlocked_ReturnsStableCleanupErrorAndLogsMetadataOnly()
+    {
+        FileStream? deletionBlocker = null;
+        Exception? blockerError = null;
+        string? requestPath = null;
+        var runner = FakeProcessRunner.Completes(invocation =>
+        {
+            requestPath = ArgumentAfter(invocation, "-RequestPath");
+            try
+            {
+                deletionBlocker = new FileStream(
+                    requestPath,
+                    FileMode.Open,
+                    FileAccess.Read,
+                    FileShare.Read);
+            }
+            catch (Exception error)
+            {
+                blockerError = error;
+            }
+            return Success("{}");
+        });
+        var operations = CreateOperations(runner);
+        try
+        {
+            var error = await Assert.ThrowsAsync<PowerShellOperationException>(
+                () => operations.GetSystemStatusAsync(default));
+
+            Assert.Null(blockerError);
+            Assert.Equal("RequestCleanupFailed", error.Code);
+            var log = File.ReadAllText(Path.Combine(_testRoot, "runtime", "logs", "desktop-operations.log"));
+            Assert.Contains("RequestCleanupFailed", log, StringComparison.Ordinal);
+            Assert.DoesNotContain(Assert.IsType<string>(requestPath), log, StringComparison.OrdinalIgnoreCase);
+        }
+        finally
+        {
+            deletionBlocker?.Dispose();
+            if (requestPath is not null)
+            {
+                File.Delete(requestPath);
+            }
+        }
+    }
+
+    [Fact]
+    public void SecureRequestFile_WhenCreationFails_LeavesNoRequestArtifact()
+    {
+        var occupiedRoot = Path.Combine(_testRoot, "occupied-request-root");
+        File.WriteAllText(occupiedRoot, "not a directory");
+        using var payload = JsonDocument.Parse("{}");
+
+        var error = Assert.Throws<SecureRequestFileException>(
+            () => SecureRequestFile.Create(occupiedRoot, payload.RootElement));
+
+        Assert.Equal("RequestFileUnavailable", error.Code);
+        Assert.Empty(Directory.EnumerateFiles(_testRoot, "request.*.json", SearchOption.AllDirectories));
+    }
+
+    [Theory]
+    [InlineData(0)]
+    [InlineData(1)]
+    public void SecureRequestFile_WhenWriteOrAclStageFails_RemovesCreatedArtifact(
+        int failureStageValue)
+    {
+        var failureStage = (SecureRequestFileStage)failureStageValue;
+        var requestRoot = Path.Combine(_testRoot, $"request-failure-{failureStage}");
+        using var payload = JsonDocument.Parse("{\"account\":\"credential=never-log\"}");
+
+        var error = Assert.Throws<SecureRequestFileException>(() =>
+            SecureRequestFile.Create(
+                requestRoot,
+                payload.RootElement,
+                (stage, _) =>
+                {
+                    if (stage == failureStage)
+                    {
+                        throw new IOException("simulated stage failure");
+                    }
+                }));
+
+        Assert.Equal("RequestFileUnavailable", error.Code);
+        Assert.Empty(Directory.EnumerateFiles(requestRoot, "request.*.json"));
+    }
+
+    [Fact]
     public async Task DiscoverMt4Accounts_WhenTimeoutExpires_KillsChildAndDeletesRequest()
     {
         var process = new FakeRunningProcess();
@@ -73,7 +177,7 @@ public sealed class PowerShellOperationsTests : IDisposable
 
         Assert.Equal("OperationTimedOut", error.Code);
         Assert.Equal("The operation did not finish in time.", error.Message);
-        Assert.Equal(1, process.KillCount);
+        Assert.Equal(1, process.ConfirmedTerminationCount);
         var invocation = Assert.Single(runner.Invocations);
         Assert.Equal(TimeSpan.FromMilliseconds(20), invocation.Timeout);
         Assert.False(File.Exists(ArgumentAfter(invocation, "-RequestPath")));
@@ -91,7 +195,7 @@ public sealed class PowerShellOperationsTests : IDisposable
         cancellation.Cancel();
 
         await Assert.ThrowsAnyAsync<OperationCanceledException>(() => operation);
-        Assert.Equal(1, process.KillCount);
+        Assert.Equal(1, process.ConfirmedTerminationCount);
         var invocation = Assert.Single(runner.Invocations);
         Assert.False(File.Exists(ArgumentAfter(invocation, "-RequestPath")));
     }
@@ -150,6 +254,24 @@ public sealed class PowerShellOperationsTests : IDisposable
         var log = File.ReadAllText(Path.Combine(_testRoot, "runtime", "logs", "desktop-operations.log"));
         Assert.DoesNotContain(secret, log, StringComparison.Ordinal);
         Assert.Contains("\"stderrLength\":26", log, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task GetSystemStatus_WhenProcessCaptureFails_TerminatesAndReturnsStableSafeError()
+    {
+        const string secret = "credential=stream-capture-secret";
+        var process = FakeRunningProcess.Faulted(new IOException(secret));
+        var operations = CreateOperations(new FakeProcessRunner(_ => process));
+
+        var error = await Assert.ThrowsAsync<PowerShellOperationException>(
+            () => operations.GetSystemStatusAsync(default));
+
+        Assert.Equal("PowerShellFailed", error.Code);
+        Assert.Equal("The operation could not be completed.", error.Message);
+        Assert.Equal(1, process.ConfirmedTerminationCount);
+        var log = File.ReadAllText(Path.Combine(_testRoot, "runtime", "logs", "desktop-operations.log"));
+        Assert.Contains("ProcessExecutionFailed", log, StringComparison.Ordinal);
+        Assert.DoesNotContain(secret, log, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -222,6 +344,27 @@ public sealed class PowerShellOperationsTests : IDisposable
     }
 
     [Fact]
+    public async Task BrowseForCsv_WhenExistingAncestorIsReparsePoint_RejectsBeforePowerShell()
+    {
+        var target = Path.Combine(_testRoot, "redirected-csv-target");
+        Directory.CreateDirectory(target);
+        File.WriteAllText(Path.Combine(target, "AGOLD___Baskets.csv"), "header");
+        var link = Path.Combine(_testRoot, "redirected-csv-link");
+        Directory.CreateSymbolicLink(link, target);
+        var runner = FakeProcessRunner.Returns(Success("{}"));
+        var native = new NativeDialogService(
+            new FakeFilePicker(Path.Combine(link, "AGOLD___Baskets.csv")),
+            new FakeNativeProcessLauncher());
+        var operations = CreateOperations(runner, nativeDialogService: native);
+
+        var error = await Assert.ThrowsAsync<PowerShellOperationException>(
+            () => operations.BrowseForCsvAsync(default));
+
+        Assert.Equal("InvalidPath", error.Code);
+        Assert.Empty(runner.Invocations);
+    }
+
+    [Fact]
     public async Task OpenReportingFolder_OpensOnlyMatchedConfiguredAccountDirectory()
     {
         var accountDirectory = Path.Combine(_testRoot, "OneDrive", "AmmarTrading", "Account_123456");
@@ -249,6 +392,39 @@ public sealed class PowerShellOperationsTests : IDisposable
         Assert.Equal("explorer.exe", invocation.FileName);
         Assert.Equal(new[] { accountDirectory }, invocation.ArgumentList);
         Assert.DoesNotContain("Windows", invocation.ArgumentList[0], StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public async Task OpenReportingFolder_WhenAncestorRedirectsConfiguredTree_RejectsBeforeExplorer()
+    {
+        var targetRoot = Path.Combine(_testRoot, "redirected-folder-target");
+        var targetAccount = Path.Combine(targetRoot, "AmmarTrading", "Account_123456");
+        Directory.CreateDirectory(targetAccount);
+        var linkRoot = Path.Combine(_testRoot, "redirected-folder-link");
+        Directory.CreateSymbolicLink(linkRoot, targetRoot);
+        var launcher = new FakeNativeProcessLauncher();
+        var native = new NativeDialogService(new FakeFilePicker(null), launcher);
+        var statusJson = JsonSerializer.Serialize(new
+        {
+            Accounts = new[]
+            {
+                new
+                {
+                    AccountNumber = "123456",
+                    Destination = Path.Combine(linkRoot, "AmmarTrading", "Account_123456", "Baskets.csv"),
+                },
+            },
+        });
+        var operations = CreateOperations(
+            FakeProcessRunner.Returns(Success(statusJson)),
+            nativeDialogService: native);
+        using var payload = JsonDocument.Parse("{\"accountNumbers\":[\"123456\"]}");
+
+        var error = await Assert.ThrowsAsync<PowerShellOperationException>(
+            () => operations.OpenReportingFolderAsync(payload.RootElement, default));
+
+        Assert.Equal("InvalidConfiguredFolder", error.Code);
+        Assert.Empty(launcher.Invocations);
     }
 
     [Fact]
@@ -402,6 +578,8 @@ public sealed class PowerShellOperationsTests : IDisposable
 
         public int KillCount { get; private set; }
 
+        public int ConfirmedTerminationCount { get; private set; }
+
         public static FakeRunningProcess Completed(ProcessResult result)
         {
             var process = new FakeRunningProcess();
@@ -409,9 +587,22 @@ public sealed class PowerShellOperationsTests : IDisposable
             return process;
         }
 
+        public static FakeRunningProcess Faulted(Exception error)
+        {
+            var process = new FakeRunningProcess();
+            process._completion.SetException(error);
+            return process;
+        }
+
         public void Kill()
         {
             KillCount++;
+        }
+
+        public Task TerminateAndConfirmAsync()
+        {
+            ConfirmedTerminationCount++;
+            return Task.CompletedTask;
         }
 
         public void Dispose()

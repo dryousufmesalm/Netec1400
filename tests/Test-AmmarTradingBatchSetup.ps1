@@ -12,6 +12,9 @@ if([string]::IsNullOrWhiteSpace($ModulePath)) {
 
 $tempRoot = Join-Path ([IO.Path]::GetTempPath()) ("AmmarTradingBatchSetupTest_" + [guid]::NewGuid().ToString('N'))
 $fixturePath = Join-Path $PSScriptRoot 'fixtures\AGOLD___Baskets_v3.csv'
+$originalOneDrive = $env:OneDrive
+$originalOneDriveCommercial = $env:OneDriveCommercial
+$originalOneDriveConsumer = $env:OneDriveConsumer
 
 function Assert-True {
     param([bool]$Condition,[string]$Message)
@@ -72,6 +75,9 @@ function New-BatchRequest {
         [string]$VpsName = 'VPS London Batch'
     )
 
+    $env:OneDrive = $OneDriveRoot
+    $env:OneDriveCommercial = $null
+    $env:OneDriveConsumer = $null
     return [pscustomobject]@{
         VpsName = $VpsName
         OneDriveRoot = $OneDriveRoot
@@ -204,5 +210,8 @@ try {
     Write-Host 'AmmarTrading transactional batch setup and legacy migration tests passed.'
 }
 finally {
+    $env:OneDrive = $originalOneDrive
+    $env:OneDriveCommercial = $originalOneDriveCommercial
+    $env:OneDriveConsumer = $originalOneDriveConsumer
     if(Test-Path -LiteralPath $tempRoot) { Remove-Item -LiteralPath $tempRoot -Recurse -Force }
 }

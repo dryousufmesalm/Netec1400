@@ -10,6 +10,7 @@
 
   <ItemGroup>
     <ProjectReference Include="../AmmarTrading.Sync.Core/AmmarTrading.Sync.Core.csproj" />
+    <InternalsVisibleTo Include="AmmarTrading.Sync.App.Tests" />
   </ItemGroup>
 
   <ItemGroup>
