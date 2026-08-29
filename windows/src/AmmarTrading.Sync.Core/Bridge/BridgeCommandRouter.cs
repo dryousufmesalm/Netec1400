@@ -103,6 +103,11 @@ public sealed class BridgeCommandRouter
 
         try
         {
+            if (token.IsCancellationRequested)
+            {
+                return Failure(request.Id, "RequestCancelled", "The request was cancelled.");
+            }
+
             var data = await DispatchAsync(request.Command, request.Payload, token).ConfigureAwait(false);
             return new BridgeResponse(
                 BridgeVersion,

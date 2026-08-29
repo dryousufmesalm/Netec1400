@@ -294,6 +294,26 @@ public sealed class BridgeCommandRouterTests
     }
 
     [Fact]
+    public async Task RouteAsync_DoesNotDispatchWhenCancellationIsAlreadyRequested()
+    {
+        var operations = new FakeOperations();
+        var router = new BridgeCommandRouter(operations);
+        using var cancellation = new CancellationTokenSource();
+        cancellation.Cancel();
+
+        var response = await router.RouteAsync(
+            """{"version":1,"id":"r1","command":"applySetup","payload":{}}""",
+            cancellation.Token);
+
+        Assert.False(response.Ok);
+        Assert.Equal("RequestCancelled", response.Code);
+        Assert.Equal("The request was cancelled.", response.Message);
+        Assert.DoesNotContain("OperationCanceledException", response.Message, StringComparison.Ordinal);
+        Assert.Null(response.Data);
+        Assert.Equal(0, operations.TotalCalls);
+    }
+
+    [Fact]
     public async Task RouteAsync_ConvertsOperationExceptionsToSafeResponse()
     {
         var operations = new FakeOperations { ExceptionToThrow = new InvalidOperationException("secret=C:\\Users\\someone") };
