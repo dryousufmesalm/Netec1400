@@ -51,15 +51,14 @@ test("acceptance cleanup is anchored to the exact AppId and attempted root", () 
   assert.ok(disarm > preservationAssertion, "cleanup must remain armed through uninstall assertions");
 });
 
-test("failed-upgrade rollback uses a compile-time-only fault installer", () => {
+test("failed-upgrade rollback uses a compile-time-only manifest-owned fault payload", () => {
   assert.match(installer, /#ifdef AcceptanceFaultInjection/);
   assert.match(installer, /Source: "\{#FaultProbePath\}"; DestDir: "\{app\}"; DestName: "\{#ProductExe\}"/);
+  assert.match(installer, /DestName: "Task9IncomingOnly\.bin"/);
   assert.match(installer, /DestName: "Task9UpgradeFault\.blocked"/);
   assert.doesNotMatch(installer, /InjectDeterministicUpgradeFailure|RaiseException\('Task 9 deterministic upgrade failure\.'/);
   assert.match(installer, /function PrepareToInstall\(var NeedsRestart: Boolean\): String/);
-  assert.match(installer, /AmmarTrading\.Sync\.rollback/);
   assert.match(installer, /procedure DeinitializeSetup/);
-  assert.match(installer, /RollbackStatePath/);
   assert.match(build, /AmmarTrading\.Sync\.payload-manifest\.txt/);
   assert.match(installer, /procedure SnapshotProductPayload/);
   assert.match(installer, /IncomingPayloadManifest/);
@@ -67,6 +66,18 @@ test("failed-upgrade rollback uses a compile-time-only fault installer", () => {
   assert.match(installer, /FILE_ATTRIBUTE_REPARSE_POINT/);
   assert.match(acceptance, /function Get-InstalledPayloadHashes/);
   assert.match(acceptance, /Failed upgrade changed the allowlisted product payload/);
+  assert.match(build, /FaultManifestPath/);
+  assert.match(installer, /Task9IncomingOnly\.bin/);
+  assert.match(installer, /\.ammar-installer-recovery\.active/);
+  assert.match(installer, /\.ammar-installer-recovery\.verified/);
+  assert.match(installer, /GetSHA256OfFile/);
+  assert.match(installer, /MoveFileExW@kernel32\.dll/);
+  const atomicWriter = installer.slice(installer.indexOf("procedure AtomicWriteLines"), installer.indexOf("procedure AtomicWriteText"));
+  assert.doesNotMatch(atomicWriter, /DeleteFile\(Path\)/);
+  assert.match(installer, /TASK9MODE/);
+  assert.match(acceptance, /recoveryonly/);
+  assert.match(acceptance, /restorefail/);
+  assert.match(acceptance, /crash-ready/);
   assert.match(build, /Task9 fault payload - never distribute/);
   assert.match(build, /AmmarTrading Sync Upgrade Fault Probe\.sha256/);
   assert.match(acceptance, /Fault probe hash unexpectedly matches the production executable/);
@@ -74,4 +85,32 @@ test("failed-upgrade rollback uses a compile-time-only fault installer", () => {
   assert.match(acceptance, /\$faultCollision/);
   assert.match(acceptance, /Failed upgrade changed the installed executable/);
   assert.match(acceptance, /Fault-injection installer unexpectedly succeeded/);
+});
+
+test("durable recovery is Program Files bound, manifest verified, and atomic", () => {
+  assert.match(installer, /ValidateProtectedAppRoot/);
+  assert.match(installer, /ExpandConstant\('\{autopf\}'\)/);
+  assert.match(installer, /AMMAR_STATE_MAGIC = 'AMMAR_TX_V1'/);
+  assert.match(installer, /APPID\|/);
+  assert.match(installer, /GetSHA256OfFile/);
+  assert.match(installer, /RenameFile\(BuildingRoot, ActiveRecoveryRoot\)/);
+  assert.match(installer, /CountFilesRecursive/);
+  assert.match(installer, /VerifyRestoredPayload/);
+  assert.doesNotMatch(installer, /DelTree\(AppRoot/);
+});
+
+test("acceptance exercises crash, restore failure, corruption, and recovery before mutation", () => {
+  assert.match(acceptance, /TASK9MODE=recoveryonly/);
+  assert.match(acceptance, /TASK9MODE=restorefail/);
+  assert.match(acceptance, /TASK9MODE=crash/);
+  assert.match(acceptance, /crash-ready/);
+  assert.match(acceptance, /Corrupt recovery state changed product payload before validation/);
+  assert.match(acceptance, /Injected restore failure did not retain active durable state/);
+  assert.match(acceptance, /Crash recovery did not remove the manifest-owned incoming-only path/);
+});
+
+test("fault seams require the acceptance-only compile define", () => {
+  assert.match(build, /\/DAcceptanceFaultInjection=1/);
+  assert.match(build, /FaultManifestPath/);
+  assert.match(installer, /#ifdef AcceptanceFaultInjection[\s\S]+TASK9MODE/);
 });

@@ -151,6 +151,7 @@ $productionOutputRoot = Join-Path $buildRoot 'production-output'
 $faultOutputRoot = Join-Path $buildRoot 'fault-output'
 $faultProbeRoot = Join-Path $buildRoot 'fault-probe'
 $faultProbePath = Join-Path $faultProbeRoot 'Task9FaultProbe.bin'
+$faultPayloadManifestPath = Join-Path $faultProbeRoot 'AmmarTrading.Sync.fault-payload-manifest.txt'
 $bootstrapperStagingPath = Join-Path $buildRoot 'MicrosoftEdgeWebView2Setup.exe'
 $installerPath = Join-Path $artifactRoot 'AmmarTrading Sync Setup.exe'
 $manifestPath = Join-Path $artifactRoot 'SHA256SUMS.txt'
@@ -244,6 +245,8 @@ foreach($relativePath in $payloadRelativePaths) {
 Assert-ReleasePayload -PublishDirectory $publishRoot
 
 [IO.File]::WriteAllText($faultProbePath,'Task9 fault payload - never distribute',(New-Object Text.UTF8Encoding($false)))
+$faultPayloadRelativePaths = @($payloadRelativePaths + 'Assets\Web\Task9IncomingOnly.bin' | Sort-Object -Unique)
+[IO.File]::WriteAllLines($faultPayloadManifestPath,$faultPayloadRelativePaths,(New-Object Text.UTF8Encoding($false)))
 $faultProbeHash = (Get-FileHash -LiteralPath $faultProbePath -Algorithm SHA256).Hash.ToLowerInvariant()
 $productionExeHash = (Get-FileHash -LiteralPath (Join-Path $publishRoot 'AmmarTrading.Sync.exe') -Algorithm SHA256).Hash.ToLowerInvariant()
 if($faultProbeHash -ceq $productionExeHash) { throw 'The acceptance fault probe must differ from the production executable.' }
@@ -270,6 +273,7 @@ Invoke-NativeCommand -FilePath $iscc -ArgumentList @(
 Invoke-NativeCommand -FilePath $iscc -ArgumentList @(
     '/DAcceptanceFaultInjection=1',
     "/DFaultProbePath=$faultProbePath",
+    "/DFaultManifestPath=$faultPayloadManifestPath",
     "/DPublishDir=$publishRoot",
     "/DBootstrapperPath=$bootstrapperStagingPath",
     "/DOutputDir=$faultOutputRoot",
