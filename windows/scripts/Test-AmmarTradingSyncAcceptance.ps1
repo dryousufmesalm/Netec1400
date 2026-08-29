@@ -343,6 +343,11 @@ try {
     $priorEntry = Assert-ExactUninstallEntry -ExpectedInstallRoot $installRoot
     $priorDisplayVersion = [string]$priorEntry.DisplayVersion
     $priorVersionDwords = Get-ExactVersionDwordEvidence
+    if($priorDisplayVersion -cne '1.0.0' -or
+       $priorVersionDwords.MajorVersion -ne 1 -or
+       $priorVersionDwords.MinorVersion -ne 0) {
+        throw 'Production baseline version metadata was not exact.'
+    }
     $priorUninsExeHash = (Get-FileHash -LiteralPath (Join-Path $installRoot 'unins000.exe') -Algorithm SHA256).Hash
     $priorUninsDatHash = (Get-FileHash -LiteralPath (Join-Path $installRoot 'unins000.dat') -Algorithm SHA256).Hash
     $incomingOnlyPath = Assert-SafeProtectedInstallPath -Path (Join-Path $installRoot 'Assets\Web\Task9IncomingOnly.bin')

@@ -176,6 +176,13 @@ test("version rollback snapshots and restores Inno MajorVersion and MinorVersion
   assert.match(acceptance, /Pre-marker recovery did not restore exact prior version DWORD metadata/);
 });
 
+test("version rollback proves the exact production baseline before fault installation", () => {
+  assert.match(acceptance, /priorDisplayVersion -cne '1\.0\.0'/);
+  assert.match(acceptance, /priorVersionDwords\.MajorVersion -ne 1/);
+  assert.match(acceptance, /priorVersionDwords\.MinorVersion -ne 0/);
+  assert.match(acceptance, /Production baseline version metadata was not exact/);
+});
+
 test("only a transaction-bound ssDone marker can classify incoming", () => {
   assert.match(installer, /AMMAR_COMMIT_MAGIC/);
   assert.match(installer, /committed\.txt/);
