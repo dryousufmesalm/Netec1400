@@ -6,6 +6,10 @@ Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "AmmarTrading.Sync.Core", "s
 EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "AmmarTrading.Sync.Core.Tests", "tests\AmmarTrading.Sync.Core.Tests\AmmarTrading.Sync.Core.Tests.csproj", "{60921167-E68A-4C28-B7BF-C70168B67AD7}"
 EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "AmmarTrading.Sync.App", "src\AmmarTrading.Sync.App\AmmarTrading.Sync.App.csproj", "{D89E4561-E381-4A0C-9FA4-BB379C452F50}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "AmmarTrading.Sync.App.Tests", "tests\AmmarTrading.Sync.App.Tests\AmmarTrading.Sync.App.Tests.csproj", "{2C430A08-E235-43A9-8651-8185C83EAF14}"
+EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
 		Debug|Any CPU = Debug|Any CPU
@@ -20,5 +24,13 @@ Global
 		{60921167-E68A-4C28-B7BF-C70168B67AD7}.Debug|Any CPU.Build.0 = Debug|Any CPU
 		{60921167-E68A-4C28-B7BF-C70168B67AD7}.Release|Any CPU.ActiveCfg = Release|Any CPU
 		{60921167-E68A-4C28-B7BF-C70168B67AD7}.Release|Any CPU.Build.0 = Release|Any CPU
+		{D89E4561-E381-4A0C-9FA4-BB379C452F50}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{D89E4561-E381-4A0C-9FA4-BB379C452F50}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{D89E4561-E381-4A0C-9FA4-BB379C452F50}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{D89E4561-E381-4A0C-9FA4-BB379C452F50}.Release|Any CPU.Build.0 = Release|Any CPU
+		{2C430A08-E235-43A9-8651-8185C83EAF14}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{2C430A08-E235-43A9-8651-8185C83EAF14}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{2C430A08-E235-43A9-8651-8185C83EAF14}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{2C430A08-E235-43A9-8651-8185C83EAF14}.Release|Any CPU.Build.0 = Release|Any CPU
 	EndGlobalSection
 EndGlobal
