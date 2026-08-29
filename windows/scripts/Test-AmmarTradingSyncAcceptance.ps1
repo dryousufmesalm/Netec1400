@@ -103,6 +103,19 @@ function Assert-ExactUninstallEntry {
     return $entry
 }
 
+function Get-ExactVersionDwordEvidence {
+    $keyPath = "HKLM:\Software\Microsoft\Windows\CurrentVersion\Uninstall\$uninstallSubKey"
+    $key = Get-Item -LiteralPath $keyPath -ErrorAction Stop
+    $evidence = [ordered]@{}
+    foreach($name in @('MajorVersion','MinorVersion')) {
+        if($key.GetValueKind($name) -ne [Microsoft.Win32.RegistryValueKind]::DWord) {
+            throw "$name is missing or is not an exact registry DWORD."
+        }
+        $evidence[$name] = [uint32]$key.GetValue($name,$null,[Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)
+    }
+    return [pscustomobject]$evidence
+}
+
 function Get-PeSubsystem {
     param([Parameter(Mandatory)][string]$Path)
     $stream = [IO.File]::OpenRead($Path)
@@ -295,8 +308,7 @@ try {
     $deadline = [DateTime]::UtcNow.AddSeconds(30)
     do {
         Start-Sleep -Milliseconds 250
-        $launchedProcess = @(Get-Process 'AmmarTrading.Sync' -ErrorAction SilentlyContinue | Where-Object { try { $_.Path -ieq $installedExe } catch { $false } } | Select-Object -First 1)
-        if($launchedProcess -is [array]) { $launchedProcess = @($launchedProcess)[0] }
+        $launchedProcess = Get-Process 'AmmarTrading.Sync' -ErrorAction SilentlyContinue | Where-Object { try { $_.Path -ieq $installedExe } catch { $false } } | Select-Object -First 1
     } while($null -eq $launchedProcess -and [DateTime]::UtcNow -lt $deadline)
     if($null -eq $launchedProcess) { throw 'The installed application did not start.' }
     $launchedProcessId = $launchedProcess.Id
@@ -330,6 +342,7 @@ try {
     }
     $priorEntry = Assert-ExactUninstallEntry -ExpectedInstallRoot $installRoot
     $priorDisplayVersion = [string]$priorEntry.DisplayVersion
+    $priorVersionDwords = Get-ExactVersionDwordEvidence
     $priorUninsExeHash = (Get-FileHash -LiteralPath (Join-Path $installRoot 'unins000.exe') -Algorithm SHA256).Hash
     $priorUninsDatHash = (Get-FileHash -LiteralPath (Join-Path $installRoot 'unins000.dat') -Algorithm SHA256).Hash
     $incomingOnlyPath = Assert-SafeProtectedInstallPath -Path (Join-Path $installRoot 'Assets\Web\Task9IncomingOnly.bin')
@@ -438,6 +451,8 @@ try {
         throw 'Pre-marker crash did not install the distinguishable incoming payload.'
     }
     if([string](Assert-ExactUninstallEntry -ExpectedInstallRoot $installRoot).DisplayVersion -cne '9.9.9') { throw 'Fault installer did not create genuinely version-changing metadata.' }
+    $faultVersionDwords = Get-ExactVersionDwordEvidence
+    if($faultVersionDwords.MajorVersion -ne 9 -or $faultVersionDwords.MinorVersion -ne 9) { throw 'Fault installer did not write exact 9.9 MajorVersion and MinorVersion DWORDs.' }
     $incomingRecoveryExit = Invoke-BoundedProcess -FilePath $resolvedFaultInstaller -ArgumentList @('/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART','/SP-',"/DIR=`"$installRoot`"",'/TASK9MODE=recoveryonly')
     if($incomingRecoveryExit -eq 0) { throw 'Pre-marker recovery-only test unexpectedly continued into installation.' }
     if(Test-Path -LiteralPath $activeRecovery) { throw 'Pre-marker recovery did not clear ACTIVE state.' }
@@ -445,11 +460,16 @@ try {
     Assert-ProductPathStateEqual -Expected $priorPayloadHashes -Actual $preMarkerRestored -Message 'Pre-marker recovery did not restore the prior payload.'
     if(Test-Path -LiteralPath $incomingOnlyPath) { throw 'Pre-marker recovery did not remove the incoming-only path.' }
     $preMarkerEntry = Assert-ExactUninstallEntry -ExpectedInstallRoot $installRoot
+    $preMarkerVersionDwords = Get-ExactVersionDwordEvidence
     if([string]$preMarkerEntry.DisplayVersion -cne $priorDisplayVersion -or
+       $preMarkerVersionDwords.MajorVersion -ne $priorVersionDwords.MajorVersion -or
+       $preMarkerVersionDwords.MinorVersion -ne $priorVersionDwords.MinorVersion -or
        (Get-FileHash -LiteralPath (Join-Path $installRoot 'unins000.exe') -Algorithm SHA256).Hash -cne $priorUninsExeHash -or
        (Get-FileHash -LiteralPath (Join-Path $installRoot 'unins000.dat') -Algorithm SHA256).Hash -cne $priorUninsDatHash) {
         throw 'Pre-marker recovery did not restore prior uninstall metadata.'
     }
+    if($preMarkerVersionDwords.MajorVersion -ne $priorVersionDwords.MajorVersion -or
+       $preMarkerVersionDwords.MinorVersion -ne $priorVersionDwords.MinorVersion) { throw 'Pre-marker recovery did not restore exact prior version DWORD metadata.' }
 
     # Kill after the exact finalized marker is durable but before verified cleanup.
     # The next run must finalize incoming 9.9.9 without rollback.

@@ -167,6 +167,15 @@ test("V3 snapshots finalized installer metadata before Inno mutation", () => {
   assert.match(installer, /RestorePriorRegistration/);
 });
 
+test("version rollback snapshots and restores Inno MajorVersion and MinorVersion DWORDs", () => {
+  assert.match(installer, /SetArrayLength\(Names, 5\)/);
+  assert.match(installer, /Names\[3\] := 'MajorVersion'/);
+  assert.match(installer, /Names\[4\] := 'MinorVersion'/);
+  assert.match(acceptance, /Get-ExactVersionDwordEvidence/);
+  assert.match(acceptance, /Fault installer did not write exact 9\.9 MajorVersion and MinorVersion DWORDs/);
+  assert.match(acceptance, /Pre-marker recovery did not restore exact prior version DWORD metadata/);
+});
+
 test("only a transaction-bound ssDone marker can classify incoming", () => {
   assert.match(installer, /AMMAR_COMMIT_MAGIC/);
   assert.match(installer, /committed\.txt/);
@@ -187,4 +196,5 @@ test("application launch happens only after durable commit cleanup", () => {
   assert.match(installer, /ExecAsOriginalUser/);
   assert.match(installer, /LaunchAfterCommit/);
   assert.match(acceptance, /Incoming-only path was not verified absent before uninstall/);
+  assert.doesNotMatch(acceptance, /@\(\$launchedProcess\)\[0\]/);
 });

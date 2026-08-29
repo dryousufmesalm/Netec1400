@@ -340,8 +340,9 @@ end;
 
 procedure GetRegistrationDwordNames(var Names: TArrayOfString);
 begin
-  SetArrayLength(Names, 3);
+  SetArrayLength(Names, 5);
   Names[0] := 'NoModify'; Names[1] := 'NoRepair'; Names[2] := 'EstimatedSize';
+  Names[3] := 'MajorVersion'; Names[4] := 'MinorVersion';
 end;
 
 function EncodeRegistryString(const Value: String): String;
