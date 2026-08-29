@@ -90,7 +90,7 @@ test("failed-upgrade rollback uses a compile-time-only manifest-owned fault payl
 test("durable recovery is Program Files bound, manifest verified, and atomic", () => {
   assert.match(installer, /ValidateProtectedAppRoot/);
   assert.match(installer, /ExpandConstant\('\{autopf\}'\)/);
-  assert.match(installer, /AMMAR_STATE_MAGIC = 'AMMAR_TX_V2'/);
+  assert.match(installer, /AMMAR_STATE_MAGIC = 'AMMAR_TX_V3'/);
   assert.match(installer, /APPID\|/);
   assert.match(installer, /GetSHA256OfFile/);
   assert.match(installer, /RenameFile\(BuildingRoot, ActiveRecoveryRoot\)/);
@@ -124,8 +124,8 @@ test("recovery classifies prior, committed incoming, and invalid metadata before
   assert.match(installer, /QuietUninstallString/);
   assert.match(installer, /unins000\.dat/);
   assert.match(installer, /IncomingPayloadHashes/);
-  assert.match(acceptance, /incomingcompletecrash/);
-  assert.match(acceptance, /Incoming-complete recovery restored the prior payload/);
+  assert.match(acceptance, /premarkercrash/);
+  assert.match(acceptance, /Post-marker recovery restored the prior payload/);
 });
 
 test("WebView prerequisite completes before snapshot and post-install is the commit boundary", () => {
@@ -142,6 +142,49 @@ test("WebView prerequisite completes before snapshot and post-install is the com
 test("uninstall uses the same durable transaction classifier and fails closed", () => {
   assert.match(installer, /function InitializeUninstall/);
   assert.match(installer, /ClassifyActiveTransaction/);
-  assert.match(acceptance, /Corrupt active transaction uninstall unexpectedly succeeded/);
+  assert.match(acceptance, /Corrupt prior-uninstaller proof uninstall unexpectedly succeeded/);
   assert.match(acceptance, /Active transaction uninstall did not recover before removal/);
+});
+
+test("uninstall requires a transaction-bound prior-uninstaller proof created outside uninstall", () => {
+  assert.match(installer, /AMMAR_UNINS_PROOF_MAGIC/);
+  assert.match(installer, /prior-uninstaller-verified\.txt/);
+  assert.match(installer, /function WritePriorUninstallerProof/);
+  assert.match(installer, /function ValidatePriorUninstallerProof/);
+  assert.match(installer, /InsideUninstaller/);
+  assert.match(acceptance, /ACTIVE uninstall without prior-uninstaller proof unexpectedly succeeded/);
+  assert.match(acceptance, /Corrupt prior-uninstaller proof uninstall unexpectedly succeeded/);
+});
+
+test("V3 snapshots finalized installer metadata before Inno mutation", () => {
+  assert.match(installer, /AMMAR_STATE_MAGIC = 'AMMAR_TX_V3'/);
+  assert.match(installer, /SnapshotPriorRegistration/);
+  assert.match(installer, /prior-unins\.exe/);
+  assert.match(installer, /prior-unins\.dat/);
+  assert.match(installer, /ExtractTemporaryFile\('IncomingPayloadHashes\.txt'\)/);
+  const prepare = installer.slice(installer.indexOf("function PrepareToInstall"), installer.indexOf("procedure CurStepChanged"));
+  assert.match(prepare, /SnapshotProductPayload/);
+  assert.match(installer, /RestorePriorRegistration/);
+});
+
+test("only a transaction-bound ssDone marker can classify incoming", () => {
+  assert.match(installer, /AMMAR_COMMIT_MAGIC/);
+  assert.match(installer, /committed\.txt/);
+  assert.match(installer, /function ValidateCommittedMarker/);
+  assert.match(installer, /CurStep = ssDone/);
+  assert.match(installer, /postmarkercrash/);
+  assert.match(installer, /premarkercrash/);
+  assert.match(installer, /function RemoveObsoleteProductPayload/);
+  assert.match(build, /FaultProductVersion=9\.9\.9/);
+  assert.match(acceptance, /Pre-marker recovery did not restore prior uninstall metadata/);
+  assert.match(acceptance, /Post-marker recovery restored the prior payload/);
+  assert.match(acceptance, /Successful upgrade retained an obsolete manifest-owned path/);
+});
+
+test("application launch happens only after durable commit cleanup", () => {
+  const runSection = installer.slice(installer.indexOf("[Run]"), installer.indexOf("[Code]"));
+  assert.doesNotMatch(runSection, /ProductExe/);
+  assert.match(installer, /ExecAsOriginalUser/);
+  assert.match(installer, /LaunchAfterCommit/);
+  assert.match(acceptance, /Incoming-only path was not verified absent before uninstall/);
 });

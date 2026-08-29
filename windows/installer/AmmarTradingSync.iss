@@ -17,10 +17,17 @@
   #ifndef FaultManifestPath
     #error FaultManifestPath must be supplied for the acceptance-only fault installer
   #endif
+  #ifndef FaultProductVersion
+    #error FaultProductVersion must be supplied for the acceptance-only fault installer
+  #endif
 #endif
 
 #define ProductName "AmmarTrading Sync"
-#define ProductVersion "1.0.0"
+#ifdef AcceptanceFaultInjection
+  #define ProductVersion FaultProductVersion
+#else
+  #define ProductVersion "1.0.0"
+#endif
 #define ProductPublisher "AmmarTrading"
 #define ProductExe "AmmarTrading.Sync.exe"
 #ifdef AcceptanceFaultInjection
@@ -62,11 +69,11 @@ Name: "english"; MessagesFile: "compiler:Default.isl"
 Name: "desktopicon"; Description: "Create a &desktop shortcut"; GroupDescription: "Additional shortcuts:"; Flags: unchecked
 
 [Files]
-Source: "{#PayloadHashesPath}"; DestDir: "{tmp}"; DestName: "IncomingPayloadHashes.txt"; Flags: deleteafterinstall
+Source: "{#PayloadHashesPath}"; DestName: "IncomingPayloadHashes.txt"; Flags: dontcopy noencryption
 #ifdef AcceptanceFaultInjection
-Source: "{#FaultManifestPath}"; DestDir: "{tmp}"; DestName: "IncomingPayloadManifest.txt"; Flags: deleteafterinstall; AfterInstall: SnapshotProductPayload
+Source: "{#FaultManifestPath}"; DestName: "IncomingPayloadManifest.txt"; Flags: dontcopy noencryption
 #else
-Source: "{#PublishDir}\AmmarTrading.Sync.payload-manifest.txt"; DestDir: "{tmp}"; DestName: "IncomingPayloadManifest.txt"; Flags: deleteafterinstall; AfterInstall: SnapshotProductPayload
+Source: "{#PublishDir}\AmmarTrading.Sync.payload-manifest.txt"; DestName: "IncomingPayloadManifest.txt"; Flags: dontcopy noencryption
 #endif
 Source: "{#PublishDir}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
 Source: "{#BootstrapperPath}"; Flags: dontcopy noencryption
@@ -85,7 +92,6 @@ Name: "{autoprograms}\AmmarTrading Sync"; Filename: "{app}\{#ProductExe}"; Worki
 Name: "{autodesktop}\AmmarTrading Sync"; Filename: "{app}\{#ProductExe}"; WorkingDir: "{app}"; Tasks: desktopicon
 
 [Run]
-Filename: "{app}\{#ProductExe}"; Description: "Launch AmmarTrading Sync"; Flags: nowait postinstall skipifsilent runasoriginaluser; Check: CanLaunchApplication
 
 [Code]
 const
@@ -93,7 +99,9 @@ const
   AMMAR_MOVEFILE_REPLACE_EXISTING = 1;
   AMMAR_MOVEFILE_WRITE_THROUGH = 8;
   AMMAR_APP_ID = '{8F488698-AB96-45DB-A2BB-D9E868823F43}';
-  AMMAR_STATE_MAGIC = 'AMMAR_TX_V2';
+  AMMAR_STATE_MAGIC = 'AMMAR_TX_V3';
+  AMMAR_COMMIT_MAGIC = 'AMMAR_COMMIT_V1';
+  AMMAR_UNINS_PROOF_MAGIC = 'AMMAR_PRIOR_UNINS_PROOF_V1';
   AMMAR_MANIFEST_NAME = 'AmmarTrading.Sync.payload-manifest.txt';
   AMMAR_RECOVERY_BUILDING = '.ammar-installer-recovery.building';
   AMMAR_RECOVERY_ACTIVE = '.ammar-installer-recovery.active';
@@ -110,6 +118,9 @@ var
   CommitFailed: Boolean;
   CommitFailureExitCode: Integer;
   RecoveryFailure: Boolean;
+  InsideUninstaller: Boolean;
+  UninstallUsesPriorProof: Boolean;
+  LaunchAfterCommitCheckbox: TNewCheckBox;
 
 type
   TPayloadEntry = record
@@ -310,6 +321,203 @@ begin
     DataSize + '|' + GetSHA256OfFile(UninstallerDataPath));
 end;
 
+function UninstallKey: String;
+begin
+  Result := 'SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\{8F488698-AB96-45DB-A2BB-D9E868823F43}_is1';
+end;
+
+procedure GetRegistrationStringNames(var Names: TArrayOfString);
+begin
+  SetArrayLength(Names, 16);
+  Names[0] := 'DisplayName'; Names[1] := 'DisplayVersion'; Names[2] := 'Publisher';
+  Names[3] := 'InstallLocation'; Names[4] := 'UninstallString'; Names[5] := 'QuietUninstallString';
+  Names[6] := 'DisplayIcon'; Names[7] := 'InstallDate'; Names[8] := 'Inno Setup: App Path';
+  Names[9] := 'Inno Setup: Icon Group'; Names[10] := 'Inno Setup: User';
+  Names[11] := 'Inno Setup: Selected Tasks'; Names[12] := 'Inno Setup: Language';
+  Names[13] := 'Inno Setup: Setup Version'; Names[14] := 'Inno Setup: Privileges Required';
+  Names[15] := 'Inno Setup: Architectures Allowed';
+end;
+
+procedure GetRegistrationDwordNames(var Names: TArrayOfString);
+begin
+  SetArrayLength(Names, 3);
+  Names[0] := 'NoModify'; Names[1] := 'NoRepair'; Names[2] := 'EstimatedSize';
+end;
+
+function EncodeRegistryString(const Value: String): String;
+var Index, Code: Integer;
+    Digits: String;
+begin
+  Result := ''; Digits := '0123456789ABCDEF';
+  for Index := 1 to Length(Value) do
+  begin
+    Code := Ord(Value[Index]);
+    Result := Result + Digits[(Code div 4096) + 1] + Digits[((Code div 256) mod 16) + 1] +
+      Digits[((Code div 16) mod 16) + 1] + Digits[(Code mod 16) + 1];
+  end;
+end;
+
+function HexNibble(const C: Char): Integer;
+begin
+  if (C >= '0') and (C <= '9') then Result := Ord(C) - Ord('0')
+  else if (C >= 'A') and (C <= 'F') then Result := Ord(C) - Ord('A') + 10
+  else Result := -1;
+end;
+
+function DecodeRegistryString(const Value: String; var Decoded: String): Boolean;
+var Index, Code, N1, N2, N3, N4: Integer;
+begin
+  Result := False; Decoded := '';
+  if (Length(Value) mod 4) <> 0 then exit;
+  Index := 1;
+  while Index <= Length(Value) do
+  begin
+    N1 := HexNibble(Value[Index]); N2 := HexNibble(Value[Index + 1]);
+    N3 := HexNibble(Value[Index + 2]); N4 := HexNibble(Value[Index + 3]);
+    if (N1 < 0) or (N2 < 0) or (N3 < 0) or (N4 < 0) then exit;
+    Code := N1 * 4096 + N2 * 256 + N3 * 16 + N4;
+    Decoded := Decoded + Chr(Code);
+    Index := Index + 4;
+  end;
+  Result := True;
+end;
+
+procedure SnapshotPriorRegistration(const RecoveryRoot: String; var SnapshotHash: String);
+var Lines, StringNames, DwordNames: TArrayOfString;
+    Index, Offset: Integer;
+    StringValue: String;
+    DwordValue: Cardinal;
+begin
+  if not RegKeyExists(HKEY_LOCAL_MACHINE, UninstallKey) then
+  begin
+    SetArrayLength(Lines, 1); Lines[0] := 'KEY|ABSENT';
+  end
+  else
+  begin
+    GetRegistrationStringNames(StringNames); GetRegistrationDwordNames(DwordNames);
+    SetArrayLength(Lines, 1 + GetArrayLength(StringNames) + GetArrayLength(DwordNames));
+    Lines[0] := 'KEY|PRESENT'; Offset := 1;
+    for Index := 0 to GetArrayLength(StringNames) - 1 do
+    begin
+      if RegValueExists(HKEY_LOCAL_MACHINE, UninstallKey, StringNames[Index]) then
+      begin
+        if not RegQueryStringValue(HKEY_LOCAL_MACHINE, UninstallKey, StringNames[Index], StringValue) then
+          RaiseException('Setup refused an unsupported registration value type.');
+        Lines[Offset] := 'S|' + StringNames[Index] + '|' + EncodeRegistryString(StringValue);
+      end else Lines[Offset] := 'M|' + StringNames[Index];
+      Offset := Offset + 1;
+    end;
+    for Index := 0 to GetArrayLength(DwordNames) - 1 do
+    begin
+      if RegValueExists(HKEY_LOCAL_MACHINE, UninstallKey, DwordNames[Index]) then
+      begin
+        if not RegQueryDWordValue(HKEY_LOCAL_MACHINE, UninstallKey, DwordNames[Index], DwordValue) then
+          RaiseException('Setup refused an unsupported registration value type.');
+        Lines[Offset] := 'D|' + DwordNames[Index] + '|' + IntToStr(DwordValue);
+      end else Lines[Offset] := 'M|' + DwordNames[Index];
+      Offset := Offset + 1;
+    end;
+  end;
+  AtomicWriteLines(RecoveryChild(RecoveryRoot, 'prior-registration.txt'), Lines);
+  SnapshotHash := GetSHA256OfFile(RecoveryChild(RecoveryRoot, 'prior-registration.txt'));
+end;
+
+function RestorePriorRegistration(const RecoveryRoot, SnapshotHash: String): Boolean;
+var Lines, StringNames, DwordNames: TArrayOfString;
+    Index, Offset: Integer;
+    ExpectedPrefix, Encoded, Decoded: String;
+    DwordValue: Int64;
+begin
+  Result := False;
+  if (not FileExists(RecoveryChild(RecoveryRoot, 'prior-registration.txt'))) or
+     IsReparsePath(RecoveryChild(RecoveryRoot, 'prior-registration.txt')) or
+     (CompareText(GetSHA256OfFile(RecoveryChild(RecoveryRoot, 'prior-registration.txt')), SnapshotHash) <> 0) or
+     (not LoadStringsFromFile(RecoveryChild(RecoveryRoot, 'prior-registration.txt'), Lines)) then exit;
+  if (GetArrayLength(Lines) = 1) and (Lines[0] = 'KEY|ABSENT') then
+  begin
+    RegDeleteKeyIncludingSubkeys(HKEY_LOCAL_MACHINE, UninstallKey);
+    Result := not RegKeyExists(HKEY_LOCAL_MACHINE, UninstallKey); exit;
+  end;
+  GetRegistrationStringNames(StringNames); GetRegistrationDwordNames(DwordNames);
+  if (GetArrayLength(Lines) <> 1 + GetArrayLength(StringNames) + GetArrayLength(DwordNames)) or
+     (Lines[0] <> 'KEY|PRESENT') then exit;
+  RegDeleteKeyIncludingSubkeys(HKEY_LOCAL_MACHINE, UninstallKey);
+  Offset := 1;
+  for Index := 0 to GetArrayLength(StringNames) - 1 do
+  begin
+    ExpectedPrefix := 'S|' + StringNames[Index] + '|';
+    if Lines[Offset] = 'M|' + StringNames[Index] then
+    else if Pos(ExpectedPrefix, Lines[Offset]) = 1 then
+    begin
+      Encoded := Copy(Lines[Offset], Length(ExpectedPrefix) + 1, Length(Lines[Offset]));
+      if (not DecodeRegistryString(Encoded, Decoded)) or
+         (not RegWriteStringValue(HKEY_LOCAL_MACHINE, UninstallKey, StringNames[Index], Decoded)) then exit;
+    end else exit;
+    Offset := Offset + 1;
+  end;
+  for Index := 0 to GetArrayLength(DwordNames) - 1 do
+  begin
+    ExpectedPrefix := 'D|' + DwordNames[Index] + '|';
+    if Lines[Offset] = 'M|' + DwordNames[Index] then
+    else if Pos(ExpectedPrefix, Lines[Offset]) = 1 then
+    begin
+      DwordValue := StrToInt64Def(Copy(Lines[Offset], Length(ExpectedPrefix) + 1, Length(Lines[Offset])), -1);
+      if (DwordValue < 0) or (DwordValue > 4294967295) or
+         (not RegWriteDWordValue(HKEY_LOCAL_MACHINE, UninstallKey, DwordNames[Index], DwordValue)) then exit;
+    end else exit;
+    Offset := Offset + 1;
+  end;
+  Result := CompareText(GetSHA256OfFile(RecoveryChild(RecoveryRoot, 'prior-registration.txt')), SnapshotHash) = 0;
+end;
+
+function VerifyPriorRegistration(const RecoveryRoot, SnapshotHash: String): Boolean;
+var
+  Lines, StringNames, DwordNames: TArrayOfString;
+  Index, Offset: Integer;
+  ExpectedPrefix, Encoded, Decoded, ActualString: String;
+  ExpectedDword: Int64;
+  ActualDword: Cardinal;
+begin
+  Result := False;
+  if (not LoadStringsFromFile(RecoveryChild(RecoveryRoot, 'prior-registration.txt'), Lines)) or
+     IsReparsePath(RecoveryChild(RecoveryRoot, 'prior-registration.txt')) or
+     (CompareText(GetSHA256OfFile(RecoveryChild(RecoveryRoot, 'prior-registration.txt')), SnapshotHash) <> 0) then exit;
+  if (GetArrayLength(Lines) = 1) and (Lines[0] = 'KEY|ABSENT') then
+  begin Result := not RegKeyExists(HKEY_LOCAL_MACHINE, UninstallKey); exit; end;
+  GetRegistrationStringNames(StringNames); GetRegistrationDwordNames(DwordNames);
+  if (GetArrayLength(Lines) <> 1 + GetArrayLength(StringNames) + GetArrayLength(DwordNames)) or
+     (Lines[0] <> 'KEY|PRESENT') or (not RegKeyExists(HKEY_LOCAL_MACHINE, UninstallKey)) then exit;
+  Offset := 1;
+  for Index := 0 to GetArrayLength(StringNames) - 1 do
+  begin
+    ExpectedPrefix := 'S|' + StringNames[Index] + '|';
+    if Lines[Offset] = 'M|' + StringNames[Index] then
+    begin if RegValueExists(HKEY_LOCAL_MACHINE, UninstallKey, StringNames[Index]) then exit; end
+    else if Pos(ExpectedPrefix, Lines[Offset]) = 1 then
+    begin
+      Encoded := Copy(Lines[Offset], Length(ExpectedPrefix) + 1, Length(Lines[Offset]));
+      if (not DecodeRegistryString(Encoded, Decoded)) or
+         (not RegQueryStringValue(HKEY_LOCAL_MACHINE, UninstallKey, StringNames[Index], ActualString)) or
+         (ActualString <> Decoded) then exit;
+    end else exit;
+    Offset := Offset + 1;
+  end;
+  for Index := 0 to GetArrayLength(DwordNames) - 1 do
+  begin
+    ExpectedPrefix := 'D|' + DwordNames[Index] + '|';
+    if Lines[Offset] = 'M|' + DwordNames[Index] then
+    begin if RegValueExists(HKEY_LOCAL_MACHINE, UninstallKey, DwordNames[Index]) then exit; end
+    else if Pos(ExpectedPrefix, Lines[Offset]) = 1 then
+    begin
+      ExpectedDword := StrToInt64Def(Copy(Lines[Offset], Length(ExpectedPrefix) + 1, Length(Lines[Offset])), -1);
+      if (ExpectedDword < 0) or (not RegQueryDWordValue(HKEY_LOCAL_MACHINE, UninstallKey,
+        DwordNames[Index], ActualDword)) or (ActualDword <> ExpectedDword) then exit;
+    end else exit;
+    Offset := Offset + 1;
+  end;
+  Result := True;
+end;
+
 function ValidateCanonicalIncomingMetadata: Boolean;
 var
   Key, DisplayName, DisplayVersion, InstallLocation, UninstallString: String;
@@ -394,7 +602,8 @@ begin
 end;
 
 function TryParseState(const RecoveryRoot: String; var Entries: TPayloadEntries;
-  var TransactionId, OldManifestHash, IncomingManifestHash, IncomingHashesHash, RegistrationHash: String): Boolean;
+  var TransactionId, OldManifestHash, IncomingManifestHash, IncomingHashesHash,
+      PriorRegistrationHash, PriorUninsExeMeta, PriorUninsDatMeta, RegistrationHash: String): Boolean;
 var
   Lines, OldPaths, IncomingPaths, UnionPaths, ParsedPaths: TArrayOfString;
   StatePath, StateHashPath, PhasePath, StateHash, ExpectedStateHash, EntryText: String;
@@ -410,7 +619,7 @@ begin
   if IsReparsePath(StatePath) or IsReparsePath(StateHashPath) or IsReparsePath(PhasePath) or
      IsReparsePath(RecoveryChild(RecoveryRoot, 'backup')) then exit;
   if not LoadStringsFromFile(StatePath, Lines) then exit;
-  if GetArrayLength(Lines) < 9 then exit;
+  if GetArrayLength(Lines) < 13 then exit;
   if Lines[0] <> AMMAR_STATE_MAGIC then exit;
   if Lines[1] <> 'APPID|' + AMMAR_APP_ID then exit;
   if Lines[2] <> 'ROOT|' + AppRoot then exit;
@@ -423,11 +632,18 @@ begin
   IncomingManifestHash := Copy(Lines[5], 18, Length(Lines[5]) - 17);
   if Pos('INCOMINGHASHES|', Lines[6]) <> 1 then exit;
   IncomingHashesHash := Copy(Lines[6], 16, Length(Lines[6]) - 15);
-  if Pos('REGISTRATION|', Lines[7]) <> 1 then exit;
-  RegistrationHash := Copy(Lines[7], 14, Length(Lines[7]) - 13);
-  if Pos('COUNT|', Lines[8]) <> 1 then exit;
-  EntryCount := StrToIntDef(Copy(Lines[8], 7, Length(Lines[8]) - 6), -1);
-  if (EntryCount < 1) or (GetArrayLength(Lines) <> EntryCount + 9) then exit;
+  if Pos('PRIORREGISTRATION|', Lines[7]) <> 1 then exit;
+  PriorRegistrationHash := Copy(Lines[7], 19, Length(Lines[7]) - 18);
+  if Pos('PRIORUNINSEXE|', Lines[8]) <> 1 then exit;
+  PriorUninsExeMeta := Copy(Lines[8], 15, Length(Lines[8]) - 14);
+  if Pos('PRIORUNINSDAT|', Lines[9]) <> 1 then exit;
+  PriorUninsDatMeta := Copy(Lines[9], 15, Length(Lines[9]) - 14);
+  if Pos('REGISTRATION|', Lines[10]) <> 1 then exit;
+  RegistrationHash := Copy(Lines[10], 14, Length(Lines[10]) - 13);
+  if Pos('COUNT|', Lines[11]) <> 1 then exit;
+  EntryCount := StrToIntDef(Copy(Lines[11], 7, Length(Lines[11]) - 6), -1);
+  if (EntryCount < 1) or (GetArrayLength(Lines) <> EntryCount + 12) then exit;
+  Log('Durable state validation: header accepted.');
   if not LoadSingleLine(StateHashPath, ExpectedStateHash) then exit;
   StateHash := GetSHA256OfFile(StatePath);
   if CompareText(Trim(ExpectedStateHash), StateHash) <> 0 then exit;
@@ -445,6 +661,26 @@ begin
   if IsReparsePath(RecoveryChild(RecoveryRoot, 'incoming-hashes.txt')) or
      (not FileExists(RecoveryChild(RecoveryRoot, 'incoming-hashes.txt'))) or
      (CompareText(GetSHA256OfFile(RecoveryChild(RecoveryRoot, 'incoming-hashes.txt')), IncomingHashesHash) <> 0) then exit;
+  if IsReparsePath(RecoveryChild(RecoveryRoot, 'prior-registration.txt')) or
+     (not FileExists(RecoveryChild(RecoveryRoot, 'prior-registration.txt'))) or
+     (CompareText(GetSHA256OfFile(RecoveryChild(RecoveryRoot, 'prior-registration.txt')), PriorRegistrationHash) <> 0) then exit;
+  if (PriorUninsExeMeta = 'NONE') <> (PriorUninsDatMeta = 'NONE') then exit;
+  if PriorUninsExeMeta <> 'NONE' then
+  begin
+    Separator1 := Pos('|', PriorUninsExeMeta); Separator2 := Pos('|', PriorUninsDatMeta);
+    if (Separator1 < 2) or (Separator2 < 2) or
+       (not FileExists(RecoveryChild(RecoveryRoot, 'prior-unins.exe'))) or
+       (not FileExists(RecoveryChild(RecoveryRoot, 'prior-unins.dat'))) or
+       IsReparsePath(RecoveryChild(RecoveryRoot, 'prior-unins.exe')) or
+       IsReparsePath(RecoveryChild(RecoveryRoot, 'prior-unins.dat')) or
+       (not TryGetFileSizeText(RecoveryChild(RecoveryRoot, 'prior-unins.exe'), ActualSizeText)) or
+       (ActualSizeText <> Copy(PriorUninsExeMeta, 1, Separator1 - 1)) or
+       (CompareText(GetSHA256OfFile(RecoveryChild(RecoveryRoot, 'prior-unins.exe')), Copy(PriorUninsExeMeta, Separator1 + 1, Length(PriorUninsExeMeta))) <> 0) or
+       (not TryGetFileSizeText(RecoveryChild(RecoveryRoot, 'prior-unins.dat'), ActualSizeText)) or
+       (ActualSizeText <> Copy(PriorUninsDatMeta, 1, Separator2 - 1)) or
+       (CompareText(GetSHA256OfFile(RecoveryChild(RecoveryRoot, 'prior-unins.dat')), Copy(PriorUninsDatMeta, Separator2 + 1, Length(PriorUninsDatMeta))) <> 0) then exit;
+  end;
+  Log('Durable state validation: metadata accepted.');
 
   SetArrayLength(OldPaths, 0);
   SetArrayLength(IncomingPaths, 0);
@@ -455,13 +691,14 @@ begin
   for Index := 0 to GetArrayLength(OldPaths) - 1 do AddUniquePayloadPath(UnionPaths, OldPaths[Index]);
   for Index := 0 to GetArrayLength(IncomingPaths) - 1 do AddUniquePayloadPath(UnionPaths, IncomingPaths[Index]);
   if GetArrayLength(UnionPaths) <> EntryCount then exit;
+  Log('Durable state validation: manifest union accepted.');
 
   SetArrayLength(Entries, EntryCount);
   SetArrayLength(ParsedPaths, 0);
   ExistingCount := 0;
   for Index := 0 to EntryCount - 1 do
   begin
-    EntryText := Lines[Index + 9];
+    EntryText := Lines[Index + 12];
     Separator1 := Pos('|', EntryText);
     if Separator1 <> 2 then exit;
     Entry.Action := EntryText[1];
@@ -501,6 +738,7 @@ begin
   end;
   if GetArrayLength(ParsedPaths) <> GetArrayLength(UnionPaths) then exit;
   if CountFilesRecursive(RecoveryChild(RecoveryRoot, 'backup')) <> ExistingCount then exit;
+  Log('Durable state validation: entries and backup accepted.');
   Result := True;
 end;
 
@@ -545,22 +783,192 @@ begin
   Result := GetArrayLength(SeenPaths) = GetArrayLength(ManifestPaths);
 end;
 
+function CurrentUninstallerMeta(const FileName: String; var Meta: String): Boolean;
+var Path, SizeText: String;
+begin
+  Path := AddBackslash(AppRoot) + FileName;
+  Result := FileExists(Path) and (not IsReparsePath(Path)) and TryGetFileSizeText(Path, SizeText);
+  if Result then Meta := SizeText + '|' + GetSHA256OfFile(Path);
+end;
+
+function WritePriorUninstallerProof(const RecoveryRoot: String): Boolean;
+var
+  Entries: TPayloadEntries;
+  Lines: TArrayOfString;
+  TransactionId, OldManifestHash, IncomingManifestHash, IncomingHashesHash,
+  PriorRegistrationHash, PriorUninsExeMeta, PriorUninsDatMeta, PriorDigest,
+  StateHash, ExeMeta, DatMeta: String;
+begin
+  Result := False;
+  if InsideUninstaller then exit;
+  if not TryParseState(RecoveryRoot, Entries, TransactionId, OldManifestHash,
+    IncomingManifestHash, IncomingHashesHash, PriorRegistrationHash,
+    PriorUninsExeMeta, PriorUninsDatMeta, PriorDigest) then exit;
+  if (PriorUninsExeMeta = 'NONE') or
+     (not CurrentUninstallerMeta('unins000.exe', ExeMeta)) or
+     (not CurrentUninstallerMeta('unins000.dat', DatMeta)) or
+     (CompareText(ExeMeta, PriorUninsExeMeta) <> 0) or
+     (CompareText(DatMeta, PriorUninsDatMeta) <> 0) then exit;
+  StateHash := GetSHA256OfFile(RecoveryChild(RecoveryRoot, 'state.txt'));
+  SetArrayLength(Lines, 8);
+  Lines[0] := AMMAR_UNINS_PROOF_MAGIC; Lines[1] := 'APPID|' + AMMAR_APP_ID;
+  Lines[2] := 'ROOT|' + AppRoot; Lines[3] := 'TXID|' + TransactionId;
+  Lines[4] := 'STATE|' + StateHash; Lines[5] := 'PRIORUNINSEXE|' + PriorUninsExeMeta;
+  Lines[6] := 'PRIORUNINSDAT|' + PriorUninsDatMeta;
+  Lines[7] := 'PRIORREGISTRATION|' + PriorRegistrationHash;
+  AtomicWriteLines(RecoveryChild(RecoveryRoot, 'prior-uninstaller-verified.txt'), Lines);
+  AtomicWriteText(RecoveryChild(RecoveryRoot, 'prior-uninstaller-verified.sha256'),
+    GetSHA256OfFile(RecoveryChild(RecoveryRoot, 'prior-uninstaller-verified.txt')));
+  Result := True;
+end;
+
+function ValidatePriorUninstallerProof(const RecoveryRoot: String): Boolean;
+var
+  Entries: TPayloadEntries;
+  Lines: TArrayOfString;
+  TransactionId, OldManifestHash, IncomingManifestHash, IncomingHashesHash,
+  PriorRegistrationHash, PriorUninsExeMeta, PriorUninsDatMeta, PriorDigest,
+  StateHash, ExpectedHash, ExeMeta: String;
+begin
+  Result := False;
+  if not TryParseState(RecoveryRoot, Entries, TransactionId, OldManifestHash,
+    IncomingManifestHash, IncomingHashesHash, PriorRegistrationHash,
+    PriorUninsExeMeta, PriorUninsDatMeta, PriorDigest) then exit;
+  if IsReparsePath(RecoveryChild(RecoveryRoot, 'prior-uninstaller-verified.txt')) or
+     IsReparsePath(RecoveryChild(RecoveryRoot, 'prior-uninstaller-verified.sha256')) or
+     (not LoadStringsFromFile(RecoveryChild(RecoveryRoot, 'prior-uninstaller-verified.txt'), Lines)) or
+     (GetArrayLength(Lines) <> 8) or
+     (not LoadSingleLine(RecoveryChild(RecoveryRoot, 'prior-uninstaller-verified.sha256'), ExpectedHash)) or
+     (CompareText(GetSHA256OfFile(RecoveryChild(RecoveryRoot, 'prior-uninstaller-verified.txt')), Trim(ExpectedHash)) <> 0) then exit;
+  StateHash := GetSHA256OfFile(RecoveryChild(RecoveryRoot, 'state.txt'));
+  if (Lines[0] <> AMMAR_UNINS_PROOF_MAGIC) or (Lines[1] <> 'APPID|' + AMMAR_APP_ID) or
+     (Lines[2] <> 'ROOT|' + AppRoot) or (Lines[3] <> 'TXID|' + TransactionId) or
+     (Lines[4] <> 'STATE|' + StateHash) or
+     (Lines[5] <> 'PRIORUNINSEXE|' + PriorUninsExeMeta) or
+     (Lines[6] <> 'PRIORUNINSDAT|' + PriorUninsDatMeta) or
+     (Lines[7] <> 'PRIORREGISTRATION|' + PriorRegistrationHash) or
+     (not CurrentUninstallerMeta('unins000.exe', ExeMeta)) or
+     (CompareText(ExeMeta, PriorUninsExeMeta) <> 0) or
+     (not VerifyPriorRegistration(RecoveryRoot, PriorRegistrationHash)) then exit;
+  Result := True;
+end;
+
+function RemoveObsoleteProductPayload(const RecoveryRoot: String): Boolean;
+var
+  Entries: TPayloadEntries;
+  OldPaths, IncomingPaths: TArrayOfString;
+  Index: Integer;
+  TransactionId, OldManifestHash, IncomingManifestHash, IncomingHashesHash,
+  PriorRegistrationHash, PriorUninsExeMeta, PriorUninsDatMeta, PriorDigest,
+  ObsoletePath: String;
+begin
+  Result := False;
+  if not TryParseState(RecoveryRoot, Entries, TransactionId, OldManifestHash,
+    IncomingManifestHash, IncomingHashesHash, PriorRegistrationHash,
+    PriorUninsExeMeta, PriorUninsDatMeta, PriorDigest) then exit;
+  if OldManifestHash = 'NONE' then begin Result := True; exit; end;
+  SetArrayLength(OldPaths, 0);
+  SetArrayLength(IncomingPaths, 0);
+  AddManifestPayloadPaths(RecoveryChild(RecoveryRoot, 'old-manifest.txt'), OldPaths, True);
+  AddManifestPayloadPaths(RecoveryChild(RecoveryRoot, 'incoming-manifest.txt'), IncomingPaths, True);
+  for Index := 0 to GetArrayLength(OldPaths) - 1 do
+    if not ContainsPayloadPath(IncomingPaths, OldPaths[Index]) then
+    begin
+      if not IsContainedNonReparsePayloadPath(OldPaths[Index]) then exit;
+      ObsoletePath := AddBackslash(AppRoot) + OldPaths[Index];
+      if DirExists(ObsoletePath) then exit;
+      if FileExists(ObsoletePath) and (not DeleteFile(ObsoletePath)) then exit;
+    end;
+  Result := True;
+end;
+
+function ValidateCommittedMarker(const RecoveryRoot: String): Boolean;
+var
+  Entries: TPayloadEntries;
+  Lines: TArrayOfString;
+  TransactionId, OldManifestHash, IncomingManifestHash, IncomingHashesHash,
+  PriorRegistrationHash, PriorUninsExeMeta, PriorUninsDatMeta, PriorDigest,
+  StateHash, ExpectedMarkerHash, CurrentDigest, ExeMeta, DatMeta: String;
+  RegistrationFound: Boolean;
+begin
+  Result := False;
+  if not TryParseState(RecoveryRoot, Entries, TransactionId, OldManifestHash,
+    IncomingManifestHash, IncomingHashesHash, PriorRegistrationHash,
+    PriorUninsExeMeta, PriorUninsDatMeta, PriorDigest) then exit;
+  if IsReparsePath(RecoveryChild(RecoveryRoot, 'committed.txt')) or
+     IsReparsePath(RecoveryChild(RecoveryRoot, 'committed.sha256')) or
+     (not LoadStringsFromFile(RecoveryChild(RecoveryRoot, 'committed.txt'), Lines)) or
+     (GetArrayLength(Lines) <> 10) or
+     (not LoadSingleLine(RecoveryChild(RecoveryRoot, 'committed.sha256'), ExpectedMarkerHash)) or
+     (CompareText(GetSHA256OfFile(RecoveryChild(RecoveryRoot, 'committed.txt')), Trim(ExpectedMarkerHash)) <> 0) then exit;
+  StateHash := GetSHA256OfFile(RecoveryChild(RecoveryRoot, 'state.txt'));
+  if (Lines[0] <> AMMAR_COMMIT_MAGIC) or (Lines[1] <> 'APPID|' + AMMAR_APP_ID) or
+     (Lines[2] <> 'ROOT|' + AppRoot) or (Lines[3] <> 'TXID|' + TransactionId) or
+     (Lines[4] <> 'STATE|' + StateHash) or
+     (Lines[5] <> 'INCOMINGMANIFEST|' + IncomingManifestHash) or
+     (Lines[6] <> 'INCOMINGHASHES|' + IncomingHashesHash) or
+     (Pos('REGISTRATION|', Lines[7]) <> 1) or
+     (Pos('UNINSEXE|', Lines[8]) <> 1) or (Pos('UNINSDAT|', Lines[9]) <> 1) then exit;
+  CurrentDigest := RegistrationDigest(RegistrationFound);
+  if (not RegistrationFound) or
+     (CompareText(CurrentDigest, Copy(Lines[7], 14, Length(Lines[7]))) <> 0) or
+     (not CurrentUninstallerMeta('unins000.exe', ExeMeta)) or
+     (not CurrentUninstallerMeta('unins000.dat', DatMeta)) or
+     (CompareText(ExeMeta, Copy(Lines[8], 10, Length(Lines[8]))) <> 0) or
+     (CompareText(DatMeta, Copy(Lines[9], 10, Length(Lines[9]))) <> 0) or
+     (not VerifyIncomingCommittedPayload(RecoveryRoot, IncomingManifestHash, IncomingHashesHash)) then exit;
+  Result := True;
+end;
+
+function WriteCommittedMarker(const RecoveryRoot: String): Boolean;
+var
+  Entries: TPayloadEntries;
+  Lines: TArrayOfString;
+  TransactionId, OldManifestHash, IncomingManifestHash, IncomingHashesHash,
+  PriorRegistrationHash, PriorUninsExeMeta, PriorUninsDatMeta, PriorDigest,
+  StateHash, CurrentDigest, ExeMeta, DatMeta, MarkerHash: String;
+  RegistrationFound: Boolean;
+begin
+  Result := False;
+  if not TryParseState(RecoveryRoot, Entries, TransactionId, OldManifestHash,
+    IncomingManifestHash, IncomingHashesHash, PriorRegistrationHash,
+    PriorUninsExeMeta, PriorUninsDatMeta, PriorDigest) then exit;
+  if (not ValidateCanonicalIncomingMetadata) or
+     (not VerifyIncomingCommittedPayload(RecoveryRoot, IncomingManifestHash, IncomingHashesHash)) or
+     (not CurrentUninstallerMeta('unins000.exe', ExeMeta)) or
+     (not CurrentUninstallerMeta('unins000.dat', DatMeta)) then exit;
+  CurrentDigest := RegistrationDigest(RegistrationFound);
+  if not RegistrationFound then exit;
+  StateHash := GetSHA256OfFile(RecoveryChild(RecoveryRoot, 'state.txt'));
+  SetArrayLength(Lines, 10);
+  Lines[0] := AMMAR_COMMIT_MAGIC; Lines[1] := 'APPID|' + AMMAR_APP_ID;
+  Lines[2] := 'ROOT|' + AppRoot; Lines[3] := 'TXID|' + TransactionId;
+  Lines[4] := 'STATE|' + StateHash; Lines[5] := 'INCOMINGMANIFEST|' + IncomingManifestHash;
+  Lines[6] := 'INCOMINGHASHES|' + IncomingHashesHash; Lines[7] := 'REGISTRATION|' + CurrentDigest;
+  Lines[8] := 'UNINSEXE|' + ExeMeta; Lines[9] := 'UNINSDAT|' + DatMeta;
+  AtomicWriteLines(RecoveryChild(RecoveryRoot, 'committed.txt'), Lines);
+  MarkerHash := GetSHA256OfFile(RecoveryChild(RecoveryRoot, 'committed.txt'));
+  AtomicWriteText(RecoveryChild(RecoveryRoot, 'committed.sha256'), MarkerHash);
+  Result := ValidateCommittedMarker(RecoveryRoot);
+end;
+
 function ClassifyActiveTransaction(const RecoveryRoot: String): Integer;
 var
   Entries: TPayloadEntries;
-  TransactionId, OldManifestHash, IncomingManifestHash, IncomingHashesHash, RegistrationHash: String;
-  CurrentRegistrationHash: String;
-  RegistrationFound: Boolean;
+  TransactionId, OldManifestHash, IncomingManifestHash, IncomingHashesHash,
+  PriorRegistrationHash, PriorUninsExeMeta, PriorUninsDatMeta, RegistrationHash: String;
 begin
   Result := AMMAR_TX_INVALID;
   if (not IsExactRecoveryRootSafe(RecoveryRoot)) or
      (not TryParseState(RecoveryRoot, Entries, TransactionId, OldManifestHash,
-       IncomingManifestHash, IncomingHashesHash, RegistrationHash)) then exit;
-  CurrentRegistrationHash := RegistrationDigest(RegistrationFound);
-  if CompareText(CurrentRegistrationHash, RegistrationHash) = 0 then begin Result := AMMAR_TX_PRIOR; exit; end;
-  if ValidateCanonicalIncomingMetadata and
-     VerifyIncomingCommittedPayload(RecoveryRoot, IncomingManifestHash, IncomingHashesHash) then
-    Result := AMMAR_TX_INCOMING;
+       IncomingManifestHash, IncomingHashesHash, PriorRegistrationHash,
+       PriorUninsExeMeta, PriorUninsDatMeta, RegistrationHash)) then exit;
+  if FileExists(RecoveryChild(RecoveryRoot, 'committed.txt')) or
+     FileExists(RecoveryChild(RecoveryRoot, 'committed.sha256')) then
+  begin
+    if ValidateCommittedMarker(RecoveryRoot) then Result := AMMAR_TX_INCOMING;
+  end
+  else Result := AMMAR_TX_PRIOR;
 end;
 
 procedure SetRecoveryPhase(const RecoveryRoot, Phase, TransactionId, StateHash: String);
@@ -568,7 +976,8 @@ begin
   AtomicWriteText(RecoveryChild(RecoveryRoot, 'phase.txt'), Phase + '|' + TransactionId + '|' + StateHash);
 end;
 
-function VerifyRestoredPayload(const Entries: TPayloadEntries; const OldManifestHash, RegistrationHash: String): Boolean;
+function VerifyRestoredPayload(const RecoveryRoot: String; const Entries: TPayloadEntries;
+  const OldManifestHash, RegistrationHash, PriorRegistrationHash: String): Boolean;
 var
   Index: Integer;
   InstalledPath, CurrentRegistrationHash, ActualSizeText: String;
@@ -593,28 +1002,62 @@ begin
   end
   else if (not FileExists(AddBackslash(AppRoot) + AMMAR_MANIFEST_NAME)) or
           (CompareText(GetSHA256OfFile(AddBackslash(AppRoot) + AMMAR_MANIFEST_NAME), OldManifestHash) <> 0) then exit;
-  CurrentRegistrationHash := RegistrationDigest(RegistrationFound);
-  if CompareText(CurrentRegistrationHash, RegistrationHash) <> 0 then exit;
+  if UninstallUsesPriorProof then
+  begin
+    if not VerifyPriorRegistration(RecoveryRoot, PriorRegistrationHash) then exit;
+  end
+  else
+  begin
+    CurrentRegistrationHash := RegistrationDigest(RegistrationFound);
+    if CompareText(CurrentRegistrationHash, RegistrationHash) <> 0 then exit;
+  end;
   Result := True;
 end;
 
 function RestoreActiveTransaction(const RecoveryRoot: String): Boolean;
 var
   Entries: TPayloadEntries;
-  TransactionId, OldManifestHash, IncomingManifestHash, IncomingHashesHash, RegistrationHash: String;
-  InstalledPath, BackupPath, StateHash: String;
+  TransactionId, OldManifestHash, IncomingManifestHash, IncomingHashesHash,
+  PriorRegistrationHash, PriorUninsExeMeta, PriorUninsDatMeta, RegistrationHash: String;
+  InstalledPath, BackupPath, StateHash, RestoredExeMeta, RestoredDatMeta: String;
   Index: Integer;
 begin
   Result := False;
   if (not IsExactRecoveryRootSafe(RecoveryRoot)) or
      (ClassifyActiveTransaction(RecoveryRoot) <> AMMAR_TX_PRIOR) or
      (not TryParseState(RecoveryRoot, Entries, TransactionId, OldManifestHash,
-       IncomingManifestHash, IncomingHashesHash, RegistrationHash)) then
+       IncomingManifestHash, IncomingHashesHash, PriorRegistrationHash,
+       PriorUninsExeMeta, PriorUninsDatMeta, RegistrationHash)) then
   begin
     Log('ERROR: Durable recovery transaction is invalid; payload was not touched.');
     exit;
   end;
   StateHash := GetSHA256OfFile(RecoveryChild(RecoveryRoot, 'state.txt'));
+  if UninstallUsesPriorProof then
+  begin
+    if not ValidatePriorUninstallerProof(RecoveryRoot) then exit;
+  end
+  else if PriorUninsExeMeta <> 'NONE' then
+  begin
+    if (not CurrentUninstallerMeta('unins000.exe', RestoredExeMeta)) or
+       (not CurrentUninstallerMeta('unins000.dat', RestoredDatMeta)) or
+       (CompareText(RestoredExeMeta, PriorUninsExeMeta) <> 0) or
+       (CompareText(RestoredDatMeta, PriorUninsDatMeta) <> 0) then
+    begin
+      if FileExists(AddBackslash(AppRoot) + 'unins000.exe') and
+         (not DeleteFile(AddBackslash(AppRoot) + 'unins000.exe')) then exit;
+      if FileExists(AddBackslash(AppRoot) + 'unins000.dat') and
+         (not DeleteFile(AddBackslash(AppRoot) + 'unins000.dat')) then exit;
+      if (not CopyFile(RecoveryChild(RecoveryRoot, 'prior-unins.exe'), AddBackslash(AppRoot) + 'unins000.exe', False)) or
+         (not CopyFile(RecoveryChild(RecoveryRoot, 'prior-unins.dat'), AddBackslash(AppRoot) + 'unins000.dat', False)) then exit;
+    end;
+    if (not CurrentUninstallerMeta('unins000.exe', RestoredExeMeta)) or
+       (not CurrentUninstallerMeta('unins000.dat', RestoredDatMeta)) or
+       (CompareText(RestoredExeMeta, PriorUninsExeMeta) <> 0) or
+       (CompareText(RestoredDatMeta, PriorUninsDatMeta) <> 0) or
+       (not WritePriorUninstallerProof(RecoveryRoot)) then exit;
+    Log('Durable restore: prior uninstaller proof committed.');
+  end;
   for Index := 0 to GetArrayLength(Entries) - 1 do
   begin
     InstalledPath := AddBackslash(AppRoot) + Entries[Index].RelativePath;
@@ -640,8 +1083,32 @@ begin
       if FileExists(InstalledPath) and (not DeleteFile(InstalledPath)) then exit;
     end;
   end;
-  if not VerifyRestoredPayload(Entries, OldManifestHash, RegistrationHash) then
+  Log('Durable restore: product payload restored.');
+  if (not UninstallUsesPriorProof) and (PriorUninsExeMeta = 'NONE') then
   begin
+    if FileExists(AddBackslash(AppRoot) + 'unins000.exe') and
+       (not DeleteFile(AddBackslash(AppRoot) + 'unins000.exe')) then exit;
+    if FileExists(AddBackslash(AppRoot) + 'unins000.dat') and
+       (not DeleteFile(AddBackslash(AppRoot) + 'unins000.dat')) then exit;
+  end;
+  Log('Durable restore: prior uninstaller metadata available.');
+  if not RestorePriorRegistration(RecoveryRoot, PriorRegistrationHash) then
+  begin Log('ERROR: Durable restore could not restore prior registration.'); exit; end;
+  if PriorUninsExeMeta = 'NONE' then
+  begin
+    if FileExists(AddBackslash(AppRoot) + 'unins000.exe') or
+       FileExists(AddBackslash(AppRoot) + 'unins000.dat') then exit;
+  end
+  else if (not UninstallUsesPriorProof) and
+          ((not CurrentUninstallerMeta('unins000.exe', RestoredExeMeta)) or
+          (not CurrentUninstallerMeta('unins000.dat', RestoredDatMeta)) or
+          (CompareText(RestoredExeMeta, PriorUninsExeMeta) <> 0) or
+          (CompareText(RestoredDatMeta, PriorUninsDatMeta) <> 0)) then exit;
+  Log('Durable restore: prior installer metadata restored.');
+  if not VerifyRestoredPayload(RecoveryRoot, Entries, OldManifestHash, RegistrationHash,
+    PriorRegistrationHash) then
+  begin
+    Log('ERROR: Durable restore final payload or registration verification failed.');
     SetRecoveryPhase(RecoveryRoot, 'INCOMPLETE', TransactionId, StateHash);
     exit;
   end;
@@ -654,13 +1121,15 @@ function CleanupVerifiedRecovery(const RecoveryRoot: String): Boolean; forward;
 function FinalizeIncomingTransaction(const RecoveryRoot: String): Boolean;
 var
   Entries: TPayloadEntries;
-  TransactionId, OldManifestHash, IncomingManifestHash, IncomingHashesHash, RegistrationHash: String;
+  TransactionId, OldManifestHash, IncomingManifestHash, IncomingHashesHash,
+  PriorRegistrationHash, PriorUninsExeMeta, PriorUninsDatMeta, RegistrationHash: String;
   StateHash, VerifiedRoot: String;
 begin
   Result := False;
   if ClassifyActiveTransaction(RecoveryRoot) <> AMMAR_TX_INCOMING then exit;
   if not TryParseState(RecoveryRoot, Entries, TransactionId, OldManifestHash,
-    IncomingManifestHash, IncomingHashesHash, RegistrationHash) then exit;
+    IncomingManifestHash, IncomingHashesHash, PriorRegistrationHash,
+    PriorUninsExeMeta, PriorUninsDatMeta, RegistrationHash) then exit;
   StateHash := GetSHA256OfFile(RecoveryChild(RecoveryRoot, 'state.txt'));
   SetRecoveryPhase(RecoveryRoot, 'VERIFIED', TransactionId, StateHash);
   VerifiedRoot := AddBackslash(AppRoot) + AMMAR_RECOVERY_VERIFIED;
@@ -727,7 +1196,9 @@ var
   PayloadPaths, StateLines: TArrayOfString;
   Index, TransactionRandom: Integer;
   RelativePath, InstalledPath, BackupPath, BuildingRoot, OldManifestPath: String;
-  TransactionId, OldManifestHash, IncomingManifestHash, IncomingHashesHash, RegistrationHash, StateHash, BackupSizeText: String;
+  TransactionId, OldManifestHash, IncomingManifestHash, IncomingHashesHash,
+  PriorRegistrationHash, PriorUninsExeMeta, PriorUninsDatMeta,
+  RegistrationHash, StateHash, BackupSizeText, UninsSizeText: String;
   RegistrationFound: Boolean;
 begin
   SetArrayLength(PayloadPaths, 0);
@@ -760,6 +1231,24 @@ begin
   IncomingHashesHash := GetSHA256OfFile(RecoveryChild(BuildingRoot, 'incoming-hashes.txt'));
   Log('Durable snapshot: incoming manifest preserved.');
   RegistrationHash := RegistrationDigest(RegistrationFound);
+  SnapshotPriorRegistration(BuildingRoot, PriorRegistrationHash);
+  if FileExists(AddBackslash(AppRoot) + 'unins000.exe') or FileExists(AddBackslash(AppRoot) + 'unins000.dat') then
+  begin
+    if (not FileExists(AddBackslash(AppRoot) + 'unins000.exe')) or
+       (not FileExists(AddBackslash(AppRoot) + 'unins000.dat')) or
+       IsReparsePath(AddBackslash(AppRoot) + 'unins000.exe') or
+       IsReparsePath(AddBackslash(AppRoot) + 'unins000.dat') or
+       (not CopyFile(AddBackslash(AppRoot) + 'unins000.exe', RecoveryChild(BuildingRoot, 'prior-unins.exe'), False)) or
+       (not CopyFile(AddBackslash(AppRoot) + 'unins000.dat', RecoveryChild(BuildingRoot, 'prior-unins.dat'), False)) then
+      RaiseException('Setup could not snapshot prior installer metadata.');
+    if not TryGetFileSizeText(RecoveryChild(BuildingRoot, 'prior-unins.exe'), UninsSizeText) then
+      RaiseException('Setup could not measure prior installer metadata.');
+    PriorUninsExeMeta := UninsSizeText + '|' + GetSHA256OfFile(RecoveryChild(BuildingRoot, 'prior-unins.exe'));
+    if not TryGetFileSizeText(RecoveryChild(BuildingRoot, 'prior-unins.dat'), UninsSizeText) then
+      RaiseException('Setup could not measure prior installer metadata.');
+    PriorUninsDatMeta := UninsSizeText + '|' + GetSHA256OfFile(RecoveryChild(BuildingRoot, 'prior-unins.dat'));
+  end
+  else begin PriorUninsExeMeta := 'NONE'; PriorUninsDatMeta := 'NONE'; end;
   Log('Durable snapshot: registration bound.');
   TransactionRandom := Random(1000000000);
   Log('Durable snapshot: random suffix created.');
@@ -767,7 +1256,7 @@ begin
   TransactionRandom := Random(1000000000);
   TransactionId := TransactionId + '-' + IntToStr(TransactionRandom);
   Log('Durable snapshot: transaction identifier created.');
-  SetArrayLength(StateLines, GetArrayLength(PayloadPaths) + 9);
+  SetArrayLength(StateLines, GetArrayLength(PayloadPaths) + 12);
   Log('Durable snapshot: state allocated.');
   StateLines[0] := AMMAR_STATE_MAGIC;
   StateLines[1] := 'APPID|' + AMMAR_APP_ID;
@@ -776,8 +1265,11 @@ begin
   StateLines[4] := 'OLDMANIFEST|' + OldManifestHash;
   StateLines[5] := 'INCOMINGMANIFEST|' + IncomingManifestHash;
   StateLines[6] := 'INCOMINGHASHES|' + IncomingHashesHash;
-  StateLines[7] := 'REGISTRATION|' + RegistrationHash;
-  StateLines[8] := 'COUNT|' + IntToStr(GetArrayLength(PayloadPaths));
+  StateLines[7] := 'PRIORREGISTRATION|' + PriorRegistrationHash;
+  StateLines[8] := 'PRIORUNINSEXE|' + PriorUninsExeMeta;
+  StateLines[9] := 'PRIORUNINSDAT|' + PriorUninsDatMeta;
+  StateLines[10] := 'REGISTRATION|' + RegistrationHash;
+  StateLines[11] := 'COUNT|' + IntToStr(GetArrayLength(PayloadPaths));
   for Index := 0 to GetArrayLength(PayloadPaths) - 1 do
   begin
     RelativePath := PayloadPaths[Index];
@@ -795,10 +1287,10 @@ begin
         RaiseException('Setup could not snapshot the existing product payload. The installation was not changed.');
       if not TryGetFileSizeText(BackupPath, BackupSizeText) then
         RaiseException('Setup could not measure the durable payload backup.');
-      StateLines[Index + 9] := 'E|' + RelativePath + '|' + BackupSizeText + '|' + GetSHA256OfFile(BackupPath);
+      StateLines[Index + 12] := 'E|' + RelativePath + '|' + BackupSizeText + '|' + GetSHA256OfFile(BackupPath);
     end
     else
-      StateLines[Index + 9] := 'M|' + RelativePath;
+      StateLines[Index + 12] := 'M|' + RelativePath;
   end;
   AtomicWriteLines(RecoveryChild(BuildingRoot, 'state.txt'), StateLines);
   StateHash := GetSHA256OfFile(RecoveryChild(BuildingRoot, 'state.txt'));
@@ -854,6 +1346,8 @@ begin
   CommitFailureExitCode := 0;
   SnapshotReady := False;
   RecoveryFailure := False;
+  InsideUninstaller := False;
+  UninstallUsesPriorProof := False;
   if not ValidateProtectedAppRoot then
   begin
     Result := 'AmmarTrading Sync must be installed beneath the machine Program Files directory without reparse points.';
@@ -866,32 +1360,61 @@ begin
   if (Result = '') and (ExpandConstant('{param:TASK9MODE|}') = 'recoveryonly') then
     Result := 'Task 9 recovery-only test stopped before payload mutation.';
 #endif
+  if Result <> '' then exit;
+  ExtractTemporaryFile('IncomingPayloadHashes.txt');
+  ExtractTemporaryFile('IncomingPayloadManifest.txt');
+  SnapshotProductPayload;
 end;
 
 procedure CurStepChanged(CurStep: TSetupStep);
-#ifdef AcceptanceFaultInjection
 var Index: Integer;
-#endif
 begin
   if CurStep = ssPostInstall then
   begin
+#ifdef AcceptanceFaultInjection
+      if SnapshotReady and DirExists(ActiveRecoveryRoot) and
+         (ExpandConstant('{param:TASK9MODE|}') = 'premarkercrash') then
+      begin
+        AtomicWriteText(RecoveryChild(ActiveRecoveryRoot, 'premarker-ready'), 'ready');
+        for Index := 1 to 720 do Sleep(250);
+      end;
+#endif
+  end
+  else if CurStep = ssDone then
+  begin
     if SnapshotReady and DirExists(ActiveRecoveryRoot) then
     begin
-#ifdef AcceptanceFaultInjection
-      if ExpandConstant('{param:TASK9MODE|}') = 'incomingcompletecrash' then
+      if not RemoveObsoleteProductPayload(ActiveRecoveryRoot) then
       begin
-        AtomicWriteText(RecoveryChild(ActiveRecoveryRoot, 'incoming-complete-ready'), 'ready');
+        CommitFailed := True;
+        CommitFailureExitCode := 75;
+        exit;
+      end;
+      if not WriteCommittedMarker(ActiveRecoveryRoot) then
+      begin
+        CommitFailed := True;
+        CommitFailureExitCode := 75;
+        exit;
+      end;
+#ifdef AcceptanceFaultInjection
+      if ExpandConstant('{param:TASK9MODE|}') = 'postmarkercrash' then
+      begin
+        AtomicWriteText(RecoveryChild(ActiveRecoveryRoot, 'postmarker-ready'), 'ready');
         for Index := 1 to 720 do Sleep(250);
       end;
 #endif
       if not FinalizeIncomingTransaction(ActiveRecoveryRoot) then
       begin
         CommitFailed := True;
-        CommitFailureExitCode := 75;
-        RaiseException('The installed payload could not be committed safely; durable recovery was retained.');
+        CommitFailureExitCode := 76;
+        exit;
       end;
     end;
     InstallationCompleted := True;
+    if (not CommitFailed) and (LaunchAfterCommitCheckbox <> nil) and
+       LaunchAfterCommitCheckbox.Checked and (not WizardSilent) then
+      ExecAsOriginalUser(AddBackslash(AppRoot) + '{#ProductExe}', '', AppRoot,
+        SW_SHOWNORMAL, ewNoWait, Index);
   end;
 end;
 
@@ -900,9 +1423,15 @@ begin
   Result := CommitFailureExitCode;
 end;
 
-function CanLaunchApplication: Boolean;
+procedure InitializeWizard;
 begin
-  Result := not CommitFailed;
+  LaunchAfterCommitCheckbox := TNewCheckBox.Create(WizardForm);
+  LaunchAfterCommitCheckbox.Parent := WizardForm.FinishedPage;
+  LaunchAfterCommitCheckbox.Caption := 'Launch AmmarTrading Sync';
+  LaunchAfterCommitCheckbox.Checked := True;
+  LaunchAfterCommitCheckbox.Left := 0;
+  LaunchAfterCommitCheckbox.Top := WizardForm.FinishedLabel.Top + WizardForm.FinishedLabel.Height + ScaleY(16);
+  LaunchAfterCommitCheckbox.Width := WizardForm.FinishedPage.ClientWidth;
 end;
 
 procedure DeinitializeSetup;
@@ -932,7 +1461,8 @@ end;
 function ShouldInstallFaultCollision: Boolean;
 begin
 #ifdef AcceptanceFaultInjection
-  Result := ExpandConstant('{param:TASK9MODE|}') <> 'incomingcompletecrash';
+  Result := (ExpandConstant('{param:TASK9MODE|}') <> 'premarkercrash') and
+            (ExpandConstant('{param:TASK9MODE|}') <> 'postmarkercrash');
 #else
   Result := False;
 #endif
@@ -959,6 +1489,8 @@ function InitializeUninstall: Boolean;
 var BuildingRoot, VerifiedRoot: String;
 begin
   Result := False;
+  InsideUninstaller := True;
+  UninstallUsesPriorProof := False;
   if not ValidateProtectedAppRoot then exit;
   BuildingRoot := AddBackslash(AppRoot) + AMMAR_RECOVERY_BUILDING;
   ActiveRecoveryRoot := AddBackslash(AppRoot) + AMMAR_RECOVERY_ACTIVE;
@@ -969,10 +1501,23 @@ begin
     exit;
   end;
   if DirExists(VerifiedRoot) and (not CleanupVerifiedRecovery(VerifiedRoot)) then exit;
-  if DirExists(ActiveRecoveryRoot) and (not ResolveActiveTransaction(ActiveRecoveryRoot)) then
+  if DirExists(ActiveRecoveryRoot) then
   begin
-    Log('ERROR: Uninstall blocked by invalid durable recovery state; payload and registration were preserved.');
-    exit;
+    if (ClassifyActiveTransaction(ActiveRecoveryRoot) = AMMAR_TX_PRIOR) then
+    begin
+      if not ValidatePriorUninstallerProof(ActiveRecoveryRoot) then
+      begin
+        Log('ERROR: Uninstall blocked: run AmmarTrading Sync setup once to repair the ACTIVE transaction and verify prior uninstaller bytes.');
+        exit;
+      end;
+      UninstallUsesPriorProof := True;
+    end;
+    if not ResolveActiveTransaction(ActiveRecoveryRoot) then
+    begin
+      Log('ERROR: Uninstall blocked by invalid durable recovery state; payload and registration were preserved.');
+      exit;
+    end;
   end;
+  Log('Durable prior payload and incoming-only paths verified before uninstall.');
   Result := True;
 end;

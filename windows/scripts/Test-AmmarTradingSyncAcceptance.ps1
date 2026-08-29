@@ -238,6 +238,7 @@ $crashLog = Assert-SafeAcceptancePath -Path (Join-Path $acceptanceRoot 'crash.lo
 $uninstallLog = Assert-SafeAcceptancePath -Path (Join-Path $acceptanceRoot 'uninstall.log') -AcceptanceRoot $acceptanceRoot
 $webViewFailureLog = Assert-SafeAcceptancePath -Path (Join-Path $acceptanceRoot 'webview-preflight-failure.log') -AcceptanceRoot $acceptanceRoot
 $incomingCompleteLog = Assert-SafeAcceptancePath -Path (Join-Path $acceptanceRoot 'incoming-complete-crash.log') -AcceptanceRoot $acceptanceRoot
+$postMarkerLog = Assert-SafeAcceptancePath -Path (Join-Path $acceptanceRoot 'post-marker-crash.log') -AcceptanceRoot $acceptanceRoot
 
 $runtimeRoot = Join-Path $env:LOCALAPPDATA 'AmmarTrading\Sync'
 $runtimeExisted = Test-Path -LiteralPath $runtimeRoot -PathType Container
@@ -328,6 +329,9 @@ try {
         if($priorPayloadHashes[$relativePath] -ceq $expectedFaultProbeHash) { throw "Fault probe hash unexpectedly matches a production payload file: $relativePath" }
     }
     $priorEntry = Assert-ExactUninstallEntry -ExpectedInstallRoot $installRoot
+    $priorDisplayVersion = [string]$priorEntry.DisplayVersion
+    $priorUninsExeHash = (Get-FileHash -LiteralPath (Join-Path $installRoot 'unins000.exe') -Algorithm SHA256).Hash
+    $priorUninsDatHash = (Get-FileHash -LiteralPath (Join-Path $installRoot 'unins000.dat') -Algorithm SHA256).Hash
     $incomingOnlyPath = Assert-SafeProtectedInstallPath -Path (Join-Path $installRoot 'Assets\Web\Task9IncomingOnly.bin')
     if((Test-Path -LiteralPath $incomingOnlyPath) -or (Test-Path -LiteralPath (Join-Path $installRoot 'Task9UpgradeFault.blocked'))) {
         throw 'Production installation contains an acceptance-only rollback seam.'
@@ -412,11 +416,11 @@ try {
     Assert-ExactUninstallEntry -ExpectedInstallRoot $installRoot | Out-Null
     if(-not (Test-Path -LiteralPath $runtimeSentinel) -or -not (Test-Path -LiteralPath $oneDriveSentinel) -or $null -eq (Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue)) { throw 'Recovery tests removed preserved state.' }
 
-    # Kill at ssPostInstall after payload and exact uninstall metadata are incoming-complete.
-    # The next setup must finalize that transaction without restoring the prior payload.
-    $incomingCompleteArguments = @('/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART','/SP-',"/DIR=`"$installRoot`"",'/TASK9MODE=incomingcompletecrash',"/LOG=`"$incomingCompleteLog`"")
+    # Kill after version-changing metadata was written but before the ssDone COMMITTED marker.
+    # No marker means rollback of payload, exact AppId metadata, and finalized uninstaller files.
+    $incomingCompleteArguments = @('/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART','/SP-',"/DIR=`"$installRoot`"",'/TASK9MODE=premarkercrash',"/LOG=`"$incomingCompleteLog`"")
     $incomingCompleteProcess = Start-Process -FilePath $resolvedFaultInstaller -ArgumentList $incomingCompleteArguments -PassThru
-    $incomingCompleteReady = Assert-SafeProtectedInstallPath -Path (Join-Path $activeRecovery 'incoming-complete-ready')
+    $incomingCompleteReady = Assert-SafeProtectedInstallPath -Path (Join-Path $activeRecovery 'premarker-ready')
     $incomingCompleteDeadline = [DateTime]::UtcNow.AddSeconds(45)
     while(-not (Test-Path -LiteralPath $incomingCompleteReady -PathType Leaf) -and -not $incomingCompleteProcess.HasExited -and [DateTime]::UtcNow -lt $incomingCompleteDeadline) {
         Start-Sleep -Milliseconds 250
@@ -424,26 +428,48 @@ try {
     }
     if(-not (Test-Path -LiteralPath $incomingCompleteReady -PathType Leaf)) {
         if(-not $incomingCompleteProcess.HasExited) { & "$env:SystemRoot\System32\taskkill.exe" /PID $incomingCompleteProcess.Id /T /F | Out-Null }
-        throw 'Fault installer did not reach incoming-complete commit boundary.'
+        throw 'Fault installer did not reach the pre-marker metadata boundary.'
     }
     & "$env:SystemRoot\System32\taskkill.exe" /PID $incomingCompleteProcess.Id /T /F | Out-Null
     [void]$incomingCompleteProcess.WaitForExit(10000)
-    if(-not (Test-Path -LiteralPath $activeRecovery -PathType Container)) { throw 'Incoming-complete crash did not retain ACTIVE state.' }
+    if(-not (Test-Path -LiteralPath $activeRecovery -PathType Container)) { throw 'Pre-marker crash did not retain ACTIVE state.' }
     if(-not (Test-Path -LiteralPath $incomingOnlyPath -PathType Leaf) -or
        (Get-FileHash -LiteralPath $installedExe -Algorithm SHA256).Hash.ToLowerInvariant() -cne $expectedFaultProbeHash) {
-        throw 'Incoming-complete crash did not install the distinguishable incoming payload.'
+        throw 'Pre-marker crash did not install the distinguishable incoming payload.'
     }
+    if([string](Assert-ExactUninstallEntry -ExpectedInstallRoot $installRoot).DisplayVersion -cne '9.9.9') { throw 'Fault installer did not create genuinely version-changing metadata.' }
     $incomingRecoveryExit = Invoke-BoundedProcess -FilePath $resolvedFaultInstaller -ArgumentList @('/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART','/SP-',"/DIR=`"$installRoot`"",'/TASK9MODE=recoveryonly')
-    if($incomingRecoveryExit -eq 0) { throw 'Incoming-complete recovery-only test unexpectedly continued into installation.' }
-    if(Test-Path -LiteralPath $activeRecovery) { throw 'Incoming-complete recovery did not finalize ACTIVE state.' }
-    if(-not (Test-Path -LiteralPath $incomingOnlyPath -PathType Leaf) -or
-       (Get-FileHash -LiteralPath $installedExe -Algorithm SHA256).Hash.ToLowerInvariant() -cne $expectedFaultProbeHash) {
-        throw 'Incoming-complete recovery restored the prior payload.'
+    if($incomingRecoveryExit -eq 0) { throw 'Pre-marker recovery-only test unexpectedly continued into installation.' }
+    if(Test-Path -LiteralPath $activeRecovery) { throw 'Pre-marker recovery did not clear ACTIVE state.' }
+    $preMarkerRestored = Get-InstalledPayloadHashes -InstallRoot $installRoot
+    Assert-ProductPathStateEqual -Expected $priorPayloadHashes -Actual $preMarkerRestored -Message 'Pre-marker recovery did not restore the prior payload.'
+    if(Test-Path -LiteralPath $incomingOnlyPath) { throw 'Pre-marker recovery did not remove the incoming-only path.' }
+    $preMarkerEntry = Assert-ExactUninstallEntry -ExpectedInstallRoot $installRoot
+    if([string]$preMarkerEntry.DisplayVersion -cne $priorDisplayVersion -or
+       (Get-FileHash -LiteralPath (Join-Path $installRoot 'unins000.exe') -Algorithm SHA256).Hash -cne $priorUninsExeHash -or
+       (Get-FileHash -LiteralPath (Join-Path $installRoot 'unins000.dat') -Algorithm SHA256).Hash -cne $priorUninsDatHash) {
+        throw 'Pre-marker recovery did not restore prior uninstall metadata.'
     }
-    Assert-ExactUninstallEntry -ExpectedInstallRoot $installRoot | Out-Null
+
+    # Kill after the exact finalized marker is durable but before verified cleanup.
+    # The next run must finalize incoming 9.9.9 without rollback.
+    $postMarkerArguments = @('/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART','/SP-',"/DIR=`"$installRoot`"",'/TASK9MODE=postmarkercrash',"/LOG=`"$postMarkerLog`"")
+    $postMarkerProcess = Start-Process -FilePath $resolvedFaultInstaller -ArgumentList $postMarkerArguments -PassThru
+    $postMarkerReady = Assert-SafeProtectedInstallPath -Path (Join-Path $activeRecovery 'postmarker-ready')
+    $postMarkerDeadline = [DateTime]::UtcNow.AddSeconds(45)
+    while(-not (Test-Path -LiteralPath $postMarkerReady -PathType Leaf) -and -not $postMarkerProcess.HasExited -and [DateTime]::UtcNow -lt $postMarkerDeadline) { Start-Sleep -Milliseconds 250; $postMarkerProcess.Refresh() }
+    if(-not (Test-Path -LiteralPath $postMarkerReady -PathType Leaf)) { if(-not $postMarkerProcess.HasExited){& "$env:SystemRoot\System32\taskkill.exe" /PID $postMarkerProcess.Id /T /F|Out-Null}; throw 'Fault installer did not reach the post-marker boundary.' }
+    & "$env:SystemRoot\System32\taskkill.exe" /PID $postMarkerProcess.Id /T /F | Out-Null
+    [void]$postMarkerProcess.WaitForExit(10000)
+    $postMarkerRecoveryExit = Invoke-BoundedProcess -FilePath $resolvedFaultInstaller -ArgumentList @('/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART','/SP-',"/DIR=`"$installRoot`"",'/TASK9MODE=recoveryonly')
+    if($postMarkerRecoveryExit -eq 0) { throw 'Post-marker recovery-only test unexpectedly continued.' }
+    if(Test-Path -LiteralPath $activeRecovery) { throw 'Post-marker recovery did not finalize ACTIVE state.' }
+    if(-not (Test-Path -LiteralPath $incomingOnlyPath) -or (Get-FileHash $installedExe -Algorithm SHA256).Hash.ToLowerInvariant() -cne $expectedFaultProbeHash) { throw 'Post-marker recovery restored the prior payload.' }
+    if([string](Assert-ExactUninstallEntry -ExpectedInstallRoot $installRoot).DisplayVersion -cne '9.9.9') { throw 'Post-marker recovery changed finalized incoming metadata.' }
 
     Invoke-CheckedProcess -FilePath $resolvedInstaller -ArgumentList @('/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART','/SP-',"/DIR=`"$installRoot`"",'/TASKS=desktopicon',"/LOG=`"$upgradeLog`"")
     if(-not (Test-Path -LiteralPath $runtimeSentinel) -or -not (Test-Path -LiteralPath $oneDriveSentinel) -or $null -eq (Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue)) { throw 'Successful upgrade removed preserved state.' }
+    if(Test-Path -LiteralPath $incomingOnlyPath) { throw 'Successful upgrade retained an obsolete manifest-owned path.' }
     Assert-ExactUninstallEntry -ExpectedInstallRoot $installRoot | Out-Null
 
     # Uninstall must use the same classifier: corrupt ACTIVE state blocks with zero payload
@@ -463,19 +489,39 @@ try {
     & "$env:SystemRoot\System32\taskkill.exe" /PID $uninstallCrashProcess.Id /T /F | Out-Null
     [void]$uninstallCrashProcess.WaitForExit(10000)
     Remove-Item -LiteralPath $faultCollision -Force
-    $uninstallStateHashPath = Assert-SafeProtectedInstallPath -Path (Join-Path $activeRecovery 'state.sha256')
-    $uninstallGoodHashBytes = [IO.File]::ReadAllBytes($uninstallStateHashPath)
-    $uninstallCorruptState = Get-ProductPathState -InstallRoot $installRoot -RelativePaths $unionRelativePaths
-    [IO.File]::WriteAllText($uninstallStateHashPath,'corrupt',(New-Object Text.UTF8Encoding($false)))
+    if(-not (Test-Path -LiteralPath $incomingOnlyPath -PathType Leaf)) { throw 'Uninstall guard crash did not create the incoming-only path.' }
+    foreach($relativePath in $priorToUninstallCrash.Keys) {
+        if($relativePath -in $distinguishablePayloadTargets -and
+           (Get-FileHash -LiteralPath (Join-Path $installRoot $relativePath) -Algorithm SHA256).Hash.ToLowerInvariant() -ceq $priorToUninstallCrash[$relativePath]) {
+            throw "Uninstall guard crash did not replace prior evidence: $relativePath"
+        }
+    }
     $uninstaller = Assert-SafeProtectedInstallPath -Path (Join-Path $installRoot 'unins000.exe')
-    $corruptUninstallExit = Invoke-BoundedProcess -FilePath $uninstaller -ArgumentList @('/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART')
-    if($corruptUninstallExit -eq 0) { throw 'Corrupt active transaction uninstall unexpectedly succeeded.' }
+    $noProofState = Get-ProductPathState -InstallRoot $installRoot -RelativePaths $unionRelativePaths
+    $noProofExit = Invoke-BoundedProcess -FilePath $uninstaller -ArgumentList @('/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART')
+    if($noProofExit -eq 0) { throw 'ACTIVE uninstall without prior-uninstaller proof unexpectedly succeeded.' }
     Assert-ExactUninstallEntry -ExpectedInstallRoot $installRoot | Out-Null
-    if(-not (Test-Path -LiteralPath $activeRecovery -PathType Container)) { throw 'Corrupt active transaction uninstall removed recovery evidence.' }
+    $afterNoProof = Get-ProductPathState -InstallRoot $installRoot -RelativePaths $unionRelativePaths
+    Assert-ProductPathStateEqual -Expected $noProofState -Actual $afterNoProof -Message 'No-proof ACTIVE uninstall mutated product payload.'
+
+    $proofRecoveryExit = Invoke-BoundedProcess -FilePath $resolvedFaultInstaller -ArgumentList @('/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART','/SP-',"/DIR=`"$installRoot`"",'/TASK9MODE=restorefail')
+    if($proofRecoveryExit -eq 0) { throw 'Proof-producing injected restore failure unexpectedly succeeded.' }
+    $proofPath = Assert-SafeProtectedInstallPath -Path (Join-Path $activeRecovery 'prior-uninstaller-verified.txt')
+    $proofHashPath = Assert-SafeProtectedInstallPath -Path (Join-Path $activeRecovery 'prior-uninstaller-verified.sha256')
+    if(-not (Test-Path -LiteralPath $proofPath -PathType Leaf) -or -not (Test-Path -LiteralPath $proofHashPath -PathType Leaf)) { throw 'Restore failure did not retain verified prior-uninstaller proof.' }
+    $goodProofHashBytes = [IO.File]::ReadAllBytes($proofHashPath)
+    $proofCorruptState = Get-ProductPathState -InstallRoot $installRoot -RelativePaths $unionRelativePaths
+    [IO.File]::WriteAllText($proofHashPath,'corrupt',(New-Object Text.UTF8Encoding($false)))
+    $corruptUninstallExit = Invoke-BoundedProcess -FilePath $uninstaller -ArgumentList @('/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART')
+    if($corruptUninstallExit -eq 0) { throw 'Corrupt prior-uninstaller proof uninstall unexpectedly succeeded.' }
+    Assert-ExactUninstallEntry -ExpectedInstallRoot $installRoot | Out-Null
     $afterBlockedUninstall = Get-ProductPathState -InstallRoot $installRoot -RelativePaths $unionRelativePaths
-    Assert-ProductPathStateEqual -Expected $uninstallCorruptState -Actual $afterBlockedUninstall -Message 'Corrupt active transaction uninstall mutated product payload.'
-    [IO.File]::WriteAllBytes($uninstallStateHashPath,$uninstallGoodHashBytes)
+    Assert-ProductPathStateEqual -Expected $proofCorruptState -Actual $afterBlockedUninstall -Message 'Corrupt proof uninstall mutated product payload.'
+    [IO.File]::WriteAllBytes($proofHashPath,$goodProofHashBytes)
     Invoke-CheckedProcess -FilePath $uninstaller -ArgumentList @('/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART',"/LOG=`"$uninstallLog`"")
+    $uninstallLogContent = Get-Content -LiteralPath $uninstallLog -Raw
+    if($uninstallLogContent -notmatch 'Durable prior payload and incoming-only paths verified before uninstall') { throw 'Incoming-only path was not verified absent before uninstall.' }
+    if(Test-Path -LiteralPath $incomingOnlyPath) { throw 'Incoming-only path remained after uninstall.' }
     if(Test-Path -LiteralPath $activeRecovery) { throw 'Active transaction uninstall did not recover before removal.' }
     if((Test-Path -LiteralPath $installedExe) -or (Test-Path -LiteralPath $startMenuShortcut) -or (Test-Path -LiteralPath $desktopShortcut) -or @(Get-UninstallEntry).Count) { throw 'Uninstall did not remove product files and registration.' }
     if(-not (Test-Path -LiteralPath $runtimeSentinel) -or -not (Test-Path -LiteralPath $oneDriveSentinel) -or $null -eq (Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue)) { throw 'Uninstall removed preserved state.' }

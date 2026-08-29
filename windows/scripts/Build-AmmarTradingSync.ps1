@@ -297,6 +297,7 @@ Invoke-NativeCommand -FilePath $iscc -ArgumentList @(
 ) -WorkingDirectory $repoRoot
 Invoke-NativeCommand -FilePath $iscc -ArgumentList @(
     '/DAcceptanceFaultInjection=1',
+    '/DFaultProductVersion=9.9.9',
     "/DFaultProbePath=$faultProbePath",
     "/DFaultManifestPath=$faultPayloadManifestPath",
     "/DPayloadHashesPath=$faultPayloadHashesPath",
