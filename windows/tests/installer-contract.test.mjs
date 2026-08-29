@@ -90,7 +90,7 @@ test("failed-upgrade rollback uses a compile-time-only manifest-owned fault payl
 test("durable recovery is Program Files bound, manifest verified, and atomic", () => {
   assert.match(installer, /ValidateProtectedAppRoot/);
   assert.match(installer, /ExpandConstant\('\{autopf\}'\)/);
-  assert.match(installer, /AMMAR_STATE_MAGIC = 'AMMAR_TX_V1'/);
+  assert.match(installer, /AMMAR_STATE_MAGIC = 'AMMAR_TX_V2'/);
   assert.match(installer, /APPID\|/);
   assert.match(installer, /GetSHA256OfFile/);
   assert.match(installer, /RenameFile\(BuildingRoot, ActiveRecoveryRoot\)/);
@@ -113,4 +113,35 @@ test("fault seams require the acceptance-only compile define", () => {
   assert.match(build, /\/DAcceptanceFaultInjection=1/);
   assert.match(build, /FaultManifestPath/);
   assert.match(installer, /#ifdef AcceptanceFaultInjection[\s\S]+TASK9MODE/);
+});
+
+test("recovery classifies prior, committed incoming, and invalid metadata before mutation", () => {
+  assert.match(installer, /function ClassifyActiveTransaction/);
+  assert.match(installer, /AMMAR_TX_PRIOR/);
+  assert.match(installer, /AMMAR_TX_INCOMING/);
+  assert.match(installer, /VerifyIncomingCommittedPayload/);
+  assert.match(installer, /DisplayVersion/);
+  assert.match(installer, /QuietUninstallString/);
+  assert.match(installer, /unins000\.dat/);
+  assert.match(installer, /IncomingPayloadHashes/);
+  assert.match(acceptance, /incomingcompletecrash/);
+  assert.match(acceptance, /Incoming-complete recovery restored the prior payload/);
+});
+
+test("WebView prerequisite completes before snapshot and post-install is the commit boundary", () => {
+  assert.match(installer, /BootstrapperPath\}"; Flags: dontcopy noencryption/);
+  const runSection = installer.slice(installer.indexOf("[Run]"), installer.indexOf("[Code]"));
+  assert.doesNotMatch(runSection, /MicrosoftEdgeWebView2Setup/);
+  assert.match(installer, /function InstallWebViewPrerequisite/);
+  assert.match(installer, /function GetCustomSetupExitCode/);
+  assert.match(installer, /ssPostInstall/);
+  assert.match(installer, /CommitFailed/);
+  assert.match(acceptance, /TASK9MODE=webviewfail/);
+});
+
+test("uninstall uses the same durable transaction classifier and fails closed", () => {
+  assert.match(installer, /function InitializeUninstall/);
+  assert.match(installer, /ClassifyActiveTransaction/);
+  assert.match(acceptance, /Corrupt active transaction uninstall unexpectedly succeeded/);
+  assert.match(acceptance, /Active transaction uninstall did not recover before removal/);
 });

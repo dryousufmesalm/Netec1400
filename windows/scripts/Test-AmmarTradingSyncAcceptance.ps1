@@ -236,6 +236,8 @@ $restoreFailureLog = Assert-SafeAcceptancePath -Path (Join-Path $acceptanceRoot 
 $recoveryLog = Assert-SafeAcceptancePath -Path (Join-Path $acceptanceRoot 'recovery-only.log') -AcceptanceRoot $acceptanceRoot
 $crashLog = Assert-SafeAcceptancePath -Path (Join-Path $acceptanceRoot 'crash.log') -AcceptanceRoot $acceptanceRoot
 $uninstallLog = Assert-SafeAcceptancePath -Path (Join-Path $acceptanceRoot 'uninstall.log') -AcceptanceRoot $acceptanceRoot
+$webViewFailureLog = Assert-SafeAcceptancePath -Path (Join-Path $acceptanceRoot 'webview-preflight-failure.log') -AcceptanceRoot $acceptanceRoot
+$incomingCompleteLog = Assert-SafeAcceptancePath -Path (Join-Path $acceptanceRoot 'incoming-complete-crash.log') -AcceptanceRoot $acceptanceRoot
 
 $runtimeRoot = Join-Path $env:LOCALAPPDATA 'AmmarTrading\Sync'
 $runtimeExisted = Test-Path -LiteralPath $runtimeRoot -PathType Container
@@ -265,6 +267,11 @@ try {
 
     Assert-SafeProtectedInstallPath -Path $installRoot | Out-Null
     $setupAttempted = $true
+    $webViewFailureExit = Invoke-BoundedProcess -FilePath $resolvedFaultInstaller -ArgumentList @('/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART','/SP-',"/DIR=`"$installRoot`"",'/TASK9MODE=webviewfail',"/LOG=`"$webViewFailureLog`"")
+    if($webViewFailureExit -eq 0) { throw 'Injected WebView prerequisite failure unexpectedly succeeded.' }
+    if((Test-Path -LiteralPath (Join-Path $installRoot 'AmmarTrading.Sync.exe')) -or
+       (Test-Path -LiteralPath (Join-Path $installRoot '.ammar-installer-recovery.active')) -or
+       @(Get-UninstallEntry).Count -ne 0) { throw 'WebView prerequisite failure changed product payload, recovery state, or registration.' }
     Invoke-CheckedProcess -FilePath $resolvedInstaller -ArgumentList @('/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART','/SP-',"/DIR=`"$installRoot`"",'/TASKS=desktopicon',"/LOG=`"$setupLog`"")
     $installedExe = Assert-SafeProtectedInstallPath -Path (Join-Path $installRoot 'AmmarTrading.Sync.exe')
     if(-not (Test-Path -LiteralPath $installedExe -PathType Leaf)) { throw 'Desktop executable is missing.' }
@@ -405,12 +412,71 @@ try {
     Assert-ExactUninstallEntry -ExpectedInstallRoot $installRoot | Out-Null
     if(-not (Test-Path -LiteralPath $runtimeSentinel) -or -not (Test-Path -LiteralPath $oneDriveSentinel) -or $null -eq (Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue)) { throw 'Recovery tests removed preserved state.' }
 
+    # Kill at ssPostInstall after payload and exact uninstall metadata are incoming-complete.
+    # The next setup must finalize that transaction without restoring the prior payload.
+    $incomingCompleteArguments = @('/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART','/SP-',"/DIR=`"$installRoot`"",'/TASK9MODE=incomingcompletecrash',"/LOG=`"$incomingCompleteLog`"")
+    $incomingCompleteProcess = Start-Process -FilePath $resolvedFaultInstaller -ArgumentList $incomingCompleteArguments -PassThru
+    $incomingCompleteReady = Assert-SafeProtectedInstallPath -Path (Join-Path $activeRecovery 'incoming-complete-ready')
+    $incomingCompleteDeadline = [DateTime]::UtcNow.AddSeconds(45)
+    while(-not (Test-Path -LiteralPath $incomingCompleteReady -PathType Leaf) -and -not $incomingCompleteProcess.HasExited -and [DateTime]::UtcNow -lt $incomingCompleteDeadline) {
+        Start-Sleep -Milliseconds 250
+        $incomingCompleteProcess.Refresh()
+    }
+    if(-not (Test-Path -LiteralPath $incomingCompleteReady -PathType Leaf)) {
+        if(-not $incomingCompleteProcess.HasExited) { & "$env:SystemRoot\System32\taskkill.exe" /PID $incomingCompleteProcess.Id /T /F | Out-Null }
+        throw 'Fault installer did not reach incoming-complete commit boundary.'
+    }
+    & "$env:SystemRoot\System32\taskkill.exe" /PID $incomingCompleteProcess.Id /T /F | Out-Null
+    [void]$incomingCompleteProcess.WaitForExit(10000)
+    if(-not (Test-Path -LiteralPath $activeRecovery -PathType Container)) { throw 'Incoming-complete crash did not retain ACTIVE state.' }
+    if(-not (Test-Path -LiteralPath $incomingOnlyPath -PathType Leaf) -or
+       (Get-FileHash -LiteralPath $installedExe -Algorithm SHA256).Hash.ToLowerInvariant() -cne $expectedFaultProbeHash) {
+        throw 'Incoming-complete crash did not install the distinguishable incoming payload.'
+    }
+    $incomingRecoveryExit = Invoke-BoundedProcess -FilePath $resolvedFaultInstaller -ArgumentList @('/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART','/SP-',"/DIR=`"$installRoot`"",'/TASK9MODE=recoveryonly')
+    if($incomingRecoveryExit -eq 0) { throw 'Incoming-complete recovery-only test unexpectedly continued into installation.' }
+    if(Test-Path -LiteralPath $activeRecovery) { throw 'Incoming-complete recovery did not finalize ACTIVE state.' }
+    if(-not (Test-Path -LiteralPath $incomingOnlyPath -PathType Leaf) -or
+       (Get-FileHash -LiteralPath $installedExe -Algorithm SHA256).Hash.ToLowerInvariant() -cne $expectedFaultProbeHash) {
+        throw 'Incoming-complete recovery restored the prior payload.'
+    }
+    Assert-ExactUninstallEntry -ExpectedInstallRoot $installRoot | Out-Null
+
     Invoke-CheckedProcess -FilePath $resolvedInstaller -ArgumentList @('/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART','/SP-',"/DIR=`"$installRoot`"",'/TASKS=desktopicon',"/LOG=`"$upgradeLog`"")
     if(-not (Test-Path -LiteralPath $runtimeSentinel) -or -not (Test-Path -LiteralPath $oneDriveSentinel) -or $null -eq (Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue)) { throw 'Successful upgrade removed preserved state.' }
     Assert-ExactUninstallEntry -ExpectedInstallRoot $installRoot | Out-Null
 
+    # Uninstall must use the same classifier: corrupt ACTIVE state blocks with zero payload
+    # mutation; once the exact state checksum is repaired, prior-state recovery precedes removal.
+    $priorToUninstallCrash = Get-InstalledPayloadHashes -InstallRoot $installRoot
+    New-Item -ItemType Directory -Path $faultCollision | Out-Null
+    $uninstallCrashProcess = Start-Process -FilePath $resolvedFaultInstaller -ArgumentList $crashArguments -PassThru
+    $uninstallCrashDeadline = [DateTime]::UtcNow.AddSeconds(45)
+    while(-not (Test-Path -LiteralPath $crashReady -PathType Leaf) -and -not $uninstallCrashProcess.HasExited -and [DateTime]::UtcNow -lt $uninstallCrashDeadline) {
+        Start-Sleep -Milliseconds 250
+        $uninstallCrashProcess.Refresh()
+    }
+    if(-not (Test-Path -LiteralPath $crashReady -PathType Leaf)) {
+        if(-not $uninstallCrashProcess.HasExited) { & "$env:SystemRoot\System32\taskkill.exe" /PID $uninstallCrashProcess.Id /T /F | Out-Null }
+        throw 'Uninstall guard setup did not reach ACTIVE state.'
+    }
+    & "$env:SystemRoot\System32\taskkill.exe" /PID $uninstallCrashProcess.Id /T /F | Out-Null
+    [void]$uninstallCrashProcess.WaitForExit(10000)
+    Remove-Item -LiteralPath $faultCollision -Force
+    $uninstallStateHashPath = Assert-SafeProtectedInstallPath -Path (Join-Path $activeRecovery 'state.sha256')
+    $uninstallGoodHashBytes = [IO.File]::ReadAllBytes($uninstallStateHashPath)
+    $uninstallCorruptState = Get-ProductPathState -InstallRoot $installRoot -RelativePaths $unionRelativePaths
+    [IO.File]::WriteAllText($uninstallStateHashPath,'corrupt',(New-Object Text.UTF8Encoding($false)))
     $uninstaller = Assert-SafeProtectedInstallPath -Path (Join-Path $installRoot 'unins000.exe')
+    $corruptUninstallExit = Invoke-BoundedProcess -FilePath $uninstaller -ArgumentList @('/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART')
+    if($corruptUninstallExit -eq 0) { throw 'Corrupt active transaction uninstall unexpectedly succeeded.' }
+    Assert-ExactUninstallEntry -ExpectedInstallRoot $installRoot | Out-Null
+    if(-not (Test-Path -LiteralPath $activeRecovery -PathType Container)) { throw 'Corrupt active transaction uninstall removed recovery evidence.' }
+    $afterBlockedUninstall = Get-ProductPathState -InstallRoot $installRoot -RelativePaths $unionRelativePaths
+    Assert-ProductPathStateEqual -Expected $uninstallCorruptState -Actual $afterBlockedUninstall -Message 'Corrupt active transaction uninstall mutated product payload.'
+    [IO.File]::WriteAllBytes($uninstallStateHashPath,$uninstallGoodHashBytes)
     Invoke-CheckedProcess -FilePath $uninstaller -ArgumentList @('/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART',"/LOG=`"$uninstallLog`"")
+    if(Test-Path -LiteralPath $activeRecovery) { throw 'Active transaction uninstall did not recover before removal.' }
     if((Test-Path -LiteralPath $installedExe) -or (Test-Path -LiteralPath $startMenuShortcut) -or (Test-Path -LiteralPath $desktopShortcut) -or @(Get-UninstallEntry).Count) { throw 'Uninstall did not remove product files and registration.' }
     if(-not (Test-Path -LiteralPath $runtimeSentinel) -or -not (Test-Path -LiteralPath $oneDriveSentinel) -or $null -eq (Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue)) { throw 'Uninstall removed preserved state.' }
     $setupAttempted = $false

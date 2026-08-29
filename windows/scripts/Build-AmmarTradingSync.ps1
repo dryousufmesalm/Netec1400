@@ -152,6 +152,8 @@ $faultOutputRoot = Join-Path $buildRoot 'fault-output'
 $faultProbeRoot = Join-Path $buildRoot 'fault-probe'
 $faultProbePath = Join-Path $faultProbeRoot 'Task9FaultProbe.bin'
 $faultPayloadManifestPath = Join-Path $faultProbeRoot 'AmmarTrading.Sync.fault-payload-manifest.txt'
+$productionPayloadHashesPath = Join-Path $faultProbeRoot 'AmmarTrading.Sync.payload-hashes.txt'
+$faultPayloadHashesPath = Join-Path $faultProbeRoot 'AmmarTrading.Sync.fault-payload-hashes.txt'
 $bootstrapperStagingPath = Join-Path $buildRoot 'MicrosoftEdgeWebView2Setup.exe'
 $installerPath = Join-Path $artifactRoot 'AmmarTrading Sync Setup.exe'
 $manifestPath = Join-Path $artifactRoot 'SHA256SUMS.txt'
@@ -248,6 +250,28 @@ Assert-ReleasePayload -PublishDirectory $publishRoot
 $faultPayloadRelativePaths = @($payloadRelativePaths + 'Assets\Web\Task9IncomingOnly.bin' | Sort-Object -Unique)
 [IO.File]::WriteAllLines($faultPayloadManifestPath,$faultPayloadRelativePaths,(New-Object Text.UTF8Encoding($false)))
 $faultProbeHash = (Get-FileHash -LiteralPath $faultProbePath -Algorithm SHA256).Hash.ToLowerInvariant()
+$faultProbeSize = (Get-Item -LiteralPath $faultProbePath).Length
+$productionPayloadHashLines = foreach($relativePath in $payloadRelativePaths) {
+    $file = Get-Item -LiteralPath (Join-Path $publishRoot $relativePath)
+    $hash = (Get-FileHash -LiteralPath $file.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+    "$relativePath|$($file.Length)|$hash"
+}
+[IO.File]::WriteAllLines($productionPayloadHashesPath,$productionPayloadHashLines,(New-Object Text.UTF8Encoding($false)))
+$faultProbeTargets = @('AmmarTrading.Sync.exe','AmmarTrading.Sync.Core.dll','Assets\Web\index.html','Scripts\Sync-BasketsToOneDrive.ps1','Assets\Web\Task9IncomingOnly.bin')
+$faultPayloadHashLines = foreach($relativePath in $faultPayloadRelativePaths) {
+    if($relativePath -in $faultProbeTargets) {
+        "$relativePath|$faultProbeSize|$faultProbeHash"
+    } elseif($relativePath -ceq $payloadManifestName) {
+        $file = Get-Item -LiteralPath $faultPayloadManifestPath
+        $hash = (Get-FileHash -LiteralPath $file.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+        "$relativePath|$($file.Length)|$hash"
+    } else {
+        $file = Get-Item -LiteralPath (Join-Path $publishRoot $relativePath)
+        $hash = (Get-FileHash -LiteralPath $file.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+        "$relativePath|$($file.Length)|$hash"
+    }
+}
+[IO.File]::WriteAllLines($faultPayloadHashesPath,$faultPayloadHashLines,(New-Object Text.UTF8Encoding($false)))
 $productionExeHash = (Get-FileHash -LiteralPath (Join-Path $publishRoot 'AmmarTrading.Sync.exe') -Algorithm SHA256).Hash.ToLowerInvariant()
 if($faultProbeHash -ceq $productionExeHash) { throw 'The acceptance fault probe must differ from the production executable.' }
 [IO.File]::WriteAllText($stagedFaultProbeHashPath,"$faultProbeHash`r`n",(New-Object Text.UTF8Encoding($false)))
@@ -267,6 +291,7 @@ Assert-MicrosoftBootstrapper -Path $bootstrapperStagingPath
 Invoke-NativeCommand -FilePath $iscc -ArgumentList @(
     "/DPublishDir=$publishRoot",
     "/DBootstrapperPath=$bootstrapperStagingPath",
+    "/DPayloadHashesPath=$productionPayloadHashesPath",
     "/DOutputDir=$productionOutputRoot",
     $installerScript
 ) -WorkingDirectory $repoRoot
@@ -274,6 +299,7 @@ Invoke-NativeCommand -FilePath $iscc -ArgumentList @(
     '/DAcceptanceFaultInjection=1',
     "/DFaultProbePath=$faultProbePath",
     "/DFaultManifestPath=$faultPayloadManifestPath",
+    "/DPayloadHashesPath=$faultPayloadHashesPath",
     "/DPublishDir=$publishRoot",
     "/DBootstrapperPath=$bootstrapperStagingPath",
     "/DOutputDir=$faultOutputRoot",

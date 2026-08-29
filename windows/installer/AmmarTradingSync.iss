@@ -7,6 +7,9 @@
 #ifndef OutputDir
   #error OutputDir must be supplied by Build-AmmarTradingSync.ps1
 #endif
+#ifndef PayloadHashesPath
+  #error PayloadHashesPath must be supplied by Build-AmmarTradingSync.ps1
+#endif
 #ifdef AcceptanceFaultInjection
   #ifndef FaultProbePath
     #error FaultProbePath must be supplied for the acceptance-only fault installer
@@ -59,20 +62,22 @@ Name: "english"; MessagesFile: "compiler:Default.isl"
 Name: "desktopicon"; Description: "Create a &desktop shortcut"; GroupDescription: "Additional shortcuts:"; Flags: unchecked
 
 [Files]
+Source: "{#PayloadHashesPath}"; DestDir: "{tmp}"; DestName: "IncomingPayloadHashes.txt"; Flags: deleteafterinstall
 #ifdef AcceptanceFaultInjection
 Source: "{#FaultManifestPath}"; DestDir: "{tmp}"; DestName: "IncomingPayloadManifest.txt"; Flags: deleteafterinstall; AfterInstall: SnapshotProductPayload
 #else
 Source: "{#PublishDir}\AmmarTrading.Sync.payload-manifest.txt"; DestDir: "{tmp}"; DestName: "IncomingPayloadManifest.txt"; Flags: deleteafterinstall; AfterInstall: SnapshotProductPayload
 #endif
 Source: "{#PublishDir}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
-Source: "{#BootstrapperPath}"; DestDir: "{tmp}"; DestName: "MicrosoftEdgeWebView2Setup.exe"; Flags: deleteafterinstall
+Source: "{#BootstrapperPath}"; Flags: dontcopy noencryption
 #ifdef AcceptanceFaultInjection
+Source: "{#FaultManifestPath}"; DestDir: "{app}"; DestName: "AmmarTrading.Sync.payload-manifest.txt"; Flags: ignoreversion
 Source: "{#FaultProbePath}"; DestDir: "{app}"; DestName: "{#ProductExe}"; Flags: ignoreversion
 Source: "{#FaultProbePath}"; DestDir: "{app}"; DestName: "AmmarTrading.Sync.Core.dll"; Flags: ignoreversion
 Source: "{#FaultProbePath}"; DestDir: "{app}\Assets\Web"; DestName: "index.html"; Flags: ignoreversion
 Source: "{#FaultProbePath}"; DestDir: "{app}\Scripts"; DestName: "Sync-BasketsToOneDrive.ps1"; Flags: ignoreversion
 Source: "{#FaultProbePath}"; DestDir: "{app}\Assets\Web"; DestName: "Task9IncomingOnly.bin"; Flags: ignoreversion; AfterInstall: HandleFaultProbeInstalled
-Source: "{#FaultProbePath}"; DestDir: "{app}"; DestName: "Task9UpgradeFault.blocked"; Flags: ignoreversion
+Source: "{#FaultProbePath}"; DestDir: "{app}"; DestName: "Task9UpgradeFault.blocked"; Flags: ignoreversion; Check: ShouldInstallFaultCollision
 #endif
 
 [Icons]
@@ -80,8 +85,7 @@ Name: "{autoprograms}\AmmarTrading Sync"; Filename: "{app}\{#ProductExe}"; Worki
 Name: "{autodesktop}\AmmarTrading Sync"; Filename: "{app}\{#ProductExe}"; WorkingDir: "{app}"; Tasks: desktopicon
 
 [Run]
-Filename: "{tmp}\MicrosoftEdgeWebView2Setup.exe"; Parameters: "/silent /install"; StatusMsg: "Installing Microsoft Edge WebView2 Runtime..."; Flags: waituntilterminated; Check: not IsWebView2Installed
-Filename: "{app}\{#ProductExe}"; Description: "Launch AmmarTrading Sync"; Flags: nowait postinstall skipifsilent runasoriginaluser
+Filename: "{app}\{#ProductExe}"; Description: "Launch AmmarTrading Sync"; Flags: nowait postinstall skipifsilent runasoriginaluser; Check: CanLaunchApplication
 
 [Code]
 const
@@ -89,17 +93,22 @@ const
   AMMAR_MOVEFILE_REPLACE_EXISTING = 1;
   AMMAR_MOVEFILE_WRITE_THROUGH = 8;
   AMMAR_APP_ID = '{8F488698-AB96-45DB-A2BB-D9E868823F43}';
-  AMMAR_STATE_MAGIC = 'AMMAR_TX_V1';
+  AMMAR_STATE_MAGIC = 'AMMAR_TX_V2';
   AMMAR_MANIFEST_NAME = 'AmmarTrading.Sync.payload-manifest.txt';
   AMMAR_RECOVERY_BUILDING = '.ammar-installer-recovery.building';
   AMMAR_RECOVERY_ACTIVE = '.ammar-installer-recovery.active';
   AMMAR_RECOVERY_VERIFIED = '.ammar-installer-recovery.verified';
+  AMMAR_TX_INVALID = 0;
+  AMMAR_TX_PRIOR = 1;
+  AMMAR_TX_INCOMING = 2;
 
 var
   AppRoot: String;
   ActiveRecoveryRoot: String;
   SnapshotReady: Boolean;
   InstallationCompleted: Boolean;
+  CommitFailed: Boolean;
+  CommitFailureExitCode: Integer;
   RecoveryFailure: Boolean;
 
 type
@@ -276,16 +285,50 @@ end;
 
 function RegistrationDigest(var Found: Boolean): String;
 var
-  Key, DisplayName, InstallLocation, UninstallString: String;
+  Key, DisplayName, DisplayVersion, InstallLocation, UninstallString, QuietUninstallString: String;
+  UninstallerPath, UninstallerDataPath, ExeSize, DataSize, QuietValue: String;
 begin
   Key := 'SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\{8F488698-AB96-45DB-A2BB-D9E868823F43}_is1';
   Found := RegQueryStringValue(HKEY_LOCAL_MACHINE, Key, 'DisplayName', DisplayName) and
+           RegQueryStringValue(HKEY_LOCAL_MACHINE, Key, 'DisplayVersion', DisplayVersion) and
            RegQueryStringValue(HKEY_LOCAL_MACHINE, Key, 'InstallLocation', InstallLocation) and
            RegQueryStringValue(HKEY_LOCAL_MACHINE, Key, 'UninstallString', UninstallString);
-  if Found then
-    Result := GetSHA256OfUnicodeString(DisplayName + #10 + NormalizedPath(InstallLocation) + #10 + UninstallString)
-  else
-    Result := 'NONE';
+  if not Found then begin if RegKeyExists(HKEY_LOCAL_MACHINE, Key) then Result := 'INVALID' else Result := 'NONE'; exit; end;
+  if CompareText(NormalizedPath(InstallLocation), AppRoot) <> 0 then begin Result := 'INVALID'; exit; end;
+  UninstallerPath := AddBackslash(AppRoot) + 'unins000.exe';
+  UninstallerDataPath := AddBackslash(AppRoot) + 'unins000.dat';
+  if (not FileExists(UninstallerPath)) or (not FileExists(UninstallerDataPath)) or
+     IsReparsePath(UninstallerPath) or IsReparsePath(UninstallerDataPath) or
+     (not TryGetFileSizeText(UninstallerPath, ExeSize)) or
+     (not TryGetFileSizeText(UninstallerDataPath, DataSize)) then begin Result := 'INVALID'; exit; end;
+  if RegQueryStringValue(HKEY_LOCAL_MACHINE, Key, 'QuietUninstallString', QuietUninstallString) then
+    QuietValue := 'PRESENT|' + QuietUninstallString
+  else QuietValue := 'MISSING';
+  Result := GetSHA256OfUnicodeString(DisplayName + #10 + DisplayVersion + #10 +
+    NormalizedPath(InstallLocation) + #10 + UninstallString + #10 + QuietValue + #10 +
+    ExeSize + '|' + GetSHA256OfFile(UninstallerPath) + #10 +
+    DataSize + '|' + GetSHA256OfFile(UninstallerDataPath));
+end;
+
+function ValidateCanonicalIncomingMetadata: Boolean;
+var
+  Key, DisplayName, DisplayVersion, InstallLocation, UninstallString: String;
+  UninstallerPath, UninstallerDataPath: String;
+begin
+  Result := False;
+  Key := 'SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\{8F488698-AB96-45DB-A2BB-D9E868823F43}_is1';
+  if not RegQueryStringValue(HKEY_LOCAL_MACHINE, Key, 'DisplayName', DisplayName) or
+     not RegQueryStringValue(HKEY_LOCAL_MACHINE, Key, 'DisplayVersion', DisplayVersion) or
+     not RegQueryStringValue(HKEY_LOCAL_MACHINE, Key, 'InstallLocation', InstallLocation) or
+     not RegQueryStringValue(HKEY_LOCAL_MACHINE, Key, 'UninstallString', UninstallString) then exit;
+  UninstallerPath := AddBackslash(AppRoot) + 'unins000.exe';
+  UninstallerDataPath := AddBackslash(AppRoot) + 'unins000.dat';
+  if (DisplayName <> '{#ProductName}') or (DisplayVersion <> '{#ProductVersion}') or
+     (CompareText(NormalizedPath(InstallLocation), AppRoot) <> 0) or
+     (Pos('"' + UninstallerPath + '"', UninstallString) <> 1) or
+     (not FileExists(UninstallerPath)) or (not FileExists(UninstallerDataPath)) or
+     IsReparsePath(UninstallerPath) or IsReparsePath(UninstallerDataPath) then exit;
+  Result := True;
 end;
 
 procedure AddUniquePayloadPath(var Paths: TArrayOfString; const RelativePath: String);
@@ -351,7 +394,7 @@ begin
 end;
 
 function TryParseState(const RecoveryRoot: String; var Entries: TPayloadEntries;
-  var TransactionId, OldManifestHash, IncomingManifestHash, RegistrationHash: String): Boolean;
+  var TransactionId, OldManifestHash, IncomingManifestHash, IncomingHashesHash, RegistrationHash: String): Boolean;
 var
   Lines, OldPaths, IncomingPaths, UnionPaths, ParsedPaths: TArrayOfString;
   StatePath, StateHashPath, PhasePath, StateHash, ExpectedStateHash, EntryText: String;
@@ -367,7 +410,7 @@ begin
   if IsReparsePath(StatePath) or IsReparsePath(StateHashPath) or IsReparsePath(PhasePath) or
      IsReparsePath(RecoveryChild(RecoveryRoot, 'backup')) then exit;
   if not LoadStringsFromFile(StatePath, Lines) then exit;
-  if GetArrayLength(Lines) < 8 then exit;
+  if GetArrayLength(Lines) < 9 then exit;
   if Lines[0] <> AMMAR_STATE_MAGIC then exit;
   if Lines[1] <> 'APPID|' + AMMAR_APP_ID then exit;
   if Lines[2] <> 'ROOT|' + AppRoot then exit;
@@ -378,11 +421,13 @@ begin
   OldManifestHash := Copy(Lines[4], 13, Length(Lines[4]) - 12);
   if Pos('INCOMINGMANIFEST|', Lines[5]) <> 1 then exit;
   IncomingManifestHash := Copy(Lines[5], 18, Length(Lines[5]) - 17);
-  if Pos('REGISTRATION|', Lines[6]) <> 1 then exit;
-  RegistrationHash := Copy(Lines[6], 14, Length(Lines[6]) - 13);
-  if Pos('COUNT|', Lines[7]) <> 1 then exit;
-  EntryCount := StrToIntDef(Copy(Lines[7], 7, Length(Lines[7]) - 6), -1);
-  if (EntryCount < 1) or (GetArrayLength(Lines) <> EntryCount + 8) then exit;
+  if Pos('INCOMINGHASHES|', Lines[6]) <> 1 then exit;
+  IncomingHashesHash := Copy(Lines[6], 16, Length(Lines[6]) - 15);
+  if Pos('REGISTRATION|', Lines[7]) <> 1 then exit;
+  RegistrationHash := Copy(Lines[7], 14, Length(Lines[7]) - 13);
+  if Pos('COUNT|', Lines[8]) <> 1 then exit;
+  EntryCount := StrToIntDef(Copy(Lines[8], 7, Length(Lines[8]) - 6), -1);
+  if (EntryCount < 1) or (GetArrayLength(Lines) <> EntryCount + 9) then exit;
   if not LoadSingleLine(StateHashPath, ExpectedStateHash) then exit;
   StateHash := GetSHA256OfFile(StatePath);
   if CompareText(Trim(ExpectedStateHash), StateHash) <> 0 then exit;
@@ -397,6 +442,9 @@ begin
   if IsReparsePath(RecoveryChild(RecoveryRoot, 'incoming-manifest.txt')) or
      (not FileExists(RecoveryChild(RecoveryRoot, 'incoming-manifest.txt'))) or
      (CompareText(GetSHA256OfFile(RecoveryChild(RecoveryRoot, 'incoming-manifest.txt')), IncomingManifestHash) <> 0) then exit;
+  if IsReparsePath(RecoveryChild(RecoveryRoot, 'incoming-hashes.txt')) or
+     (not FileExists(RecoveryChild(RecoveryRoot, 'incoming-hashes.txt'))) or
+     (CompareText(GetSHA256OfFile(RecoveryChild(RecoveryRoot, 'incoming-hashes.txt')), IncomingHashesHash) <> 0) then exit;
 
   SetArrayLength(OldPaths, 0);
   SetArrayLength(IncomingPaths, 0);
@@ -413,7 +461,7 @@ begin
   ExistingCount := 0;
   for Index := 0 to EntryCount - 1 do
   begin
-    EntryText := Lines[Index + 8];
+    EntryText := Lines[Index + 9];
     Separator1 := Pos('|', EntryText);
     if Separator1 <> 2 then exit;
     Entry.Action := EntryText[1];
@@ -456,6 +504,65 @@ begin
   Result := True;
 end;
 
+function VerifyIncomingCommittedPayload(const RecoveryRoot, IncomingManifestHash,
+  IncomingHashesHash: String): Boolean;
+var
+  ManifestPaths, HashLines, SeenPaths: TArrayOfString;
+  Index, Separator1, Separator2: Integer;
+  Line, RelativePath, SizeText, ExpectedHash, ActualSizeText, InstalledPath: String;
+begin
+  Result := False;
+  if CompareText(GetSHA256OfFile(RecoveryChild(RecoveryRoot, 'incoming-manifest.txt')), IncomingManifestHash) <> 0 then exit;
+  if CompareText(GetSHA256OfFile(RecoveryChild(RecoveryRoot, 'incoming-hashes.txt')), IncomingHashesHash) <> 0 then exit;
+  if (not FileExists(AddBackslash(AppRoot) + AMMAR_MANIFEST_NAME)) or
+     (CompareText(GetSHA256OfFile(AddBackslash(AppRoot) + AMMAR_MANIFEST_NAME), IncomingManifestHash) <> 0) then exit;
+  SetArrayLength(ManifestPaths, 0);
+  SetArrayLength(SeenPaths, 0);
+  AddManifestPayloadPaths(RecoveryChild(RecoveryRoot, 'incoming-manifest.txt'), ManifestPaths, True);
+  if not LoadStringsFromFile(RecoveryChild(RecoveryRoot, 'incoming-hashes.txt'), HashLines) then exit;
+  if GetArrayLength(HashLines) <> GetArrayLength(ManifestPaths) then exit;
+  for Index := 0 to GetArrayLength(HashLines) - 1 do
+  begin
+    Line := HashLines[Index];
+    Separator1 := Pos('|', Line);
+    if Separator1 < 2 then exit;
+    RelativePath := Copy(Line, 1, Separator1 - 1);
+    Line := Copy(Line, Separator1 + 1, Length(Line) - Separator1);
+    Separator2 := Pos('|', Line);
+    if Separator2 < 2 then exit;
+    SizeText := Copy(Line, 1, Separator2 - 1);
+    ExpectedHash := Copy(Line, Separator2 + 1, Length(Line) - Separator2);
+    if (StrToInt64Def(SizeText, -1) < 0) or (Length(ExpectedHash) <> 64) or
+       (not ContainsPayloadPath(ManifestPaths, RelativePath)) or
+       ContainsPayloadPath(SeenPaths, RelativePath) or
+       (not IsContainedNonReparsePayloadPath(RelativePath)) then exit;
+    InstalledPath := AddBackslash(AppRoot) + RelativePath;
+    if (not FileExists(InstalledPath)) or (not TryGetFileSizeText(InstalledPath, ActualSizeText)) or
+       (ActualSizeText <> SizeText) or
+       (CompareText(GetSHA256OfFile(InstalledPath), ExpectedHash) <> 0) then exit;
+    AddUniquePayloadPath(SeenPaths, RelativePath);
+  end;
+  Result := GetArrayLength(SeenPaths) = GetArrayLength(ManifestPaths);
+end;
+
+function ClassifyActiveTransaction(const RecoveryRoot: String): Integer;
+var
+  Entries: TPayloadEntries;
+  TransactionId, OldManifestHash, IncomingManifestHash, IncomingHashesHash, RegistrationHash: String;
+  CurrentRegistrationHash: String;
+  RegistrationFound: Boolean;
+begin
+  Result := AMMAR_TX_INVALID;
+  if (not IsExactRecoveryRootSafe(RecoveryRoot)) or
+     (not TryParseState(RecoveryRoot, Entries, TransactionId, OldManifestHash,
+       IncomingManifestHash, IncomingHashesHash, RegistrationHash)) then exit;
+  CurrentRegistrationHash := RegistrationDigest(RegistrationFound);
+  if CompareText(CurrentRegistrationHash, RegistrationHash) = 0 then begin Result := AMMAR_TX_PRIOR; exit; end;
+  if ValidateCanonicalIncomingMetadata and
+     VerifyIncomingCommittedPayload(RecoveryRoot, IncomingManifestHash, IncomingHashesHash) then
+    Result := AMMAR_TX_INCOMING;
+end;
+
 procedure SetRecoveryPhase(const RecoveryRoot, Phase, TransactionId, StateHash: String);
 begin
   AtomicWriteText(RecoveryChild(RecoveryRoot, 'phase.txt'), Phase + '|' + TransactionId + '|' + StateHash);
@@ -494,13 +601,15 @@ end;
 function RestoreActiveTransaction(const RecoveryRoot: String): Boolean;
 var
   Entries: TPayloadEntries;
-  TransactionId, OldManifestHash, IncomingManifestHash, RegistrationHash: String;
+  TransactionId, OldManifestHash, IncomingManifestHash, IncomingHashesHash, RegistrationHash: String;
   InstalledPath, BackupPath, StateHash: String;
   Index: Integer;
 begin
   Result := False;
   if (not IsExactRecoveryRootSafe(RecoveryRoot)) or
-     (not TryParseState(RecoveryRoot, Entries, TransactionId, OldManifestHash, IncomingManifestHash, RegistrationHash)) then
+     (ClassifyActiveTransaction(RecoveryRoot) <> AMMAR_TX_PRIOR) or
+     (not TryParseState(RecoveryRoot, Entries, TransactionId, OldManifestHash,
+       IncomingManifestHash, IncomingHashesHash, RegistrationHash)) then
   begin
     Log('ERROR: Durable recovery transaction is invalid; payload was not touched.');
     exit;
@@ -540,6 +649,39 @@ begin
   Result := True;
 end;
 
+function CleanupVerifiedRecovery(const RecoveryRoot: String): Boolean; forward;
+
+function FinalizeIncomingTransaction(const RecoveryRoot: String): Boolean;
+var
+  Entries: TPayloadEntries;
+  TransactionId, OldManifestHash, IncomingManifestHash, IncomingHashesHash, RegistrationHash: String;
+  StateHash, VerifiedRoot: String;
+begin
+  Result := False;
+  if ClassifyActiveTransaction(RecoveryRoot) <> AMMAR_TX_INCOMING then exit;
+  if not TryParseState(RecoveryRoot, Entries, TransactionId, OldManifestHash,
+    IncomingManifestHash, IncomingHashesHash, RegistrationHash) then exit;
+  StateHash := GetSHA256OfFile(RecoveryChild(RecoveryRoot, 'state.txt'));
+  SetRecoveryPhase(RecoveryRoot, 'VERIFIED', TransactionId, StateHash);
+  VerifiedRoot := AddBackslash(AppRoot) + AMMAR_RECOVERY_VERIFIED;
+  if not RenameFile(RecoveryRoot, VerifiedRoot) then exit;
+  Result := CleanupVerifiedRecovery(VerifiedRoot);
+end;
+
+function ResolveActiveTransaction(const RecoveryRoot: String): Boolean;
+var Classification: Integer;
+    VerifiedRoot: String;
+begin
+  Result := False;
+  Classification := ClassifyActiveTransaction(RecoveryRoot);
+  if Classification = AMMAR_TX_INCOMING then begin Result := FinalizeIncomingTransaction(RecoveryRoot); exit; end;
+  if Classification <> AMMAR_TX_PRIOR then exit;
+  if not RestoreActiveTransaction(RecoveryRoot) then exit;
+  VerifiedRoot := AddBackslash(AppRoot) + AMMAR_RECOVERY_VERIFIED;
+  if not RenameFile(RecoveryRoot, VerifiedRoot) then exit;
+  Result := CleanupVerifiedRecovery(VerifiedRoot);
+end;
+
 function CleanupVerifiedRecovery(const RecoveryRoot: String): Boolean;
 begin
   Result := False;
@@ -569,19 +711,13 @@ begin
   end;
   if DirExists(ActiveRecoveryRoot) then
   begin
-    if not RestoreActiveTransaction(ActiveRecoveryRoot) then
+    if not ResolveActiveTransaction(ActiveRecoveryRoot) then
     begin
       RecoveryFailure := True;
       Result := 'A previous installation could not be recovered safely. Product files were not overwritten.';
       exit;
     end;
-    if not RenameFile(ActiveRecoveryRoot, VerifiedRoot) then
-    begin
-      RecoveryFailure := True;
-      Result := 'Recovery completed but its durable state could not be finalized.';
-      exit;
-    end;
-    if not CleanupVerifiedRecovery(VerifiedRoot) then
+    if DirExists(ActiveRecoveryRoot) or DirExists(VerifiedRoot) then
       Result := 'Recovery completed but cleanup is pending; run setup again.';
   end;
 end;
@@ -591,7 +727,7 @@ var
   PayloadPaths, StateLines: TArrayOfString;
   Index, TransactionRandom: Integer;
   RelativePath, InstalledPath, BackupPath, BuildingRoot, OldManifestPath: String;
-  TransactionId, OldManifestHash, IncomingManifestHash, RegistrationHash, StateHash, BackupSizeText: String;
+  TransactionId, OldManifestHash, IncomingManifestHash, IncomingHashesHash, RegistrationHash, StateHash, BackupSizeText: String;
   RegistrationFound: Boolean;
 begin
   SetArrayLength(PayloadPaths, 0);
@@ -619,6 +755,9 @@ begin
   if not CopyFile(ExpandConstant('{tmp}\IncomingPayloadManifest.txt'), RecoveryChild(BuildingRoot, 'incoming-manifest.txt'), False) then
     RaiseException('Setup could not preserve the incoming payload manifest.');
   IncomingManifestHash := GetSHA256OfFile(RecoveryChild(BuildingRoot, 'incoming-manifest.txt'));
+  if not CopyFile(ExpandConstant('{tmp}\IncomingPayloadHashes.txt'), RecoveryChild(BuildingRoot, 'incoming-hashes.txt'), False) then
+    RaiseException('Setup could not preserve incoming payload hashes.');
+  IncomingHashesHash := GetSHA256OfFile(RecoveryChild(BuildingRoot, 'incoming-hashes.txt'));
   Log('Durable snapshot: incoming manifest preserved.');
   RegistrationHash := RegistrationDigest(RegistrationFound);
   Log('Durable snapshot: registration bound.');
@@ -628,7 +767,7 @@ begin
   TransactionRandom := Random(1000000000);
   TransactionId := TransactionId + '-' + IntToStr(TransactionRandom);
   Log('Durable snapshot: transaction identifier created.');
-  SetArrayLength(StateLines, GetArrayLength(PayloadPaths) + 8);
+  SetArrayLength(StateLines, GetArrayLength(PayloadPaths) + 9);
   Log('Durable snapshot: state allocated.');
   StateLines[0] := AMMAR_STATE_MAGIC;
   StateLines[1] := 'APPID|' + AMMAR_APP_ID;
@@ -636,8 +775,9 @@ begin
   StateLines[3] := 'TXID|' + TransactionId;
   StateLines[4] := 'OLDMANIFEST|' + OldManifestHash;
   StateLines[5] := 'INCOMINGMANIFEST|' + IncomingManifestHash;
-  StateLines[6] := 'REGISTRATION|' + RegistrationHash;
-  StateLines[7] := 'COUNT|' + IntToStr(GetArrayLength(PayloadPaths));
+  StateLines[6] := 'INCOMINGHASHES|' + IncomingHashesHash;
+  StateLines[7] := 'REGISTRATION|' + RegistrationHash;
+  StateLines[8] := 'COUNT|' + IntToStr(GetArrayLength(PayloadPaths));
   for Index := 0 to GetArrayLength(PayloadPaths) - 1 do
   begin
     RelativePath := PayloadPaths[Index];
@@ -655,10 +795,10 @@ begin
         RaiseException('Setup could not snapshot the existing product payload. The installation was not changed.');
       if not TryGetFileSizeText(BackupPath, BackupSizeText) then
         RaiseException('Setup could not measure the durable payload backup.');
-      StateLines[Index + 8] := 'E|' + RelativePath + '|' + BackupSizeText + '|' + GetSHA256OfFile(BackupPath);
+      StateLines[Index + 9] := 'E|' + RelativePath + '|' + BackupSizeText + '|' + GetSHA256OfFile(BackupPath);
     end
     else
-      StateLines[Index + 8] := 'M|' + RelativePath;
+      StateLines[Index + 9] := 'M|' + RelativePath;
   end;
   AtomicWriteLines(RecoveryChild(BuildingRoot, 'state.txt'), StateLines);
   StateHash := GetSHA256OfFile(RecoveryChild(BuildingRoot, 'state.txt'));
@@ -669,10 +809,49 @@ begin
   SnapshotReady := True;
 end;
 
+function IsWebView2Installed: Boolean; forward;
+
+function InstallWebViewPrerequisite(var NeedsRestart: Boolean): String;
+var ResultCode: Integer;
+begin
+  Result := '';
+#ifdef AcceptanceFaultInjection
+  if ExpandConstant('{param:TASK9MODE|}') = 'webviewfail' then
+  begin
+    CommitFailureExitCode := 71;
+    Result := 'Task 9 injected WebView2 prerequisite failure before product mutation.';
+    exit;
+  end;
+#endif
+  if IsWebView2Installed then exit;
+  ExtractTemporaryFile('MicrosoftEdgeWebView2Setup.exe');
+  if not Exec(ExpandConstant('{tmp}\MicrosoftEdgeWebView2Setup.exe'), '/silent /install', '',
+    SW_HIDE, ewWaitUntilTerminated, ResultCode) then
+  begin
+    CommitFailureExitCode := 72;
+    Result := 'Microsoft Edge WebView2 Runtime could not be launched.';
+    exit;
+  end;
+  if ResultCode = 3010 then
+  begin
+    NeedsRestart := True;
+    CommitFailureExitCode := 73;
+    Result := 'Microsoft Edge WebView2 Runtime requires a restart before AmmarTrading Sync can be installed.';
+    exit;
+  end;
+  if (ResultCode <> 0) or (not IsWebView2Installed) then
+  begin
+    CommitFailureExitCode := 74;
+    Result := 'Microsoft Edge WebView2 Runtime installation did not complete successfully.';
+  end;
+end;
+
 function PrepareToInstall(var NeedsRestart: Boolean): String;
 begin
   Result := '';
   InstallationCompleted := False;
+  CommitFailed := False;
+  CommitFailureExitCode := 0;
   SnapshotReady := False;
   RecoveryFailure := False;
   if not ValidateProtectedAppRoot then
@@ -680,6 +859,8 @@ begin
     Result := 'AmmarTrading Sync must be installed beneath the machine Program Files directory without reparse points.';
     exit;
   end;
+  Result := InstallWebViewPrerequisite(NeedsRestart);
+  if Result <> '' then exit;
   Result := RecoverBeforeInstall;
 #ifdef AcceptanceFaultInjection
   if (Result = '') and (ExpandConstant('{param:TASK9MODE|}') = 'recoveryonly') then
@@ -688,41 +869,51 @@ begin
 end;
 
 procedure CurStepChanged(CurStep: TSetupStep);
-var
-  Entries: TPayloadEntries;
-  TransactionId, OldManifestHash, IncomingManifestHash, RegistrationHash, StateHash, VerifiedRoot: String;
+#ifdef AcceptanceFaultInjection
+var Index: Integer;
+#endif
 begin
-  if CurStep = ssDone then
+  if CurStep = ssPostInstall then
   begin
-    InstallationCompleted := True;
     if SnapshotReady and DirExists(ActiveRecoveryRoot) then
     begin
-      if not TryParseState(ActiveRecoveryRoot, Entries, TransactionId, OldManifestHash,
-        IncomingManifestHash, RegistrationHash) then
-        Log('ERROR: Successful install left invalid durable recovery state for support.')
-      else
+#ifdef AcceptanceFaultInjection
+      if ExpandConstant('{param:TASK9MODE|}') = 'incomingcompletecrash' then
       begin
-        StateHash := GetSHA256OfFile(RecoveryChild(ActiveRecoveryRoot, 'state.txt'));
-        SetRecoveryPhase(ActiveRecoveryRoot, 'VERIFIED', TransactionId, StateHash);
-        VerifiedRoot := AddBackslash(AppRoot) + AMMAR_RECOVERY_VERIFIED;
-        if (not RenameFile(ActiveRecoveryRoot, VerifiedRoot)) or
-           (not CleanupVerifiedRecovery(VerifiedRoot)) then
-          Log('ERROR: Successful install left verified recovery cleanup pending.');
+        AtomicWriteText(RecoveryChild(ActiveRecoveryRoot, 'incoming-complete-ready'), 'ready');
+        for Index := 1 to 720 do Sleep(250);
+      end;
+#endif
+      if not FinalizeIncomingTransaction(ActiveRecoveryRoot) then
+      begin
+        CommitFailed := True;
+        CommitFailureExitCode := 75;
+        RaiseException('The installed payload could not be committed safely; durable recovery was retained.');
       end;
     end;
+    InstallationCompleted := True;
   end;
 end;
 
+function GetCustomSetupExitCode: Integer;
+begin
+  Result := CommitFailureExitCode;
+end;
+
+function CanLaunchApplication: Boolean;
+begin
+  Result := not CommitFailed;
+end;
+
 procedure DeinitializeSetup;
-var VerifiedRoot: String;
 begin
   if InstallationCompleted or (not SnapshotReady) or RecoveryFailure then
     exit;
-  if not RestoreActiveTransaction(ActiveRecoveryRoot) then begin RecoveryFailure := True; exit; end;
-  VerifiedRoot := AddBackslash(AppRoot) + AMMAR_RECOVERY_VERIFIED;
-  if not RenameFile(ActiveRecoveryRoot, VerifiedRoot) then begin RecoveryFailure := True; exit; end;
-  if not CleanupVerifiedRecovery(VerifiedRoot) then
-    Log('ERROR: Verified rollback cleanup remains for the next setup run.');
+  if not ResolveActiveTransaction(ActiveRecoveryRoot) then
+  begin
+    RecoveryFailure := True;
+    Log('ERROR: Durable recovery remains; setup did not guess between prior and incoming payload state.');
+  end;
 end;
 
 #ifdef AcceptanceFaultInjection
@@ -737,6 +928,15 @@ begin
   for Index := 1 to 720 do Sleep(250);
 end;
 #endif
+
+function ShouldInstallFaultCollision: Boolean;
+begin
+#ifdef AcceptanceFaultInjection
+  Result := ExpandConstant('{param:TASK9MODE|}') <> 'incomingcompletecrash';
+#else
+  Result := False;
+#endif
+end;
 
 function HasWebView2Version(const RootKey: Integer): Boolean;
 var
@@ -753,4 +953,26 @@ function IsWebView2Installed: Boolean;
 begin
   Result := HasWebView2Version(HKEY_LOCAL_MACHINE_32) or
             HasWebView2Version(HKEY_CURRENT_USER_32);
+end;
+
+function InitializeUninstall: Boolean;
+var BuildingRoot, VerifiedRoot: String;
+begin
+  Result := False;
+  if not ValidateProtectedAppRoot then exit;
+  BuildingRoot := AddBackslash(AppRoot) + AMMAR_RECOVERY_BUILDING;
+  ActiveRecoveryRoot := AddBackslash(AppRoot) + AMMAR_RECOVERY_ACTIVE;
+  VerifiedRoot := AddBackslash(AppRoot) + AMMAR_RECOVERY_VERIFIED;
+  if DirExists(BuildingRoot) then
+  begin
+    Log('ERROR: Uninstall blocked by an incomplete durable snapshot.');
+    exit;
+  end;
+  if DirExists(VerifiedRoot) and (not CleanupVerifiedRecovery(VerifiedRoot)) then exit;
+  if DirExists(ActiveRecoveryRoot) and (not ResolveActiveTransaction(ActiveRecoveryRoot)) then
+  begin
+    Log('ERROR: Uninstall blocked by invalid durable recovery state; payload and registration were preserved.');
+    exit;
+  end;
+  Result := True;
 end;
