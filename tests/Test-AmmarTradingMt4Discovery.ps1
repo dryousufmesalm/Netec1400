@@ -46,6 +46,21 @@ function Copy-DiscoveryFixture {
     }
 }
 
+function Write-IdentityFixture {
+    param(
+        [Parameter(Mandatory)][string]$FilesDirectory,
+        [Parameter(Mandatory)][string]$AccountNumber,
+        [Parameter(Mandatory)][string]$BrokerName,
+        [string]$SchemaVersion = '3',
+        [string]$EaVersion = '3.00'
+    )
+
+    @(
+        'AccountNumber,BrokerName,CsvSchemaVersion,EAVersion',
+        ('{0},"{1}",{2},{3}' -f $AccountNumber,$BrokerName.Replace('"','""'),$SchemaVersion,$EaVersion)
+    ) | Set-Content -LiteralPath (Join-Path $FilesDirectory 'AGOLD___Identity.csv') -Encoding utf8
+}
+
 function New-TerminalFixture {
     param(
         [Parameter(Mandatory)][string]$TerminalRoot,
@@ -53,7 +68,8 @@ function New-TerminalFixture {
         [Parameter(Mandatory)][ValidateSet('Ready','SchemaV2','HeaderOnly','MalformedCsv')][string]$Kind,
         [string]$AccountNumber = '892522910',
         [string]$BrokerName = 'FXCM',
-        [string]$Origin
+        [string]$Origin,
+        [switch]$WriteIdentity
     )
 
     $terminalDirectory = Join-Path $TerminalRoot $TerminalId
@@ -72,6 +88,9 @@ function New-TerminalFixture {
             Set-Content -LiteralPath $csv -Value @($header,'broken,row') -Encoding utf8
         }
     }
+    if($WriteIdentity) {
+        Write-IdentityFixture -FilesDirectory $filesDirectory -AccountNumber $AccountNumber -BrokerName $BrokerName
+    }
     if(-not [string]::IsNullOrWhiteSpace($Origin)) {
         Set-Content -LiteralPath (Join-Path $terminalDirectory 'origin.txt') -Value $Origin -Encoding utf8
     }
@@ -82,16 +101,18 @@ try {
     $terminalRoot = Join-Path $TestDrive 'MetaQuotes\Terminal'
     New-Item -ItemType Directory -Path $terminalRoot -Force | Out-Null
 
-    $freshCsv = New-TerminalFixture -TerminalRoot $terminalRoot -TerminalId 'TERMINAL_A' -Kind Ready -AccountNumber '10000001' -BrokerName 'Broker Alpha' -Origin 'Broker Alpha MT4'
-    $staleCsv = New-TerminalFixture -TerminalRoot $terminalRoot -TerminalId 'TERMINAL_B' -Kind Ready -AccountNumber '20000002' -BrokerName 'Broker Beta'
+    $freshCsv = New-TerminalFixture -TerminalRoot $terminalRoot -TerminalId 'TERMINAL_A' -Kind Ready -AccountNumber '10000001' -BrokerName 'Broker Alpha' -Origin 'C:\Terminals\Alpha'
+    $staleCsv = New-TerminalFixture -TerminalRoot $terminalRoot -TerminalId 'TERMINAL_B' -Kind Ready -AccountNumber '20000002' -BrokerName 'Broker Beta' -Origin 'C:\Terminals\Beta'
     [IO.File]::SetLastWriteTimeUtc($freshCsv, [DateTime]::UtcNow.AddMinutes(-5))
     [IO.File]::SetLastWriteTimeUtc($staleCsv, [DateTime]::UtcNow.AddMinutes(-20))
 
-    [void](New-TerminalFixture -TerminalRoot $terminalRoot -TerminalId 'TERMINAL_V2' -Kind SchemaV2 -AccountNumber '30000003' -BrokerName 'Broker V2')
-    [void](New-TerminalFixture -TerminalRoot $terminalRoot -TerminalId 'TERMINAL_HEADER' -Kind HeaderOnly)
-    [void](New-TerminalFixture -TerminalRoot $terminalRoot -TerminalId 'TERMINAL_BAD' -Kind MalformedCsv)
-    [void](New-TerminalFixture -TerminalRoot $terminalRoot -TerminalId 'TERMINAL_DUP_A' -Kind Ready -AccountNumber '40000004' -BrokerName 'Broker Duplicate')
-    [void](New-TerminalFixture -TerminalRoot $terminalRoot -TerminalId 'TERMINAL_DUP_B' -Kind Ready -AccountNumber '40000004' -BrokerName 'Broker Duplicate')
+    [void](New-TerminalFixture -TerminalRoot $terminalRoot -TerminalId 'TERMINAL_V2' -Kind SchemaV2 -AccountNumber '30000003' -BrokerName 'Broker V2' -Origin 'C:\Terminals\V2')
+    [void](New-TerminalFixture -TerminalRoot $terminalRoot -TerminalId 'TERMINAL_HEADER' -Kind HeaderOnly -Origin 'C:\Terminals\Header')
+    [void](New-TerminalFixture -TerminalRoot $terminalRoot -TerminalId 'TERMINAL_HEADER_IDENTITY' -Kind HeaderOnly -AccountNumber '30000004' -BrokerName 'Broker Immediate' -Origin 'C:\Terminals\Immediate' -WriteIdentity)
+    [void](New-TerminalFixture -TerminalRoot $terminalRoot -TerminalId 'TERMINAL_BAD' -Kind MalformedCsv -Origin 'C:\Terminals\Bad')
+    [void](New-TerminalFixture -TerminalRoot $terminalRoot -TerminalId 'TERMINAL_DUP_A' -Kind Ready -AccountNumber '40000004' -BrokerName 'Broker Duplicate' -Origin 'C:\Terminals\DupA')
+    [void](New-TerminalFixture -TerminalRoot $terminalRoot -TerminalId 'TERMINAL_DUP_B' -Kind Ready -AccountNumber '40000004' -BrokerName 'Broker Duplicate' -Origin 'C:\Terminals\DupB')
+    [void](New-TerminalFixture -TerminalRoot $terminalRoot -TerminalId 'TERMINAL_INACTIVE' -Kind Ready -AccountNumber '70000007' -BrokerName 'Broker Inactive' -Origin 'C:\Terminals\Inactive')
 
     $nestedFiles = Join-Path $terminalRoot 'TERMINAL_PARENT\nested\MQL4\Files'
     New-Item -ItemType Directory -Path $nestedFiles -Force | Out-Null
@@ -105,9 +126,23 @@ try {
     Import-Module -Name $SetupModulePath -Force -ErrorAction Stop
     Import-Module -Name $SchemaModulePath -Force -ErrorAction Stop
 
+    $setupSource = Get-Content -LiteralPath $SetupModulePath -Raw
+    Assert-True -Condition ($setupSource -match "\[Diagnostics\.Process\]::GetProcessesByName\('terminal'\)") -Message 'Automatic discovery must enumerate running MT4 processes without depending on the optional WMI repository.'
+
+    $setupModule = Get-Module -Name MoneyMachineSyncSetup
+    & $setupModule {
+        $script:AmmarTradingRunningTerminalPathResolver = {
+            @(
+                'C:\Terminals\Alpha\terminal.exe','C:\Terminals\Beta\terminal.exe','C:\Terminals\V2\terminal.exe',
+                'C:\Terminals\Header\terminal.exe','C:\Terminals\Immediate\terminal.exe','C:\Terminals\Bad\terminal.exe',
+                'C:\Terminals\DupA\terminal.exe','C:\Terminals\DupB\terminal.exe'
+            )
+        }
+    }
+
     $accounts = @(Get-AmmarTradingMt4Accounts -TerminalDataRoot $terminalRoot)
     $ready = @($accounts | Where-Object Eligibility -eq 'Ready')
-    Assert-Equal -Actual $ready.Count -Expected 2 -Message 'Discovery must return two unique ready accounts.'
+    Assert-Equal -Actual $ready.Count -Expected 3 -Message 'Discovery must return two completed accounts and one sidecar-identified header-only account.'
     Assert-True -Condition ($ready[0].AccountNumber -match '^\d+$') -Message 'A ready account must expose a digit-only account number.'
     Assert-True -Condition (-not [string]::IsNullOrWhiteSpace([string]$ready[0].BrokerName)) -Message 'A ready account must expose a broker name.'
     Assert-True -Condition ($ready[0].DiscoveryId -cmatch '^[A-F0-9]{64}$') -Message 'A discovery identity must be an uppercase SHA-256 value.'
@@ -115,9 +150,12 @@ try {
     Assert-Equal -Actual @($accounts | Where-Object ReasonCode -eq 'HeaderOnly').Count -Expected 1 -Message 'Header-only sources must remain visible and blocked.'
     Assert-Equal -Actual @($accounts | Where-Object ReasonCode -eq 'MalformedCsv').Count -Expected 1 -Message 'Malformed sources must remain visible and blocked.'
     Assert-Equal -Actual @($accounts | Where-Object ReasonCode -eq 'DuplicateAccount').Count -Expected 2 -Message 'Every source in an account conflict must be blocked.'
+    Assert-Equal -Actual @($accounts | Where-Object AccountNumber -eq '30000004' | Where-Object ReasonCode -eq 'Ready').Count -Expected 1 -Message 'A schema-v3 header-only source with a matching immediate identity sidecar must be ready.'
+    Assert-Equal -Actual @($accounts | Where-Object AccountNumber -eq '70000007').Count -Expected 0 -Message 'A report from an inactive MT4 terminal must not appear in automatic discovery.'
     Assert-Equal -Actual @($accounts | Where-Object AccountNumber -eq '50000005').Count -Expected 0 -Message 'Discovery must not recurse below direct terminal directories.'
     $legacyDiscovery = Get-MoneyMachineSetupDiscovery -OneDriveCandidates @() -TerminalDataRoot $terminalRoot
     Assert-Equal -Actual @($legacyDiscovery.Sources | Where-Object Path -eq (Join-Path $nestedFiles 'AGOLD___Baskets.csv')).Count -Expected 0 -Message 'The compatibility discovery surface must use the same direct-location boundary.'
+    Assert-Equal -Actual @($legacyDiscovery.Sources | Where-Object Path -eq (Join-Path $terminalRoot 'TERMINAL_INACTIVE\MQL4\Files\AGOLD___Baskets.csv')).Count -Expected 0 -Message 'The compatibility discovery surface must exclude inactive MT4 terminal roots.'
 
     $fresh = @($accounts | Where-Object AccountNumber -eq '10000001')[0]
     $stale = @($accounts | Where-Object AccountNumber -eq '20000002')[0]
@@ -126,7 +164,7 @@ try {
     $fingerprintFile = Join-Path $TestDrive 'expected-fingerprint.txt'
     [IO.File]::WriteAllText($fingerprintFile, $expectedFingerprint, (New-Object Text.UTF8Encoding($false)))
     Assert-Equal -Actual $fresh.DiscoveryId -Expected (Get-FileHash -LiteralPath $fingerprintFile -Algorithm SHA256).Hash -Message 'DiscoveryId must hash the canonical path, account, length, and UTC write ticks in order.'
-    Assert-Equal -Actual $fresh.TerminalName -Expected 'Broker Alpha MT4' -Message 'origin.txt must supply the terminal name when present.'
+    Assert-Equal -Actual $fresh.TerminalName -Expected 'C:\Terminals\Alpha' -Message 'origin.txt must supply the terminal name when present.'
     Assert-Equal -Actual $fresh.Freshness -Expected 'Fresh' -Message 'A file no more than 15 minutes old must be fresh.'
     Assert-Equal -Actual $stale.Freshness -Expected 'Stale' -Message 'A file over 15 minutes old must be stale.'
     Assert-Equal -Actual ($accounts[0].PSObject.Properties.Name -join ',') -Expected 'DiscoveryId,AccountNumber,BrokerName,TerminalId,TerminalName,SourceCsv,SchemaVersion,LastWriteUtc,Freshness,Eligibility,ReasonCode' -Message 'Discovery results must preserve the public field contract and order.'
@@ -137,7 +175,6 @@ try {
     Assert-Equal -Actual $manual[0].TerminalId -Expected 'Manual' -Message 'Manual CSV discovery must use a stable terminal identifier.'
     Assert-Equal -Actual $manual[0].Eligibility -Expected 'Ready' -Message 'Manual browse must use the same identity validation as MT4 discovery.'
 
-    $setupModule = Get-Module -Name MoneyMachineSyncSetup
     & $setupModule {
         $script:AmmarTradingDriveTypeResolver = { param([string]$Root) [IO.DriveType]::Network }
     }

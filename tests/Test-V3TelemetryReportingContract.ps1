@@ -14,6 +14,11 @@ $required = @(
     'TelemetryEnsureRunContext',
     'TelemetryRunContextIsValid',
     'TelemetryClearRunContext',
+    'TelemetryRunResetDeferredKey',
+    'TelemetryRunResetDeferredIsPersisted',
+    'TelemetryMarkRunResetDeferred',
+    'TELEMETRY_IDENTITY_FILE_NAME',
+    'TelemetryWriteIdentityFile',
     'NewBasketDelaySeconds',
     'UseBasketTrailingTP',
     'EnableRecoveryStepUp'
@@ -30,6 +35,32 @@ if($source -notmatch 'line\s*=\s*line\s*\+\s*"3"') {
 
 if($source -notmatch 'TelemetryEnsureRunContext\(\);\s*\r?\n\s*CheckBasketStateConsistency\(\);') {
     throw 'Run reset detection must execute before telemetry can observe an external basket closure.'
+}
+if($source -notmatch 'CheckBasketStateConsistency\(\);\s*(?://[^\r\n]*\r?\n\s*)*TelemetryEnsureRunContext\(true\);\s*\r?\n\s*UpdateReferenceExtremes\(\);') {
+    throw 'A deferred run reset must be reconciled after external closure and before same-tick entry processing.'
+}
+
+if($source -notmatch '#define\s+TELEMETRY_IDENTITY_FILE_NAME\s+"AGOLD___Identity\.csv"') {
+    throw 'The EA must publish the canonical immediate account identity sidecar.'
+}
+if($source -notmatch 'AccountNumber,BrokerName,CsvSchemaVersion,EAVersion') {
+    throw 'The immediate account identity sidecar header is incomplete.'
+}
+foreach($identityValue in @('AccountNumber()','AccountCompany()','"3"','"3.00"')) {
+    if($source -notmatch [regex]::Escape($identityValue)) {
+        throw "The immediate account identity sidecar is missing $identityValue."
+    }
+}
+$onInitBody = [regex]::Match($source, '(?s)int\s+OnInit\s*\(\s*\).*?return\s*\(\s*INIT_SUCCEEDED\s*\)')
+if(-not $onInitBody.Success -or
+   $onInitBody.Value.IndexOf('TelemetryWriteIdentityFile()', [StringComparison]::Ordinal) -lt 0 -or
+   $onInitBody.Value.IndexOf('TelemetryWriteIdentityFile()', [StringComparison]::Ordinal) -gt
+   $onInitBody.Value.IndexOf('TelemetryEnsureRunContext(true)', [StringComparison]::Ordinal)) {
+    throw 'OnInit must publish account identity before initializing the reporting run.'
+}
+$missingCsvBranch = [regex]::Match($source, '(?s)if\s*\(\s*!csvExists\s*\).*?\n\s*}')
+if(-not $missingCsvBranch.Success -or $missingCsvBranch.Value -notmatch 'TelemetryEnsureSchemaV3Header\s*\(') {
+    throw 'A missing basket CSV must receive its schema-v3 header even when an existing basket delays the new run.'
 }
 
 if($source -notmatch 'string\s+TelemetryCsvEscape\s*\(\s*string\s+value\s*\)') {

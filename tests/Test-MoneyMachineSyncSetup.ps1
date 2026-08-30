@@ -29,7 +29,9 @@ try {
     $oneDriveRoot = Join-Path $tempRoot 'OneDrive - Money Machine'
     $terminalRoot = Join-Path $tempRoot 'MetaQuotes\Terminal'
     $sourceDir = Join-Path $terminalRoot 'ABC123\MQL4\Files'
+    $fakeTerminalRoot = Join-Path $tempRoot 'FakeMt4'
     New-Item -ItemType Directory -Path $oneDriveRoot,$sourceDir -Force | Out-Null
+    Set-Content -LiteralPath (Join-Path $terminalRoot 'ABC123\origin.txt') -Value $fakeTerminalRoot -Encoding utf8
     $env:OneDrive = $oneDriveRoot
     $env:OneDriveCommercial = $null
     $env:OneDriveConsumer = $null
@@ -39,10 +41,12 @@ try {
     Import-Module -Name $ModulePath -Force -ErrorAction Stop
     $setupModule = Get-Module -Name MoneyMachineSyncSetup
     & $setupModule {
-        param($Root)
+        param($Root,$TerminalPath)
         $script:AmmarTradingTestRegisteredOneDriveRoot = $Root
         $script:AmmarTradingOneDriveRegistrationResolver = { @($script:AmmarTradingTestRegisteredOneDriveRoot) }
-    } $oneDriveRoot
+        $script:AmmarTradingTestRunningTerminalPath = $TerminalPath
+        $script:AmmarTradingRunningTerminalPathResolver = { @($script:AmmarTradingTestRunningTerminalPath) }
+    } $oneDriveRoot (Join-Path $fakeTerminalRoot 'terminal.exe')
     $discovery = Get-MoneyMachineSetupDiscovery -OneDriveCandidates @($oneDriveRoot) -TerminalDataRoot $terminalRoot
 
     if(@($discovery.OneDriveRoots).Count -ne 1) { throw 'Discovery must return exactly one existing OneDrive root.' }

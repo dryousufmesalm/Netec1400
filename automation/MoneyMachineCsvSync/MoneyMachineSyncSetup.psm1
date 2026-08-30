@@ -20,6 +20,26 @@ $script:AmmarTradingOneDriveRegistrationResolver = {
     }
     return @($roots)
 }
+$script:AmmarTradingRunningTerminalPathResolver = {
+    $paths = [System.Collections.Generic.List[string]]::new()
+    foreach($process in @([Diagnostics.Process]::GetProcessesByName('terminal'))) {
+        try {
+            $executablePath = [string]$process.MainModule.FileName
+            if(-not [string]::IsNullOrWhiteSpace($executablePath)) { $paths.Add($executablePath) }
+        } catch {
+        } finally {
+            $process.Dispose()
+        }
+    }
+    return @($paths)
+}
+$script:AmmarTradingTaskInstallerInvoker = {
+    param(
+        [Parameter(Mandatory)][string]$Installer,
+        [Parameter(Mandatory)][string]$ConfigPath
+    )
+    & $Installer -ConfigPath $ConfigPath
+}
 $script:AmmarTradingHeldPathMetadataResolver = $null
 $script:AmmarTradingTrustedPathOperationHook = $null
 $script:AmmarTradingTrustedFilePublicationHook = $null
@@ -1100,6 +1120,15 @@ function Get-AmmarTradingMt4Accounts {
 
     $candidates = [System.Collections.Generic.List[object]]::new()
     $seenPaths = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::OrdinalIgnoreCase)
+    $runningTerminalPaths = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::OrdinalIgnoreCase)
+    try {
+        foreach($runningPath in @(& $script:AmmarTradingRunningTerminalPathResolver)) {
+            if([string]::IsNullOrWhiteSpace([string]$runningPath)) { continue }
+            try { [void]$runningTerminalPaths.Add([IO.Path]::GetFullPath(([string]$runningPath).Trim())) } catch {}
+        }
+    } catch {
+        $runningTerminalPaths.Clear()
+    }
 
     $resolvedTerminalRoot = $null
     if(-not [string]::IsNullOrWhiteSpace($TerminalDataRoot)) {
@@ -1112,6 +1141,7 @@ function Get-AmmarTradingMt4Accounts {
 
             $terminalName = $terminal.Name
             $origin = Join-Path $terminal.FullName 'origin.txt'
+            $originValue = ''
             if(Test-Path -LiteralPath $origin -PathType Leaf) {
                 try {
                     $originValue = ([string](Get-Content -LiteralPath $origin -Raw -ErrorAction Stop)).Trim()
@@ -1120,6 +1150,10 @@ function Get-AmmarTradingMt4Accounts {
                     $terminalName = $terminal.Name
                 }
             }
+
+            if([string]::IsNullOrWhiteSpace($originValue)) { continue }
+            try { $terminalExecutable = [IO.Path]::GetFullPath((Join-Path $originValue 'terminal.exe')) } catch { continue }
+            if(-not $runningTerminalPaths.Contains($terminalExecutable)) { continue }
 
             if($seenPaths.Add($resolvedCsv)) {
                 $candidates.Add([pscustomobject]@{
@@ -1210,21 +1244,12 @@ function Get-MoneyMachineSetupDiscovery {
     }
 
     $sources = [System.Collections.Generic.List[object]]::new()
-    $resolvedTerminalRoot = $null
-    if(-not [string]::IsNullOrWhiteSpace($TerminalDataRoot)) {
-        try { $resolvedTerminalRoot = Resolve-AmmarTradingLocalPath -Path $TerminalDataRoot -PathType Container -Description 'MT4 terminal data root' } catch { $resolvedTerminalRoot = $null }
-    }
-    if($null -ne $resolvedTerminalRoot) {
-        foreach($terminalDirectory in @(Get-ChildItem -LiteralPath $resolvedTerminalRoot -Directory -ErrorAction SilentlyContinue)) {
-            $sourcePath = Join-Path $terminalDirectory.FullName 'MQL4\Files\AGOLD___Baskets.csv'
-            try { $resolvedSourcePath = Resolve-AmmarTradingLocalPath -Path $sourcePath -PathType Leaf -Description 'MT4 source CSV' } catch { continue }
-            $file = Get-Item -LiteralPath $resolvedSourcePath -ErrorAction Stop
-            $sources.Add([pscustomobject]@{
-                Path = $file.FullName
-                TerminalId = $terminalDirectory.Name
-                LastWriteUtc = $file.LastWriteTimeUtc.ToString('o')
-            })
-        }
+    foreach($account in @(Get-AmmarTradingMt4Accounts -TerminalDataRoot $TerminalDataRoot)) {
+        $sources.Add([pscustomobject]@{
+            Path = $account.SourceCsv
+            TerminalId = $account.TerminalId
+            LastWriteUtc = $account.LastWriteUtc
+        })
     }
 
     return [pscustomobject]@{
@@ -1742,7 +1767,7 @@ function Invoke-AmmarTradingBatchSetup {
         } else {
             $installer = Join-Path $PSScriptRoot 'Install-BasketsSyncTask.ps1'
             if(-not (Test-Path -LiteralPath $installer -PathType Leaf)) { throw "Scheduled-task installer was not found: $installer" }
-            & $installer -ConfigPath $fullConfigPath
+            & $script:AmmarTradingTaskInstallerInvoker $installer $fullConfigPath *> $null
             $stages.Add([pscustomobject]@{ Code='Automated'; Status='Success'; Message='Daily and logon catch-up synchronization tasks are active.' })
             $taskState = 'Registered'
         }

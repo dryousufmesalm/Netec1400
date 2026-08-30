@@ -191,6 +191,7 @@
       //| Section 6 Telemetry (AGOLD___Baskets.csv)                         |
       //+------------------------------------------------------------------+
       #define TELEMETRY_FILE_NAME "AGOLD___Baskets.csv"
+      #define TELEMETRY_IDENTITY_FILE_NAME "AGOLD___Identity.csv"
 
       bool     g_LastOpenBlockedByExposureCap = false;
 
@@ -367,6 +368,8 @@
          RestoreBasketState();
 
          // Reporting-only run lifecycle. This never gates or changes trading decisions.
+         if(!TelemetryWriteIdentityFile())
+            Print("Telemetry: immediate account identity could not be published.");
          TelemetryEnsureRunContext(true);
          
          if(Bars > 0) { g_RefHigh = High[0]; g_RefLow = Low[0]; }
@@ -422,6 +425,10 @@
          // it has no return path into entry, grid, exit, trailing, or risk logic.
          TelemetryEnsureRunContext();
          CheckBasketStateConsistency();
+         // An external/SL close is discovered above, after the first run check.
+         // Reconcile the reporting run while flat before a same-tick new basket
+         // can be observed. This does not gate or alter the entry decision.
+         TelemetryEnsureRunContext(true);
          UpdateReferenceExtremes();
          RegimeOnNewBarIfNeeded();
 
@@ -1094,6 +1101,26 @@
       string TelemetryRunStartTimeKey()    { return TelemetryRunBaseKey() + "_StartTime"; }
       string TelemetryRunStartBalanceKey() { return TelemetryRunBaseKey() + "_StartBalance"; }
       string TelemetryRunIDKey()           { return TelemetryRunBaseKey() + "_ID"; }
+      string TelemetryRunResetDeferredKey(){ return TelemetryRunBaseKey() + "_ResetDeferred"; }
+
+      bool TelemetryRunResetDeferredIsPersisted()
+      {
+         return GlobalVariableCheck(TelemetryRunResetDeferredKey()) &&
+                GlobalVariableGet(TelemetryRunResetDeferredKey()) > 0.5;
+      }
+
+      void TelemetryClearRunResetDeferred()
+      {
+         g_Telemetry_RunResetDeferred = false;
+         if(GlobalVariableCheck(TelemetryRunResetDeferredKey()))
+            GlobalVariableDel(TelemetryRunResetDeferredKey());
+      }
+
+      void TelemetryMarkRunResetDeferred()
+      {
+         g_Telemetry_RunResetDeferred = true;
+         GlobalVariableSet(TelemetryRunResetDeferredKey(), 1.0);
+      }
 
       string TelemetryBuildRunID(datetime runStartTime)
       {
@@ -1144,6 +1171,24 @@
          if(!quote) return value;
          StringReplace(value, "\"", "\"\"");
          return "\"" + value + "\"";
+      }
+
+      bool TelemetryWriteIdentityFile()
+      {
+         int fh = FileOpen(TELEMETRY_IDENTITY_FILE_NAME, FILE_WRITE | FILE_TXT | FILE_ANSI, 0, CP_UTF8);
+         if(fh < 0)
+         {
+            Print("Telemetry: unable to create account identity sidecar err=", GetLastError());
+            return false;
+         }
+
+         FileWrite(fh, "AccountNumber,BrokerName,CsvSchemaVersion,EAVersion");
+         string line = IntegerToString(AccountNumber()) + "," +
+                       TelemetryCsvEscape(AccountCompany()) + "," +
+                       "3" + "," + "3.00";
+         FileWrite(fh, line);
+         FileClose(fh);
+         return true;
       }
 
       int TelemetryHeaderColumnIndex(string header, string columnName)
@@ -1220,7 +1265,7 @@
          g_Telemetry_RunStartTime = 0;
          g_Telemetry_RunStartBalance = 0.0;
          g_Telemetry_RunID = "";
-         g_Telemetry_RunResetDeferred = false;
+         TelemetryClearRunResetDeferred();
          g_Telemetry_SchemaBlocked = false;
          if(GlobalVariableCheck(TelemetryRunStartTimeKey())) GlobalVariableDel(TelemetryRunStartTimeKey());
          if(GlobalVariableCheck(TelemetryRunStartBalanceKey())) GlobalVariableDel(TelemetryRunStartBalanceKey());
@@ -1254,7 +1299,7 @@
          g_Telemetry_RunStartTime = runStartTime;
          g_Telemetry_RunStartBalance = runStartBalance;
          g_Telemetry_RunID = TelemetryBuildRunID(runStartTime);
-         g_Telemetry_RunResetDeferred = false;
+         TelemetryClearRunResetDeferred();
          g_Telemetry_SchemaBlocked = !TelemetryEnsureSchemaV3Header();
          if(g_Telemetry_SchemaBlocked)
          {
@@ -1278,11 +1323,17 @@
          bool basketActive = g_BasketExists || g_Telemetry_BasketActive || GetBasketOrderCount() > 0;
          if(!csvExists)
          {
+            if(!TelemetryEnsureSchemaV3Header())
+            {
+               g_Telemetry_SchemaBlocked = true;
+               return;
+            }
+
             if(basketActive)
             {
-               if(!g_Telemetry_RunResetDeferred)
-                  Print("Telemetry: CSV reset detected while a basket is active; new run deferred until flat.");
-               g_Telemetry_RunResetDeferred = true;
+               TelemetryClearRunContext();
+               Print("Telemetry: schema-v3 CSV initialized while a basket is active; current basket row is deferred until the next flat run.");
+               TelemetryMarkRunResetDeferred();
                return;
             }
 
@@ -1300,6 +1351,16 @@
          }
 
          g_Telemetry_SchemaBlocked = false;
+         if(g_Telemetry_RunResetDeferred || TelemetryRunResetDeferredIsPersisted())
+         {
+            g_Telemetry_RunResetDeferred = true;
+            if(basketActive)
+               return;
+
+            TelemetryClearRunContext();
+            TelemetryBeginRun(TimeCurrent(), AccountBalance());
+            return;
+         }
          if(TelemetryRunContextIsValid()) return;
          if(TelemetryRestoreRunContextFromGlobals()) return;
          if(TelemetryRestoreRunContextFromCSV()) return;

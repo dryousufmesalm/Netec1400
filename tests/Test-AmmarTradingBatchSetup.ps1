@@ -94,6 +94,8 @@ function New-BatchRequest {
 
 try {
     New-Item -ItemType Directory -Path $tempRoot -Force | Out-Null
+    $setupSource = Get-Content -LiteralPath $ModulePath -Raw
+    Assert-True -Condition ($setupSource -match '&\s*\$script:AmmarTradingTaskInstallerInvoker\s+\$installer\s+\$fullConfigPath\s+\*>\s*\$null') -Message 'Production scheduled-task registration must suppress every non-error PowerShell stream before returning desktop JSON.'
     Import-Module -Name $ModulePath -Force -ErrorAction Stop
     $setupModule = Get-Module -Name MoneyMachineSyncSetup
     function Set-TestOneDriveRegistration {
@@ -139,6 +141,29 @@ try {
     Assert-Equal -Actual $result.Accounts[0].TaskState -Expected 'RegistrationSkipped' -Message 'Staging acceptance must report skipped task registration.'
     Assert-True -Condition (Test-Path -LiteralPath (Join-Path $successOneDrive 'AmmarTrading\Account_10000001\Baskets.csv') -PathType Leaf) -Message 'The first selected account must publish to the canonical destination.'
     Assert-True -Condition (Test-Path -LiteralPath (Join-Path $successOneDrive 'AmmarTrading\Account_20000002\Baskets.csv') -PathType Leaf) -Message 'The second selected account must publish to the canonical destination.'
+
+    # The real installer writes a banner with Write-Host. Production setup must
+    # absorb that information stream so the wizard receives one result object.
+    & $setupModule {
+        $script:AmmarTradingTaskInstallerInvoker = {
+            param($Installer,$ConfigPath)
+            Write-Host 'simulated scheduled-task installer banner'
+        }
+    }
+    $taskRoot = Join-Path $tempRoot 'task-output'
+    $taskOneDrive = Join-Path $taskRoot 'OneDrive'
+    New-Item -ItemType Directory -Path $taskOneDrive -Force | Out-Null
+    $taskSource = New-AccountCsv -Path (Join-Path $taskRoot 'source.csv') -AccountNumber '90000009' -BrokerName 'Broker Task'
+    $taskDiscovery = Get-ManualDiscovery -Paths @($taskSource)
+    $taskRequest = New-BatchRequest -Discoveries $taskDiscovery -OneDriveRoot $taskOneDrive -VpsName 'Task output VPS'
+    $taskOutput = @(
+        Invoke-AmmarTradingBatchSetup -Request $taskRequest -ConfigPath (Join-Path $taskRoot 'accounts.csv') -RuntimeRoot (Join-Path $taskRoot 'runtime') -StableCheckSeconds 0 6>&1
+    )
+    Assert-Equal -Actual $taskOutput.Count -Expected 1 -Message 'Scheduled-task banner output must not escape the batch setup function.'
+    Assert-Equal -Actual $taskOutput[0].Status -Expected 'Success' -Message 'Task-registration setup must return its success result.'
+    Assert-Equal -Actual $taskOutput[0].Accounts[0].TaskState -Expected 'Registered' -Message 'Task-registration setup must report the registered state.'
+    $env:OneDrive = $successOneDrive
+    Set-TestOneDriveRegistration -Root $successOneDrive
 
     $migratedFile = Join-Path $successOneDrive 'AmmarTrading\Account_10000001\History\prior.csv'
     Assert-True -Condition (Test-Path -LiteralPath $legacyFile -PathType Leaf) -Message 'Legacy migration must leave source data untouched.'

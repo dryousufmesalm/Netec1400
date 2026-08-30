@@ -41,6 +41,33 @@ int OnInit()
    if(TelemetryRunContextIsValid())
       return(Fail("run context was not cleared"));
 
+   // A CSV reset while a basket is active must survive an EA restart and
+   // become a fresh reporting run only after the account returns flat.
+   TelemetryBeginRun((datetime)1760000100, 1600.50);
+   g_Telemetry_BasketActive = true;
+   FileDelete(TELEMETRY_FILE_NAME);
+   TelemetryEnsureRunContext(true);
+   if(!g_Telemetry_RunResetDeferred || !TelemetryRunResetDeferredIsPersisted())
+      return(Fail("active-basket reset was not persisted"));
+   if(TelemetryRunContextIsValid())
+      return(Fail("stale run context survived an active-basket reset"));
+
+   // Simulate volatile state loss across an EA/terminal restart.
+   g_Telemetry_RunResetDeferred = false;
+   g_Telemetry_RunStartTime = 0;
+   g_Telemetry_RunStartBalance = 0.0;
+   g_Telemetry_RunID = "";
+   TelemetryEnsureRunContext(true);
+   if(!g_Telemetry_RunResetDeferred || TelemetryRunContextIsValid())
+      return(Fail("restart did not restore the deferred reset state"));
+
+   g_Telemetry_BasketActive = false;
+   TelemetryEnsureRunContext(true);
+   if(g_Telemetry_RunResetDeferred || TelemetryRunResetDeferredIsPersisted())
+      return(Fail("flat transition did not clear the deferred reset"));
+   if(!TelemetryRunContextIsValid())
+      return(Fail("flat transition did not initialize a new reporting run"));
+
    Print("V3TelemetryRunStateTest PASSED");
    return(INIT_SUCCEEDED);
 }

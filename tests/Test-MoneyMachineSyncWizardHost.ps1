@@ -52,15 +52,21 @@ Assert-HostThrowsLike -Expected '64 KiB' -Action { Assert-MoneyMachineWizardBody
 
 $tempRoot = Join-Path ([IO.Path]::GetTempPath()) ("MoneyMachineWizardHostTest_" + [guid]::NewGuid().ToString('N'))
 $hostProcess = $null
+$fakeTerminalProcess = $null
 $testOneDriveAccountKey = 'HKCU:\Software\Microsoft\OneDrive\Accounts\AmmarTradingWizardHostTest_' + [guid]::NewGuid().ToString('N')
 try {
     $appRoot = Join-Path $tempRoot 'WizardApp'
     $oneDriveRoot = Join-Path $tempRoot 'OneDrive'
     $terminalRoot = Join-Path $tempRoot 'MetaQuotes\Terminal'
     $sourceDir = Join-Path $terminalRoot 'HOSTTEST\MQL4\Files'
+    $fakeTerminalRoot = Join-Path $tempRoot 'FakeMt4'
     $runtimeRoot = Join-Path $tempRoot 'runtime'
     $configPath = Join-Path $tempRoot 'config\accounts.csv'
-    New-Item -ItemType Directory -Path $appRoot,$oneDriveRoot,$sourceDir,(Split-Path -Parent $configPath) -Force | Out-Null
+    New-Item -ItemType Directory -Path $appRoot,$oneDriveRoot,$sourceDir,$fakeTerminalRoot,(Split-Path -Parent $configPath) -Force | Out-Null
+    $fakeTerminalExe = Join-Path $fakeTerminalRoot 'terminal.exe'
+    Copy-Item -LiteralPath (Join-Path $env:WINDIR 'System32\cmd.exe') -Destination $fakeTerminalExe
+    Set-Content -LiteralPath (Join-Path $terminalRoot 'HOSTTEST\origin.txt') -Value $fakeTerminalRoot -Encoding utf8
+    $fakeTerminalProcess = Start-Process -FilePath $fakeTerminalExe -ArgumentList '/c','ping 127.0.0.1 -n 120 >nul' -PassThru -WindowStyle Hidden
     New-Item -Path $testOneDriveAccountKey -Force | Out-Null
     New-ItemProperty -LiteralPath $testOneDriveAccountKey -Name 'UserFolder' -Value $oneDriveRoot -PropertyType String -Force | Out-Null
     Set-Content -LiteralPath (Join-Path $appRoot 'index.html') -Value '<!doctype html><html><body>Wizard host test</body></html>' -Encoding utf8
@@ -124,6 +130,7 @@ try {
 }
 finally {
     if($null -ne $hostProcess -and -not $hostProcess.HasExited) { Stop-Process -Id $hostProcess.Id -Force -ErrorAction SilentlyContinue }
+    if($null -ne $fakeTerminalProcess -and -not $fakeTerminalProcess.HasExited) { Stop-Process -Id $fakeTerminalProcess.Id -Force -ErrorAction SilentlyContinue }
     try { Remove-VerifiedSyntheticOneDriveAccountKey -LiteralPath $testOneDriveAccountKey }
     finally {
         if(Test-Path -LiteralPath $tempRoot) { Remove-Item -LiteralPath $tempRoot -Recurse -Force }

@@ -10,6 +10,7 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 $stagingRoot = Join-Path ([IO.Path]::GetTempPath()) ("MoneyMachineWizardAcceptance_" + [guid]::NewGuid().ToString('N'))
 $hostProcess = $null
+$fakeTerminalProcess = $null
 $oneDriveAccountsKey = 'HKCU:\Software\Microsoft\OneDrive\Accounts'
 $oneDriveAccountsKeyExisted = Test-Path -LiteralPath $oneDriveAccountsKey -PathType Container
 $testRegistrationKey = $null
@@ -29,9 +30,14 @@ try {
     $oneDriveRoot = Join-Path $stagingRoot 'OneDrive'
     $terminalRoot = Join-Path $stagingRoot 'MetaQuotes\Terminal'
     $sourceDir = Join-Path $terminalRoot 'ACCEPTANCE\MQL4\Files'
+    $fakeTerminalRoot = Join-Path $stagingRoot 'FakeMt4'
     $runtimeRoot = Join-Path $stagingRoot 'runtime'
     $configPath = Join-Path $stagingRoot 'config\accounts.csv'
-    New-Item -ItemType Directory -Path $oneDriveRoot,$sourceDir,$EvidenceRoot -Force | Out-Null
+    New-Item -ItemType Directory -Path $oneDriveRoot,$sourceDir,$fakeTerminalRoot,$EvidenceRoot -Force | Out-Null
+    $fakeTerminalExe = Join-Path $fakeTerminalRoot 'terminal.exe'
+    Copy-Item -LiteralPath (Join-Path $env:WINDIR 'System32\cmd.exe') -Destination $fakeTerminalExe
+    Set-Content -LiteralPath (Join-Path $terminalRoot 'ACCEPTANCE\origin.txt') -Value $fakeTerminalRoot -Encoding utf8
+    $fakeTerminalProcess = Start-Process -FilePath $fakeTerminalExe -ArgumentList '/c','ping 127.0.0.1 -n 120 >nul' -PassThru -WindowStyle Hidden
     Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'fixtures\AGOLD___Baskets_v3.csv') -Destination (Join-Path $sourceDir 'AGOLD___Baskets.csv')
 
     if(-not $oneDriveAccountsKeyExisted) { New-Item -Path $oneDriveAccountsKey -Force | Out-Null }
@@ -74,6 +80,7 @@ finally {
     Remove-Item Env:QA_BROWSER,Env:QA_URL,Env:QA_OUTPUT -ErrorAction SilentlyContinue
     if($null -eq $previousOneDrive) { Remove-Item Env:OneDrive -ErrorAction SilentlyContinue } else { $env:OneDrive = $previousOneDrive }
     if($null -ne $hostProcess -and -not $hostProcess.HasExited) { Stop-Process -Id $hostProcess.Id -Force -ErrorAction SilentlyContinue }
+    if($null -ne $fakeTerminalProcess -and -not $fakeTerminalProcess.HasExited) { Stop-Process -Id $fakeTerminalProcess.Id -Force -ErrorAction SilentlyContinue }
     if(-not [string]::IsNullOrWhiteSpace($testRegistrationKey) -and (Test-Path -LiteralPath $testRegistrationKey)) {
         Remove-Item -LiteralPath $testRegistrationKey -Recurse -Force
     }

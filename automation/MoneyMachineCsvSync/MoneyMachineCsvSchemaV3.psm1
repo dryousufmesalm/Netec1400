@@ -15,6 +15,7 @@ $script:SchemaV3Columns = @(
     'TradeFriday','EnableRecoveryStepUp','RecoveryWaitMinutes','RecoveryMaxTotalLotsInBasket','CsvSchemaVersion'
 )
 $script:SchemaV2Columns = @($script:SchemaV3Columns[0..33]) + @('CsvSchemaVersion')
+$script:IdentityColumns = @('AccountNumber','BrokerName','CsvSchemaVersion','EAVersion')
 
 $script:IntegerFields = @(
     'BasketID','Timeframe','DurationSeconds','OrdersCount','MaxOrdersConcurrent','TimesNearKill','ExposureBlocks','PipsStep',
@@ -69,6 +70,47 @@ function Test-ExactCsvHeader {
     return $true
 }
 
+function Get-AmmarTradingImmediateIdentity {
+    param([Parameter(Mandatory)][string]$BasketsPath)
+
+    $identityPath = Join-Path ([IO.Path]::GetDirectoryName($BasketsPath)) 'AGOLD___Identity.csv'
+    if(-not (Test-Path -LiteralPath $identityPath -PathType Leaf)) { return $null }
+    $identityFile = Get-Item -LiteralPath $identityPath -ErrorAction Stop
+    if(($identityFile.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0 -or $identityFile.Length -le 0 -or $identityFile.Length -gt 4096) {
+        return $null
+    }
+
+    $parser = $null
+    try {
+        $parser = New-Object Microsoft.VisualBasic.FileIO.TextFieldParser($identityPath, [Text.Encoding]::UTF8, $true)
+        $parser.TextFieldType = [Microsoft.VisualBasic.FileIO.FieldType]::Delimited
+        $parser.SetDelimiters(',')
+        $parser.HasFieldsEnclosedInQuotes = $true
+        $parser.TrimWhiteSpace = $false
+        if($parser.EndOfData) { return $null }
+        $header = @($parser.ReadFields())
+        if(-not (Test-ExactCsvHeader -Header $header -Expected $script:IdentityColumns) -or $parser.EndOfData) { return $null }
+        $fields = @($parser.ReadFields())
+        if($fields.Count -ne $script:IdentityColumns.Count -or -not $parser.EndOfData) { return $null }
+        if([string]$fields[0] -notmatch '^\d+$' -or
+           [string]::IsNullOrWhiteSpace([string]$fields[1]) -or
+           [string]$fields[2] -cne '3' -or
+           [string]$fields[3] -cne '3.00') { return $null }
+        return [pscustomobject]@{
+            AccountNumber = [string]$fields[0]
+            BrokerName = [string]$fields[1]
+            SchemaVersion = [string]$fields[2]
+        }
+    } catch {
+        return $null
+    } finally {
+        if($null -ne $parser) {
+            $parser.Close()
+            $parser.Dispose()
+        }
+    }
+}
+
 function Get-AmmarTradingCsvIdentity {
     [CmdletBinding()]
     param([Parameter(Mandatory)][string]$Path)
@@ -118,6 +160,16 @@ function Get-AmmarTradingCsvIdentity {
         if($null -ne $parser) {
             $parser.Close()
             $parser.Dispose()
+        }
+    }
+
+    if($status -ceq 'HeaderOnly') {
+        $immediateIdentity = Get-AmmarTradingImmediateIdentity -BasketsPath $Path
+        if($null -ne $immediateIdentity) {
+            $accountNumber = $immediateIdentity.AccountNumber
+            $brokerName = $immediateIdentity.BrokerName
+            $schemaVersion = $immediateIdentity.SchemaVersion
+            $status = 'Ready'
         }
     }
 
