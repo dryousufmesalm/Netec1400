@@ -23,6 +23,8 @@ $script:AmmarTradingOneDriveRegistrationResolver = {
 $script:AmmarTradingHeldPathMetadataResolver = $null
 $script:AmmarTradingTrustedPathOperationHook = $null
 $script:AmmarTradingTrustedFilePublicationHook = $null
+$script:AmmarTradingHeldFileRenameHook = $null
+$script:AmmarTradingCurrentPathOperationContext = $null
 $script:AmmarTradingFileAttributeTagResolver = {
     param([Parameter(Mandatory)][string]$Path)
 
@@ -220,10 +222,11 @@ function Open-AmmarTradingNewFileHandle {
         [void](& $script:AmmarTradingFileAttributeTagResolver $parent)
     }
     # GENERIC_READ|GENERIC_WRITE|DELETE|FILE_READ_ATTRIBUTES|FILE_WRITE_ATTRIBUTES,
-    # FILE_SHARE_READ, CREATE_NEW, FILE_ATTRIBUTE_NORMAL, and
-    # FILE_FLAG_OPEN_REPARSE_POINT. Write and delete sharing are deliberately
-    # omitted so the verified bytes remain immutable through final verification.
-    $handle = [AmmarTrading.NativeFileInfo]::CreateFile($Path, [uint32]3221291392, [uint32]0x1, [IntPtr]::Zero, [uint32]1, [uint32]0x00200080, [IntPtr]::Zero)
+    # FILE_SHARE_READ, CREATE_NEW, and FILE_ATTRIBUTE_NORMAL. The path cannot
+    # pre-exist because CREATE_NEW is mandatory, so OPEN_REPARSE_POINT adds no
+    # substitution protection and prevents Cloud Files from renaming the held
+    # new file. Write and delete sharing remain deliberately omitted.
+    $handle = [AmmarTrading.NativeFileInfo]::CreateFile($Path, [uint32]3221291392, [uint32]0x1, [IntPtr]::Zero, [uint32]1, [uint32]0x80, [IntPtr]::Zero)
     if($handle.IsInvalid) {
         $nativeError = [Runtime.InteropServices.Marshal]::GetLastWin32Error()
         $handle.Dispose()
@@ -677,6 +680,72 @@ function Assert-AmmarTradingHeldFileIdentityAtPath {
     return $heldMetadata
 }
 
+function Invoke-AmmarTradingHeldFileRenameWithRetry {
+    param(
+        [Parameter(Mandatory)]$Handle,
+        [Parameter(Mandatory)][string]$Destination,
+        [switch]$ReplaceIfExists,
+        [ValidateRange(1,240)][int]$MaximumAttempts = 80,
+        [ValidateRange(0,5000)][int]$RetryDelayMilliseconds = 250
+    )
+
+    for($attempt = 1; $attempt -le $MaximumAttempts; $attempt++) {
+        try {
+            if($null -ne $script:AmmarTradingHeldFileRenameHook) {
+                & $script:AmmarTradingHeldFileRenameHook $Handle $Destination ([bool]$ReplaceIfExists) $attempt | Out-Null
+            } else {
+                [AmmarTrading.NativeFileInfo]::RenameByHandle($Handle,$null,$Destination,[bool]$ReplaceIfExists)
+            }
+            return
+        } catch {
+            $renameFailure = $_.Exception
+            while($null -ne $renameFailure.InnerException) { $renameFailure = $renameFailure.InnerException }
+            if($renameFailure -isnot [ComponentModel.Win32Exception] -or
+               $renameFailure.NativeErrorCode -ne 32 -or
+               $attempt -ge $MaximumAttempts) {
+                throw
+            }
+            if($RetryDelayMilliseconds -gt 0) { Start-Sleep -Milliseconds $RetryDelayMilliseconds }
+        }
+    }
+}
+
+function Invoke-AmmarTradingCanonicalPublicationOperation {
+    param(
+        [Parameter(Mandatory)][string]$CanonicalOneDriveRoot,
+        [Parameter(Mandatory)][string]$DestinationDirectory,
+        [Parameter(Mandatory)][string[]]$ValidatedPath,
+        [Parameter(Mandatory)][string]$Description,
+        [Parameter(Mandatory)][scriptblock]$Action
+    )
+
+    $canonicalRoot = [IO.Path]::GetFullPath($CanonicalOneDriveRoot)
+    $canonicalDirectory = Assert-AmmarTradingCanonicalDestinationPath -CanonicalOneDriveRoot $canonicalRoot -Path $DestinationDirectory -Description "$Description destination directory"
+    $directoryHandle = $null
+    $previousOperationContext = $script:AmmarTradingCurrentPathOperationContext
+    try {
+        # Cloud Files rejects child renames while any ancestor handles are open.
+        # Hold only the immediate destination directory for identity checks.
+        $directoryHandle = Open-AmmarTradingPathHandle -Path $canonicalDirectory -DesiredAccess ([uint32]0x80) -ShareMode ([uint32]0x7)
+        $directoryMetadata = Get-AmmarTradingHeldPathMetadata -Handle $directoryHandle -Path $canonicalDirectory
+        Assert-AmmarTradingHeldPathMetadataInvariant -Path $canonicalDirectory -Metadata $directoryMetadata -TrustedCloudFilesRoot $canonicalRoot -Description "$Description destination directory"
+        [void](Assert-AmmarTradingHeldFileIdentityAtPath -Handle $directoryHandle -Path $canonicalDirectory -ExpectedMetadata $directoryMetadata -TrustedCloudFilesRoot $canonicalRoot -Description "$Description destination directory")
+        if($null -ne $script:AmmarTradingTrustedPathOperationHook) {
+            & $script:AmmarTradingTrustedPathOperationHook $Description @($ValidatedPath) | Out-Null
+        }
+        [void](Assert-AmmarTradingHeldFileIdentityAtPath -Handle $directoryHandle -Path $canonicalDirectory -ExpectedMetadata $directoryMetadata -TrustedCloudFilesRoot $canonicalRoot -Description "$Description destination directory")
+        $locks = [System.Collections.Generic.List[object]]::new()
+        $locks.Add([pscustomobject]@{ Path=$canonicalDirectory; Handle=$directoryHandle; Initial=$directoryMetadata })
+        $script:AmmarTradingCurrentPathOperationContext = [pscustomobject]@{ Locks=$locks }
+        $result = @(& $Action)
+        [void](Assert-AmmarTradingHeldFileIdentityAtPath -Handle $directoryHandle -Path $canonicalDirectory -ExpectedMetadata $directoryMetadata -TrustedCloudFilesRoot $canonicalRoot -Description "$Description destination directory")
+        return $result
+    } finally {
+        $script:AmmarTradingCurrentPathOperationContext = $previousOperationContext
+        if($null -ne $directoryHandle) { $directoryHandle.Dispose() }
+    }
+}
+
 function Publish-AmmarTradingCanonicalTrustedFile {
     param(
         [Parameter(Mandatory)][string]$CanonicalOneDriveRoot,
@@ -698,16 +767,42 @@ function Publish-AmmarTradingCanonicalTrustedFile {
     $canonicalDestination = Assert-AmmarTradingCanonicalDestinationPath -CanonicalOneDriveRoot $canonicalRoot -Path $Destination -Description "$Description destination"
     $destinationDirectory = Split-Path -Parent $canonicalDestination
     if(-not (Test-Path -LiteralPath $destinationDirectory -PathType Container)) { throw "$Description destination directory was not found." }
+    $stagingCandidate = Join-Path ([IO.Path]::GetTempPath()) 'AmmarTrading\Publication'
+    [void][IO.Directory]::CreateDirectory($stagingCandidate)
+    $stagingDirectory = Resolve-AmmarTradingLocalPath -Path $stagingCandidate -PathType Container -Description "$Description staging directory"
+    if([IO.Path]::GetPathRoot($stagingDirectory) -ine [IO.Path]::GetPathRoot($canonicalDestination)) {
+        throw "$Description staging directory must use the same local volume as its destination."
+    }
 
     $protectedPaths = [System.Collections.Generic.List[string]]::new()
     $protectedPaths.Add($destinationDirectory)
     foreach($lockedPath in @($AdditionalLockedPath)) {
-        $canonicalLockedPath = Assert-AmmarTradingCanonicalDestinationPath -CanonicalOneDriveRoot $canonicalRoot -Path $lockedPath -Description "$Description protected path"
-        $protectedPaths.Add($canonicalLockedPath)
+        # Validate caller-supplied source paths against the same trust root,
+        # but do not retain directory/file namespace locks through the final
+        # destination rename. Cloud Files treats those unrelated source locks
+        # as a sharing conflict. The writer opens the source without write or
+        # delete sharing and the staged bytes must still match the caller's
+        # expected length and SHA-256 before and after the publication hook.
+        [void](Assert-AmmarTradingCanonicalDestinationPath -CanonicalOneDriveRoot $canonicalRoot -Path $lockedPath -Description "$Description protected path")
     }
 
-    $result = @(Invoke-AmmarTradingCanonicalPathOperation -CanonicalOneDriveRoot $canonicalRoot -Path @($protectedPaths) -Description $Description -Action {
-        $temporary = Join-Path $destinationDirectory ("$([IO.Path]::GetFileName($canonicalDestination)).$([guid]::NewGuid().ToString('N')).publication.tmp")
+    $result = @(Invoke-AmmarTradingCanonicalPublicationOperation -CanonicalOneDriveRoot $canonicalRoot -DestinationDirectory $destinationDirectory -ValidatedPath @($protectedPaths) -Description $Description -Action {
+        $destinationDirectoryHandle = $null
+        foreach($heldLock in @($script:AmmarTradingCurrentPathOperationContext.Locks)) {
+            if([IO.Path]::GetFullPath([string]$heldLock.Path) -ieq $destinationDirectory) {
+                $destinationDirectoryHandle = $heldLock.Handle
+                break
+            }
+        }
+        if($null -eq $destinationDirectoryHandle -or $destinationDirectoryHandle.IsInvalid -or $destinationDirectoryHandle.IsClosed) {
+            throw "$Description destination directory handle is unavailable."
+        }
+        # Stage outside the Cloud Files namespace so OneDrive cannot acquire a
+        # persistent non-delete-sharing handle before the atomic held-handle
+        # rename. The staging directory itself is held against substitution,
+        # and the file remains create-new, identity-bound, and hash-verified.
+        $temporary = Join-Path $stagingDirectory ("$([IO.Path]::GetFileName($canonicalDestination)).$([guid]::NewGuid().ToString('N')).publication.tmp")
+        $stagingDirectoryHandle = $null
         $temporaryHandle = $null
         $temporaryStream = $null
         $initialMetadata = $null
@@ -716,6 +811,12 @@ function Publish-AmmarTradingCanonicalTrustedFile {
         $cleanupFailure = $null
         $namespaceChanged = $false
         try {
+            # Directory delete sharing is required to move its held child out;
+            # the child file handle itself continues to deny write/delete sharing.
+            $stagingDirectoryHandle = Open-AmmarTradingPathHandle -Path $stagingDirectory -ShareMode ([uint32]0x7)
+            $stagingMetadata = Get-AmmarTradingHeldPathMetadata -Handle $stagingDirectoryHandle -Path $stagingDirectory
+            Assert-AmmarTradingHeldPathMetadataInvariant -Path $stagingDirectory -Metadata $stagingMetadata -TrustedCloudFilesRoot $canonicalRoot -Description "$Description staging directory"
+            [void](Assert-AmmarTradingHeldFileIdentityAtPath -Handle $stagingDirectoryHandle -Path $stagingDirectory -ExpectedMetadata $stagingMetadata -TrustedCloudFilesRoot $canonicalRoot -Description "$Description staging directory")
             $temporaryHandle = Open-AmmarTradingNewFileHandle -Path $temporary
             $temporaryStream = [IO.FileStream]::new($temporaryHandle,[IO.FileAccess]::ReadWrite,4096,$false)
             $initialMetadata = Get-AmmarTradingHeldPathMetadata -Handle $temporaryHandle -Path $temporary
@@ -744,12 +845,52 @@ function Publish-AmmarTradingCanonicalTrustedFile {
                 throw "$Description content verification failed before publication."
             }
 
+            # Cloud Files rejects a handle-bound rename while the original
+            # read/write handle is still active. Flush and close that writer,
+            # then reacquire the same file identity with DELETE access. The
+            # reopened handle denies write/delete sharing, so the final hash
+            # check and rename remain bound to immutable verified bytes.
+            $temporaryStream.Dispose()
+            $temporaryStream = $null
+            $temporaryHandle.Dispose()
+            $temporaryHandle = $null
+            $temporaryHandle = Open-AmmarTradingPathHandle -Path $temporary -DesiredAccess ([uint32]0x00010080) -ShareMode ([uint32]0x5)
+            $reopenedMetadata = Get-AmmarTradingHeldPathMetadata -Handle $temporaryHandle -Path $temporary
+            Assert-AmmarTradingHeldPathMetadataInvariant -Path $temporary -Metadata $reopenedMetadata -TrustedCloudFilesRoot $canonicalRoot -Description "$Description temporary file"
+            if(-not (Test-AmmarTradingHeldPathMetadataMatch -Expected $initialMetadata -Actual $reopenedMetadata)) {
+                throw "$Description temporary file identity changed before publication."
+            }
+            $verificationShare = [IO.FileShare]::Read -bor [IO.FileShare]::Delete
+            $verificationStream = [IO.FileStream]::new($temporary,[IO.FileMode]::Open,[IO.FileAccess]::Read,$verificationShare)
+            try {
+                $actualLength = [int64]$verificationStream.Length
+                $actualHash = Get-AmmarTradingOpenStreamSha256 -Stream $verificationStream
+            } finally {
+                $verificationStream.Dispose()
+            }
+            if($actualLength -ne $ExpectedLength -or $actualHash -cne $normalizedExpectedHash) {
+                throw "$Description content verification failed before publication."
+            }
+
+            # OneDrive may inspect a newly materialized Cloud Files placeholder
+            # with a non-delete-sharing handle for a short period. Retry only
+            # that transient sharing violation while our verified file handle
+            # remains open. Cloud Files rejects a RootDirectory-relative NT
+            # rename, so revalidate the held immediate parent and use the
+            # already-canonical absolute destination. The file operation is
+            # still handle-bound; never fall back to a pathname move.
+            Assert-AmmarTradingHeldPathLocksUnchanged -Locks $script:AmmarTradingCurrentPathOperationContext.Locks -TrustedCloudFilesRoot $canonicalRoot -Description $Description
             $extendedDestination = if($canonicalDestination.StartsWith('\\?\')) { $canonicalDestination } else { '\\?\' + $canonicalDestination }
-            [AmmarTrading.NativeFileInfo]::RenameByHandle($temporaryHandle,$null,$extendedDestination,[bool]$ReplaceIfExists)
+            Invoke-AmmarTradingHeldFileRenameWithRetry -Handle $temporaryHandle -Destination $extendedDestination -ReplaceIfExists:$ReplaceIfExists
             $namespaceChanged = $true
             [void](Assert-AmmarTradingHeldFileIdentityAtPath -Handle $temporaryHandle -Path $canonicalDestination -ExpectedMetadata $initialMetadata -TrustedCloudFilesRoot $canonicalRoot -Description "$Description destination")
-            $finalLength = [int64]$temporaryStream.Length
-            $finalHash = Get-AmmarTradingOpenStreamSha256 -Stream $temporaryStream
+            $finalVerificationStream = [IO.FileStream]::new($canonicalDestination,[IO.FileMode]::Open,[IO.FileAccess]::Read,$verificationShare)
+            try {
+                $finalLength = [int64]$finalVerificationStream.Length
+                $finalHash = Get-AmmarTradingOpenStreamSha256 -Stream $finalVerificationStream
+            } finally {
+                $finalVerificationStream.Dispose()
+            }
             if($finalLength -ne $ExpectedLength -or $finalHash -cne $normalizedExpectedHash) {
                 throw "$Description content verification failed after publication."
             }
@@ -770,6 +911,7 @@ function Publish-AmmarTradingCanonicalTrustedFile {
                 catch { if($null -eq $operationFailure) { $operationFailure = $_.Exception } }
             }
             if($null -ne $temporaryHandle) { $temporaryHandle.Dispose() }
+            if($null -ne $stagingDirectoryHandle) { $stagingDirectoryHandle.Dispose() }
         }
 
         if($null -ne $cleanupFailure) {
@@ -1407,6 +1549,12 @@ function Copy-AmmarTradingLegacyData {
                     throw "Legacy migration candidate escaped account folder '$sourceAccount'."
                 }
                 $relativePath = $item.FullName.Substring($sourcePrefix.Length)
+                if($relativePath -ieq 'SyncStatus.json') {
+                    # This generated heartbeat is replaced after every local
+                    # publication. It is not durable trading history and a
+                    # stale legacy copy must not conflict with current status.
+                    continue
+                }
                 $destination = Join-Path (Join-Path $canonicalRoot ("Account_{0}" -f $accountNumber)) $relativePath
                 $candidates.Add([pscustomobject]@{ Source=$item.FullName; Destination=$destination })
             }
@@ -1467,7 +1615,13 @@ function Copy-AmmarTradingLegacyData {
         } catch {
             $renameFailure = $_.Exception
             while($null -ne $renameFailure.InnerException) { $renameFailure = $renameFailure.InnerException }
-            if($renameFailure -isnot [ComponentModel.Win32Exception] -or $renameFailure.NativeErrorCode -notin @(80,183)) { throw }
+            # OneDrive can materialize an existing cloud destination between
+            # the absence check and the atomic rename. Cloud Files sometimes
+            # reports that race as sharing violation (32), not only the normal
+            # already-exists codes (80/183). Never overwrite in this path:
+            # compare the now-visible destination bytes below and classify it
+            # as already present or a conflict.
+            if($renameFailure -isnot [ComponentModel.Win32Exception] -or $renameFailure.NativeErrorCode -notin @(32,80,183)) { throw }
             if(-not (Test-Path -LiteralPath $candidate.Destination -PathType Leaf)) { throw }
             $destinationDetails = @(Invoke-AmmarTradingCanonicalPathOperation -CanonicalOneDriveRoot $resolvedRoot -Path @($candidate.Destination) -Description 'Legacy migration destination file' -Action {
                 $destinationItem = Get-Item -LiteralPath $candidate.Destination -Force -ErrorAction Stop

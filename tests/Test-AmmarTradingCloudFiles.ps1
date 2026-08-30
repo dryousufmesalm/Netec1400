@@ -67,6 +67,29 @@ try {
 
     $setupModule = Get-Module -Name MoneyMachineSyncSetup
     if((Get-Command Resolve-AmmarTradingOneDriveRoot).Module.Path -cne $setupModule.Path) { throw 'The Cloud Files test did not bind the requested setup module.' }
+    $setupModuleText = Get-Content -LiteralPath $SetupModulePath -Raw -ErrorAction Stop
+    Assert-True -Condition ($setupModuleText -match 'NativeErrorCode -notin @\(32,80,183\)') -Message 'Legacy migration must resolve OneDrive materialization races reported as sharing violations by comparing destination bytes.'
+    Assert-True -Condition ($setupModuleText -match 'CreateFile\(\$Path, \[uint32\]3221291392, \[uint32\]0x1, \[IntPtr\]::Zero, \[uint32\]1, \[uint32\]0x80,') -Message 'A create-new publication handle must target the newly created file itself without FILE_FLAG_OPEN_REPARSE_POINT, which Cloud Files cannot rename.'
+    Assert-True -Condition ($setupModuleText -match 'Invoke-AmmarTradingHeldFileRenameWithRetry') -Message 'Cloud Files sharing violations must be retried while the verified file handle remains authoritative.'
+    Assert-True -Condition ($setupModuleText -notmatch '\[IO\.File\]::Move\(\$temporary,\$canonicalDestination\)') -Message 'Cloud Files compatibility must not fall back to an unheld pathname move.'
+    Assert-True -Condition ($setupModuleText -match 'Invoke-AmmarTradingCanonicalPublicationOperation') -Message 'Publication must keep the immediate destination-directory identity held without locking Cloud Files ancestors.'
+    Assert-True -Condition ($setupModuleText -match '(?s)Assert-AmmarTradingHeldPathLocksUnchanged.+Invoke-AmmarTradingHeldFileRenameWithRetry') -Message 'Publication must revalidate the held destination directory immediately before its atomic rename.'
+    $renameRetryAttempts = & $setupModule {
+        $script:AmmarTradingCloudFilesRenameRetryAttempts = 0
+        $script:AmmarTradingHeldFileRenameHook = {
+            param($Handle,$Destination,$ReplaceIfExists,$Attempt)
+            $script:AmmarTradingCloudFilesRenameRetryAttempts++
+            if($Attempt -lt 3) { throw [ComponentModel.Win32Exception]::new(32) }
+        }
+        try {
+            Invoke-AmmarTradingHeldFileRenameWithRetry -Handle ([object]::new()) -Destination 'test-only' -MaximumAttempts 3 -RetryDelayMilliseconds 0
+            return $script:AmmarTradingCloudFilesRenameRetryAttempts
+        } finally {
+            $script:AmmarTradingHeldFileRenameHook = $null
+            Remove-Variable -Name AmmarTradingCloudFilesRenameRetryAttempts -Scope Script -ErrorAction SilentlyContinue
+        }
+    }
+    Assert-True -Condition ($renameRetryAttempts -eq 3) -Message 'A transient sharing violation must be retried and then succeed on the same held handle.'
     $nativeInfo = & $setupModule {
         param($Path)
         Get-AmmarTradingFileAttributeTagInfo -Path $Path
@@ -298,7 +321,7 @@ try {
     Assert-True -Condition ((Get-Content -LiteralPath $postRenameVerificationDestination -Raw) -ceq 'abc') -Message 'A post-rename destination verification failure must retain the verified replacement bytes.'
     Assert-NoPublicationTemporaryFile -Destination $postRenameVerificationDestination -Message 'A post-rename destination verification failure must not leave an unpublished temporary file.'
 
-    # A mismatch on the required third, post-rename hash must report failure
+    # A mismatch on the required fourth, post-rename hash must report failure
     # without treating the published replacement as an unpublished temp.
     $postRenameHashMismatchDestination = Join-Path $publicationDirectory 'post-rename-hash-mismatch.txt'
     [IO.File]::WriteAllText($postRenameHashMismatchDestination, 'hash-mismatch-original', (New-Object Text.UTF8Encoding($false)))
@@ -311,7 +334,7 @@ try {
             function script:Get-AmmarTradingOpenStreamSha256 {
                 param([Parameter(Mandatory)][IO.FileStream]$Stream)
                 $script:AmmarTradingCloudFilesOpenStreamSha256Calls++
-                if($script:AmmarTradingCloudFilesOpenStreamSha256Calls -eq 3) { return ('0' * 64) }
+                if($script:AmmarTradingCloudFilesOpenStreamSha256Calls -eq 4) { return ('0' * 64) }
                 return & $script:AmmarTradingCloudFilesOriginalOpenStreamSha256 -Stream $Stream
             }
         } $originalOpenStreamSha256
@@ -331,7 +354,7 @@ try {
     Assert-True -Condition ((Get-Content -LiteralPath $postRenameHashMismatchDestination -Raw) -ceq 'abc') -Message 'A post-rename hash mismatch must retain the verified replacement destination.'
     Assert-NoPublicationTemporaryFile -Destination $postRenameHashMismatchDestination -Message 'A post-rename hash mismatch must not leave an unpublished temporary file.'
 
-    # A hash read failure on the required third, post-rename read must report
+    # A hash read failure on the required fourth, post-rename read must report
     # failure without treating the published replacement as an unpublished temp.
     $postRenameHashFailureDestination = Join-Path $publicationDirectory 'post-rename-hash-failure.txt'
     [IO.File]::WriteAllText($postRenameHashFailureDestination, 'hash-read-original', (New-Object Text.UTF8Encoding($false)))
@@ -344,7 +367,7 @@ try {
             function script:Get-AmmarTradingOpenStreamSha256 {
                 param([Parameter(Mandatory)][IO.FileStream]$Stream)
                 $script:AmmarTradingCloudFilesOpenStreamSha256Calls++
-                if($script:AmmarTradingCloudFilesOpenStreamSha256Calls -eq 3) {
+                if($script:AmmarTradingCloudFilesOpenStreamSha256Calls -eq 4) {
                     throw 'deterministic post-rename hash read failure'
                 }
                 return & $script:AmmarTradingCloudFilesOriginalOpenStreamSha256 -Stream $Stream

@@ -10,6 +10,10 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 $stagingRoot = Join-Path ([IO.Path]::GetTempPath()) ("MoneyMachineWizardAcceptance_" + [guid]::NewGuid().ToString('N'))
 $hostProcess = $null
+$oneDriveAccountsKey = 'HKCU:\Software\Microsoft\OneDrive\Accounts'
+$oneDriveAccountsKeyExisted = Test-Path -LiteralPath $oneDriveAccountsKey -PathType Container
+$testRegistrationKey = $null
+$previousOneDrive = $env:OneDrive
 
 try {
     foreach($required in @(
@@ -30,6 +34,12 @@ try {
     New-Item -ItemType Directory -Path $oneDriveRoot,$sourceDir,$EvidenceRoot -Force | Out-Null
     Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'fixtures\AGOLD___Baskets_v3.csv') -Destination (Join-Path $sourceDir 'AGOLD___Baskets.csv')
 
+    if(-not $oneDriveAccountsKeyExisted) { New-Item -Path $oneDriveAccountsKey -Force | Out-Null }
+    $testRegistrationKey = Join-Path $oneDriveAccountsKey ("AmmarTradingAcceptance_" + [guid]::NewGuid().ToString('N'))
+    New-Item -Path $testRegistrationKey -Force | Out-Null
+    New-ItemProperty -LiteralPath $testRegistrationKey -Name 'UserFolder' -Value $oneDriveRoot -PropertyType String -Force | Out-Null
+    $env:OneDrive = $oneDriveRoot
+
     $taskNames = @('MoneyMachine-Baskets-To-OneDrive-Daily','MoneyMachine-Baskets-To-OneDrive-StartupCatchup')
     $tasksBefore = @($taskNames | ForEach-Object { Get-ScheduledTask -TaskName $_ -ErrorAction SilentlyContinue | Select-Object -ExpandProperty TaskName })
 
@@ -49,8 +59,8 @@ try {
     & node (Join-Path $PrototypeRoot 'scripts\accept-windows-wizard.mjs')
     if($LASTEXITCODE -ne 0) { throw "Browser acceptance exited $LASTEXITCODE." }
 
-    $destination = Join-Path $oneDriveRoot 'AmarTrading\Account_892522910\Baskets.csv'
-    $heartbeat = Join-Path $oneDriveRoot 'AmarTrading\Account_892522910\SyncStatus.json'
+    $destination = Join-Path $oneDriveRoot 'AmmarTrading\Account_892522910\Baskets.csv'
+    $heartbeat = Join-Path $oneDriveRoot 'AmmarTrading\Account_892522910\SyncStatus.json'
     if(-not (Test-Path -LiteralPath $destination -PathType Leaf)) { throw 'Acceptance destination CSV is missing.' }
     if(-not (Test-Path -LiteralPath $heartbeat -PathType Leaf)) { throw 'Acceptance heartbeat is missing.' }
     $rows = @(Import-Csv -LiteralPath $configPath)
@@ -62,6 +72,13 @@ try {
 }
 finally {
     Remove-Item Env:QA_BROWSER,Env:QA_URL,Env:QA_OUTPUT -ErrorAction SilentlyContinue
+    if($null -eq $previousOneDrive) { Remove-Item Env:OneDrive -ErrorAction SilentlyContinue } else { $env:OneDrive = $previousOneDrive }
     if($null -ne $hostProcess -and -not $hostProcess.HasExited) { Stop-Process -Id $hostProcess.Id -Force -ErrorAction SilentlyContinue }
+    if(-not [string]::IsNullOrWhiteSpace($testRegistrationKey) -and (Test-Path -LiteralPath $testRegistrationKey)) {
+        Remove-Item -LiteralPath $testRegistrationKey -Recurse -Force
+    }
+    if(-not $oneDriveAccountsKeyExisted -and (Test-Path -LiteralPath $oneDriveAccountsKey) -and @(Get-ChildItem -LiteralPath $oneDriveAccountsKey).Count -eq 0) {
+        Remove-Item -LiteralPath $oneDriveAccountsKey -Force
+    }
     if(Test-Path -LiteralPath $stagingRoot) { Remove-Item -LiteralPath $stagingRoot -Recurse -Force }
 }

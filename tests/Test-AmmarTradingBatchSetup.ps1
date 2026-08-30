@@ -148,6 +148,15 @@ try {
     Assert-Equal -Actual $alreadyPresent.AlreadyPresent -Expected 1 -Message 'An identical migrated file must be counted as already present.'
     Assert-Equal -Actual $alreadyPresent.Copied -Expected 0 -Message 'An identical migrated file must not be copied again.'
 
+    $legacyStatus = Join-Path $successOneDrive 'AmarTrading\Account_10000001\SyncStatus.json'
+    $canonicalStatus = Join-Path $successOneDrive 'AmmarTrading\Account_10000001\SyncStatus.json'
+    New-Item -ItemType Directory -Path (Split-Path -Parent $legacyStatus) -Force | Out-Null
+    [IO.File]::WriteAllText($legacyStatus, '{"Status":"Legacy"}', (New-Object Text.UTF8Encoding($false)))
+    [IO.File]::WriteAllText($canonicalStatus, '{"Status":"Current"}', (New-Object Text.UTF8Encoding($false)))
+    $transientStatusMigration = Copy-AmmarTradingLegacyData -OneDriveRoot $successOneDrive -AccountNumbers @('10000001')
+    Assert-Equal -Actual $transientStatusMigration.Conflict -Expected 0 -Message 'Transient legacy SyncStatus.json must not block migration of durable account data.'
+    Assert-Equal -Actual (Get-Content -LiteralPath $canonicalStatus -Raw) -Expected '{"Status":"Current"}' -Message 'Legacy migration must leave the current generated status file untouched.'
+
     # Migration must carry the same create-new temporary handle from verified
     # copy through no-replace publication. This seam targets the former gap by
     # attempting a regular-file substitution after the temp bytes exist.
