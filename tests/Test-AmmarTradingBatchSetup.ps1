@@ -148,17 +148,70 @@ try {
     Assert-Equal -Actual $alreadyPresent.AlreadyPresent -Expected 1 -Message 'An identical migrated file must be counted as already present.'
     Assert-Equal -Actual $alreadyPresent.Copied -Expected 0 -Message 'An identical migrated file must not be copied again.'
 
+    # Migration must carry the same create-new temporary handle from verified
+    # copy through no-replace publication. This seam targets the former gap by
+    # attempting a regular-file substitution after the temp bytes exist.
+    $heldLegacyFile = Join-Path $successOneDrive 'Money Machine\Account_10000001\History\held.csv'
+    $heldMigrationDestination = Join-Path $successOneDrive 'AmmarTrading\Account_10000001\History\held.csv'
+    [IO.File]::WriteAllText($heldLegacyFile, 'held-migration-source', (New-Object Text.UTF8Encoding($false)))
+    & $setupModule {
+        param($Destination)
+        $script:AmmarTradingBatchHeldMigrationDestination = [IO.Path]::GetFullPath($Destination)
+        $script:AmmarTradingBatchHeldMigrationSubstitutionBlocked = $false
+        $script:AmmarTradingBatchHeldMigrationSubstitutionSucceeded = $false
+        $script:AmmarTradingBatchHeldMigrationAttackHook = {
+            param($Description,$Path,$Destination)
+            if($Description -cne 'Legacy migration publication') { return }
+            $temporary = $null
+            if(-not [string]::IsNullOrWhiteSpace([string]$Destination) -and
+               [IO.Path]::GetFullPath([string]$Destination) -ieq $script:AmmarTradingBatchHeldMigrationDestination -and
+               (Test-Path -LiteralPath ([string]$Path) -PathType Leaf)) {
+                $temporary = [string]$Path
+            } else {
+                $prefix = [IO.Path]::GetFileName($script:AmmarTradingBatchHeldMigrationDestination) + '.'
+                $temporaryItem = @(Get-ChildItem -LiteralPath (Split-Path -Parent $script:AmmarTradingBatchHeldMigrationDestination) -File -Force -ErrorAction Stop |
+                    Where-Object { $_.Name.StartsWith($prefix,[StringComparison]::OrdinalIgnoreCase) -and $_.Name.EndsWith('.tmp',[StringComparison]::OrdinalIgnoreCase) } |
+                    Select-Object -First 1)
+                if($temporaryItem.Count -eq 1) { $temporary = [string]$temporaryItem[0].FullName }
+            }
+            if([string]::IsNullOrWhiteSpace($temporary)) { return }
+            try {
+                Move-Item -LiteralPath $temporary -Destination "$temporary.verified" -ErrorAction Stop
+                [IO.File]::WriteAllText($temporary, 'attacker-migration-bytes', (New-Object Text.UTF8Encoding($false)))
+                $script:AmmarTradingBatchHeldMigrationSubstitutionSucceeded = $true
+            } catch {
+                $script:AmmarTradingBatchHeldMigrationSubstitutionBlocked = $true
+            }
+        }
+        $script:AmmarTradingTrustedPathOperationHook = $script:AmmarTradingBatchHeldMigrationAttackHook
+        $script:AmmarTradingTrustedFilePublicationHook = $script:AmmarTradingBatchHeldMigrationAttackHook
+    } $heldMigrationDestination
+    $heldMigration = Copy-AmmarTradingLegacyData -OneDriveRoot $successOneDrive -AccountNumbers @('10000001')
+    $heldMigrationAttack = & $setupModule {
+        [pscustomobject]@{
+            Blocked = $script:AmmarTradingBatchHeldMigrationSubstitutionBlocked
+            Succeeded = $script:AmmarTradingBatchHeldMigrationSubstitutionSucceeded
+        }
+    }
+    Assert-True -Condition ([bool]$heldMigrationAttack.Blocked -and -not [bool]$heldMigrationAttack.Succeeded) -Message 'A verified legacy migration temporary file must remain held so regular-file substitution is blocked before publication.'
+    Assert-Equal -Actual $heldMigration.Copied -Expected 1 -Message 'A protected legacy migration must copy its verified source once.'
+    Assert-Equal -Actual (Get-Content -LiteralPath $heldMigrationDestination -Raw) -Expected 'held-migration-source' -Message 'Legacy migration must never install attacker bytes substituted after verification.'
+    & $setupModule {
+        $script:AmmarTradingTrustedPathOperationHook = $null
+        $script:AmmarTradingTrustedFilePublicationHook = $null
+    }
+
     $racingLegacyFile = Join-Path $successOneDrive 'Money Machine\Account_10000001\History\racing.csv'
     $racingDestination = Join-Path $successOneDrive 'AmmarTrading\Account_10000001\History\racing.csv'
     Set-Content -LiteralPath $racingLegacyFile -Value 'legacy-racing-source' -Encoding utf8
     & $setupModule {
         param($Destination)
         $script:AmmarTradingBatchRaceDestination = $Destination
-        $script:AmmarTradingTrustedPathOperationHook = {
-            param($Description,$Path)
+        $script:AmmarTradingTrustedFilePublicationHook = {
+            param($Description,$Temporary,$Destination)
             if($Description -ceq 'Legacy migration publication') {
                 Set-Content -LiteralPath $script:AmmarTradingBatchRaceDestination -Value 'concurrent-destination' -Encoding utf8
-                $script:AmmarTradingTrustedPathOperationHook = $null
+                $script:AmmarTradingTrustedFilePublicationHook = $null
             }
         }
     } $racingDestination

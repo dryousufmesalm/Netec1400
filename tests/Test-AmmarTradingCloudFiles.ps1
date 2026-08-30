@@ -1,12 +1,16 @@
 [CmdletBinding()]
 param(
-    [string]$SetupModulePath
+    [string]$SetupModulePath,
+    [string]$SyncScriptPath
 )
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 if([string]::IsNullOrWhiteSpace($SetupModulePath)) {
     $SetupModulePath = Join-Path $PSScriptRoot '..\automation\MoneyMachineCsvSync\MoneyMachineSyncSetup.psm1'
+}
+if([string]::IsNullOrWhiteSpace($SyncScriptPath)) {
+    $SyncScriptPath = Join-Path (Split-Path -Parent $SetupModulePath) 'Sync-BasketsToOneDrive.ps1'
 }
 
 $testRoot = Join-Path ([IO.Path]::GetTempPath()) ("AmmarTradingCloudFilesTest_" + [guid]::NewGuid().ToString('N'))
@@ -28,6 +32,14 @@ function Assert-ThrowsLike {
         if($_.Exception.Message -notmatch [regex]::Escape($Expected)) { throw }
     }
     if(-not $threw) { throw "Expected failure containing '$Expected'." }
+}
+
+function Assert-NoPublicationTemporaryFile {
+    param([Parameter(Mandatory)][string]$Destination,[Parameter(Mandatory)][string]$Message)
+    $prefix = [IO.Path]::GetFileName($Destination) + '.'
+    $temporary = @(Get-ChildItem -LiteralPath (Split-Path -Parent $Destination) -File -Force -ErrorAction Stop |
+        Where-Object { $_.Name.StartsWith($prefix,[StringComparison]::OrdinalIgnoreCase) -and $_.Name.EndsWith('.tmp',[StringComparison]::OrdinalIgnoreCase) })
+    if($temporary.Count -ne 0) { throw $Message }
 }
 
 $nonThrowingActionWasRejected = $false
@@ -201,6 +213,161 @@ try {
     & $setupModule {
         $script:AmmarTradingTrustedPathOperationHook = $null
         $script:AmmarTradingHeldPathMetadataResolver = $null
+    }
+
+    # A regular file substituted after the temporary bytes are written but
+    # before publication must never become the destination. Both trusted
+    # writers exercise the real sync functions; the hook targets the gap that
+    # existed between their write/copy operation and pathname re-open.
+    & $setCloudFilesTag $trustedRoot ([Convert]::ToUInt32('9000701A',16))
+    $setupModuleObject = $setupModule
+    . $SyncScriptPath -AsLibrary -RuntimeRoot (Join-Path $testRoot 'sync-runtime')
+    $setupModule = $setupModuleObject
+    $publicationDirectory = New-AmmarTradingTrustedDirectory -OneDriveRoot $trustedRoot -Path (Join-Path $trustedRoot 'Publication') -Description 'Cloud Files publication test directory'
+    $textDestination = Join-Path $publicationDirectory 'status.json'
+    $csvSource = Join-Path $publicationDirectory 'source.csv'
+    $csvDestination = Join-Path $publicationDirectory 'Baskets.csv'
+
+    # Failure paths must preserve the old destination and remove only the
+    # unpublished file created by this operation.
+    $abcState = [pscustomobject]@{ Bytes=[Text.Encoding]::UTF8.GetBytes('abc') }
+    $abcSha256 = 'BA7816BF8F01CFEA414140DE5DAE2223B00361A396177A9CB410FF61F20015AD'
+    $callbackDestination = Join-Path $publicationDirectory 'callback-failure.txt'
+    [IO.File]::WriteAllText($callbackDestination, 'callback-original', (New-Object Text.UTF8Encoding($false)))
+    Assert-ThrowsLike -Expected 'callback write failure' -Action {
+        Publish-AmmarTradingTrustedFile -OneDriveRoot $trustedRoot -Destination $callbackDestination -Description 'Callback failure publication' -ExpectedLength 3 -ExpectedSha256 $abcSha256 -WriteState $abcState -ReplaceIfExists -WriteAction {
+            param($Stream,$State)
+            $Stream.Write([byte[]]$State.Bytes,0,$State.Bytes.Length)
+            throw 'callback write failure'
+        } | Out-Null
+    }
+    Assert-True -Condition ((Get-Content -LiteralPath $callbackDestination -Raw) -ceq 'callback-original') -Message 'A publication callback failure must preserve the prior destination bytes.'
+    Assert-NoPublicationTemporaryFile -Destination $callbackDestination -Message 'A publication callback failure must delete its unpublished task-created temporary file.'
+
+    $hashMismatchDestination = Join-Path $publicationDirectory 'hash-mismatch.txt'
+    [IO.File]::WriteAllText($hashMismatchDestination, 'hash-original', (New-Object Text.UTF8Encoding($false)))
+    Assert-ThrowsLike -Expected 'content verification failed' -Action {
+        Publish-AmmarTradingTrustedFile -OneDriveRoot $trustedRoot -Destination $hashMismatchDestination -Description 'Hash mismatch publication' -ExpectedLength 3 -ExpectedSha256 ('0' * 64) -WriteState $abcState -ReplaceIfExists -WriteAction {
+            param($Stream,$State)
+            $Stream.Write([byte[]]$State.Bytes,0,$State.Bytes.Length)
+        } | Out-Null
+    }
+    Assert-True -Condition ((Get-Content -LiteralPath $hashMismatchDestination -Raw) -ceq 'hash-original') -Message 'A temporary hash mismatch must fail before replacing the destination.'
+    Assert-NoPublicationTemporaryFile -Destination $hashMismatchDestination -Message 'A hash mismatch must delete its unpublished task-created temporary file.'
+
+    $renameFailureDestination = Join-Path $publicationDirectory 'rename-failure-target'
+    New-Item -ItemType Directory -Path $renameFailureDestination -Force | Out-Null
+    Assert-ThrowsLike -Expected 'could not be renamed atomically by handle' -Action {
+        Publish-AmmarTradingTrustedFile -OneDriveRoot $trustedRoot -Destination $renameFailureDestination -Description 'Rename failure publication' -ExpectedLength 3 -ExpectedSha256 $abcSha256 -WriteState $abcState -ReplaceIfExists -WriteAction {
+            param($Stream,$State)
+            $Stream.Write([byte[]]$State.Bytes,0,$State.Bytes.Length)
+        } | Out-Null
+    }
+    Assert-True -Condition (Test-Path -LiteralPath $renameFailureDestination -PathType Container) -Message 'A failed handle rename must preserve the existing destination object.'
+    Assert-NoPublicationTemporaryFile -Destination $renameFailureDestination -Message 'A rename failure must delete its unpublished task-created temporary file.'
+
+    # Real Windows sharing integration: the verified temp leaf must deny
+    # rename, deletion, and regular-file replacement until the publishing
+    # handle is disposed. The renamed destination must be freely mutable after.
+    $heldDestination = Join-Path $publicationDirectory 'held-temp.txt'
+    $heldReplacement = Join-Path $publicationDirectory 'held-temp-attacker.txt'
+    [IO.File]::WriteAllText($heldReplacement, 'attacker-replacement', (New-Object Text.UTF8Encoding($false)))
+    & $setupModule {
+        param($Replacement)
+        $script:AmmarTradingCloudFilesHeldReplacement = $Replacement
+        $script:AmmarTradingCloudFilesHeldRenameBlocked = $false
+        $script:AmmarTradingCloudFilesHeldDeleteBlocked = $false
+        $script:AmmarTradingCloudFilesHeldReplaceBlocked = $false
+        $script:AmmarTradingTrustedFilePublicationHook = {
+            param($Description,$Temporary,$Destination)
+            if($Description -cne 'Held temporary Windows integration') { return }
+            try { Move-Item -LiteralPath $Temporary -Destination "$Temporary.moved" -ErrorAction Stop }
+            catch { $script:AmmarTradingCloudFilesHeldRenameBlocked = (Test-Path -LiteralPath $Temporary -PathType Leaf) }
+            try { Remove-Item -LiteralPath $Temporary -Force -ErrorAction Stop }
+            catch { $script:AmmarTradingCloudFilesHeldDeleteBlocked = (Test-Path -LiteralPath $Temporary -PathType Leaf) }
+            try { [IO.File]::Replace($script:AmmarTradingCloudFilesHeldReplacement,$Temporary,"$Temporary.backup",$true) }
+            catch { $script:AmmarTradingCloudFilesHeldReplaceBlocked = (Test-Path -LiteralPath $Temporary -PathType Leaf) }
+        }
+    } $heldReplacement
+    Publish-AmmarTradingTrustedFile -OneDriveRoot $trustedRoot -Destination $heldDestination -Description 'Held temporary Windows integration' -ExpectedLength 3 -ExpectedSha256 $abcSha256 -WriteState $abcState -ReplaceIfExists -WriteAction {
+        param($Stream,$State)
+        $Stream.Write([byte[]]$State.Bytes,0,$State.Bytes.Length)
+    } | Out-Null
+    $heldResults = & $setupModule {
+        [pscustomobject]@{
+            RenameBlocked = $script:AmmarTradingCloudFilesHeldRenameBlocked
+            DeleteBlocked = $script:AmmarTradingCloudFilesHeldDeleteBlocked
+            ReplaceBlocked = $script:AmmarTradingCloudFilesHeldReplaceBlocked
+        }
+    }
+    Assert-True -Condition ([bool]$heldResults.RenameBlocked) -Message 'The held verified temporary leaf must block a real Windows rename attempt.'
+    Assert-True -Condition ([bool]$heldResults.DeleteBlocked) -Message 'The held verified temporary leaf must block a real Windows deletion attempt.'
+    Assert-True -Condition ([bool]$heldResults.ReplaceBlocked) -Message 'The held verified temporary leaf must block a real Windows regular-file replacement attempt.'
+    Assert-True -Condition ((Get-Content -LiteralPath $heldDestination -Raw) -ceq 'abc') -Message 'The held-handle integration must publish only the verified bytes.'
+    [IO.File]::WriteAllText($heldReplacement, 'post-disposal-replacement', (New-Object Text.UTF8Encoding($false)))
+    $heldPostDisposalBackup = "$heldDestination.post-replace.bak"
+    [IO.File]::Replace($heldReplacement,$heldDestination,$heldPostDisposalBackup,$true)
+    Remove-Item -LiteralPath $heldPostDisposalBackup -Force -ErrorAction Stop
+    $heldMovedDestination = "$heldDestination.moved"
+    Move-Item -LiteralPath $heldDestination -Destination $heldMovedDestination -ErrorAction Stop
+    Remove-Item -LiteralPath $heldMovedDestination -Force -ErrorAction Stop
+    Assert-True -Condition (-not (Test-Path -LiteralPath $heldMovedDestination)) -Message 'The temporary publication handle must be disposed after success with no rename/delete leak.'
+    & $setupModule { $script:AmmarTradingTrustedFilePublicationHook = $null }
+
+    [IO.File]::WriteAllText($textDestination, 'old-text', (New-Object Text.UTF8Encoding($false)))
+    [IO.File]::WriteAllText($csvSource, 'trusted-csv-bytes', (New-Object Text.UTF8Encoding($false)))
+    [IO.File]::WriteAllText($csvDestination, 'old-csv', (New-Object Text.UTF8Encoding($false)))
+    & $setupModule {
+        param($TextDestination,$CsvDestination)
+        $script:AmmarTradingCloudFilesPublicationDestinations = @{
+            'Atomic text publication' = [IO.Path]::GetFullPath($TextDestination)
+            'Atomic CSV publication' = [IO.Path]::GetFullPath($CsvDestination)
+        }
+        $script:AmmarTradingCloudFilesSubstitutionSucceeded = 0
+        $script:AmmarTradingCloudFilesSubstitutionBlocked = 0
+        $script:AmmarTradingCloudFilesPublicationAttackHook = {
+            param($Description,$Path,$Destination)
+            if(-not $script:AmmarTradingCloudFilesPublicationDestinations.ContainsKey($Description)) { return }
+            $expectedDestination = [string]$script:AmmarTradingCloudFilesPublicationDestinations[$Description]
+            $temporary = $null
+            if(-not [string]::IsNullOrWhiteSpace([string]$Destination) -and
+               [IO.Path]::GetFullPath([string]$Destination) -ieq $expectedDestination -and
+               (Test-Path -LiteralPath ([string]$Path) -PathType Leaf)) {
+                $temporary = [string]$Path
+            } else {
+                $prefix = [IO.Path]::GetFileName($expectedDestination) + '.'
+                $temporaryItem = @(Get-ChildItem -LiteralPath (Split-Path -Parent $expectedDestination) -File -Force -ErrorAction Stop |
+                    Where-Object { $_.Name.StartsWith($prefix,[StringComparison]::OrdinalIgnoreCase) -and $_.Name.EndsWith('.tmp',[StringComparison]::OrdinalIgnoreCase) } |
+                    Select-Object -First 1)
+                if($temporaryItem.Count -eq 1) { $temporary = [string]$temporaryItem[0].FullName }
+            }
+            if([string]::IsNullOrWhiteSpace($temporary)) { return }
+            try {
+                Move-Item -LiteralPath $temporary -Destination "$temporary.verified" -ErrorAction Stop
+                [IO.File]::WriteAllText($temporary, 'attacker-bytes', (New-Object Text.UTF8Encoding($false)))
+                $script:AmmarTradingCloudFilesSubstitutionSucceeded++
+            } catch {
+                $script:AmmarTradingCloudFilesSubstitutionBlocked++
+            }
+        }
+        $script:AmmarTradingTrustedPathOperationHook = $script:AmmarTradingCloudFilesPublicationAttackHook
+        $script:AmmarTradingTrustedFilePublicationHook = $script:AmmarTradingCloudFilesPublicationAttackHook
+    } $textDestination $csvDestination
+
+    Write-AtomicText -Path $textDestination -Content 'trusted-text-bytes' -TrustedOneDriveRoot $trustedRoot
+    Publish-AtomicFile -Source $csvSource -Destination $csvDestination -TrustedOneDriveRoot $trustedRoot
+    $publicationAttack = & $setupModule {
+        [pscustomobject]@{
+            Succeeded = $script:AmmarTradingCloudFilesSubstitutionSucceeded
+            Blocked = $script:AmmarTradingCloudFilesSubstitutionBlocked
+        }
+    }
+    Assert-True -Condition ($publicationAttack.Succeeded -eq 0 -and $publicationAttack.Blocked -eq 2) -Message 'A verified temporary regular file must remain held so text and CSV pathname substitution is blocked before publication.'
+    Assert-True -Condition ((Get-Content -LiteralPath $textDestination -Raw) -ceq 'trusted-text-bytes') -Message 'Atomic text publication must never install attacker bytes substituted after verification.'
+    Assert-True -Condition ((Get-Content -LiteralPath $csvDestination -Raw) -ceq 'trusted-csv-bytes') -Message 'Atomic CSV publication must never install attacker bytes substituted after verification.'
+    & $setupModule {
+        $script:AmmarTradingTrustedPathOperationHook = $null
+        $script:AmmarTradingTrustedFilePublicationHook = $null
     }
 
     foreach($tagCase in @(
