@@ -14,6 +14,7 @@ $testRoot = Join-Path ([IO.Path]::GetTempPath()) ("AmmarTradingDesktopOperationT
 $runtimeRoot = Join-Path $testRoot 'runtime'
 $requestRoot = Join-Path $runtimeRoot 'requests'
 $fixturePath = Join-Path $PSScriptRoot 'fixtures\AGOLD___Baskets_v3.csv'
+$testOneDriveAccountKey = 'HKCU:\Software\Microsoft\OneDrive\Accounts\AmmarTradingTest_' + [guid]::NewGuid().ToString('N')
 $powerShell = if(Test-Path -LiteralPath (Join-Path $PSHOME 'pwsh.exe')) {
     Join-Path $PSHOME 'pwsh.exe'
 } else {
@@ -68,6 +69,8 @@ try {
     New-Item -ItemType Directory -Path $oneDriveRoot -Force | Out-Null
     $previousOneDrive = $env:OneDrive
     $env:OneDrive = $oneDriveRoot
+    New-Item -Path $testOneDriveAccountKey -Force | Out-Null
+    New-ItemProperty -LiteralPath $testOneDriveAccountKey -Name 'UserFolder' -Value $oneDriveRoot -PropertyType String -Force | Out-Null
     try {
         $system = Invoke-DesktopOperation -Operation SystemStatus -Request ([pscustomobject]@{})
         Assert-True -Condition ($null -ne $system.Ready) -Message 'SystemStatus must include a Ready result.'
@@ -112,6 +115,7 @@ try {
         Assert-True -Condition ($null -ne $configured[0].TaskResultCode) -Message 'Status must include task result evidence.'
     } finally {
         $env:OneDrive = $previousOneDrive
+        Remove-Item -LiteralPath $testOneDriveAccountKey -Recurse -Force -ErrorAction SilentlyContinue
     }
 
     Write-Host 'AmmarTrading desktop operation entry-point tests passed.'

@@ -5,11 +5,22 @@ $script:AmmarTradingDriveTypeResolver = {
     param([Parameter(Mandatory)][string]$VolumeRoot)
     return (New-Object IO.DriveInfo($VolumeRoot)).DriveType
 }
-$script:AmmarTradingFileAttributesResolver = {
-    param([Parameter(Mandatory)][string]$Path)
-    return (Get-Item -LiteralPath $Path -Force -ErrorAction Stop).Attributes
+$script:AmmarTradingOneDriveRegistrationResolver = {
+    $accountsPath = 'HKCU:\Software\Microsoft\OneDrive\Accounts'
+    if(-not (Test-Path -LiteralPath $accountsPath -PathType Container)) { return @() }
+
+    $roots = [System.Collections.Generic.List[string]]::new()
+    foreach($account in @(Get-ChildItem -LiteralPath $accountsPath -ErrorAction Stop)) {
+        try {
+            $userFolder = [string](Get-ItemPropertyValue -LiteralPath $account.PSPath -Name 'UserFolder' -ErrorAction Stop)
+            if(-not [string]::IsNullOrWhiteSpace($userFolder)) { $roots.Add($userFolder) }
+        } catch {
+            # An incomplete account registration is not a trusted root.
+        }
+    }
+    return @($roots)
 }
-$script:AmmarTradingReparseTagResolver = {
+$script:AmmarTradingFileAttributeTagResolver = {
     param([Parameter(Mandatory)][string]$Path)
 
     if($null -eq ('AmmarTrading.NativeFileInfo' -as [type])) {
@@ -58,7 +69,10 @@ namespace AmmarTrading {
         if(-not [AmmarTrading.NativeFileInfo]::GetFileInformationByHandleEx($handle, 9, [ref]$info, $size)) {
             throw 'The reparse point tag could not be inspected.'
         }
-        return [uint32]$info.ReparseTag
+        return [pscustomobject]@{
+            FileAttributes = [IO.FileAttributes][uint32]$info.FileAttributes
+            ReparseTag = [uint32]$info.ReparseTag
+        }
     } finally {
         $handle.Dispose()
     }
@@ -91,6 +105,20 @@ function Test-AmmarTradingPathBelow {
     return $canonicalPath -ieq $canonicalRoot -or $canonicalPath.StartsWith($canonicalRoot + [IO.Path]::DirectorySeparatorChar, [StringComparison]::OrdinalIgnoreCase)
 }
 
+function Get-AmmarTradingFileAttributeTagInfo {
+    param([Parameter(Mandatory)][string]$Path)
+
+    $result = & $script:AmmarTradingFileAttributeTagResolver $Path
+    if($null -eq $result -or -not $result.PSObject.Properties['FileAttributes'] -or -not $result.PSObject.Properties['ReparseTag'] -or
+       $null -eq $result.FileAttributes -or $null -eq $result.ReparseTag) {
+        throw 'The file attribute and reparse tag metadata could not be inspected.'
+    }
+    return [pscustomobject]@{
+        FileAttributes = [IO.FileAttributes]$result.FileAttributes
+        ReparseTag = [uint32]$result.ReparseTag
+    }
+}
+
 function Assert-AmmarTradingNoReparseAncestors {
     param(
         [Parameter(Mandatory)][string]$Path,
@@ -106,16 +134,22 @@ function Assert-AmmarTradingNoReparseAncestors {
         if([string]::IsNullOrWhiteSpace($part)) { continue }
         $current = Join-Path $current $part
         if(-not (Test-Path -LiteralPath $current)) { break }
-        $attributes = [IO.FileAttributes](& $script:AmmarTradingFileAttributesResolver $current)
-        if(($attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
-            $tag = [uint32](& $script:AmmarTradingReparseTagResolver $current)
+        $metadata = Get-AmmarTradingFileAttributeTagInfo -Path $current
+        if(($metadata.FileAttributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+            $tag = [uint32]$metadata.ReparseTag
             if([string]::IsNullOrWhiteSpace($TrustedCloudFilesRoot) -or
                -not (Test-AmmarTradingPathBelow -Path $current -Root $TrustedCloudFilesRoot)) {
                 throw "$Description contains a reparse point."
             }
+            # Exact Cloud Files tags are not name-surrogate tags; all name surrogates stay rejected.
+            if(($tag -band [uint32]0x20000000) -ne 0) {
+                throw "$Description contains an unsupported reparse point."
+            }
             if(-not (Test-AmmarTradingCloudFilesReparseTag -Tag $tag)) {
                 throw "$Description contains an unsupported reparse point."
             }
+        } elseif([uint32]$metadata.ReparseTag -ne 0) {
+            throw "$Description contains inconsistent reparse metadata."
         }
     }
 }
@@ -155,16 +189,19 @@ function Resolve-AmmarTradingLocalPath {
     if([IO.DriveType]$driveType -eq [IO.DriveType]::Network) {
         throw "$Description must use a local filesystem volume; mapped network drives are not allowed."
     }
+    if([IO.DriveType]$driveType -ne [IO.DriveType]::Fixed) {
+        throw "$Description must use a local fixed filesystem volume."
+    }
 
     Assert-AmmarTradingNoReparseAncestors -Path $providerPath -Description $Description -TrustedCloudFilesRoot $TrustedCloudFilesRoot
 
     return [IO.Path]::GetFullPath($providerPath)
 }
 
-function Get-AmmarTradingWritableOneDriveRoots {
+function Get-AmmarTradingRegisteredOneDriveRoots {
     $roots = [System.Collections.Generic.List[object]]::new()
     $seen = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::OrdinalIgnoreCase)
-    foreach($candidate in @($env:OneDrive,$env:OneDriveCommercial,$env:OneDriveConsumer)) {
+    foreach($candidate in @(& $script:AmmarTradingOneDriveRegistrationResolver)) {
         if([string]::IsNullOrWhiteSpace([string]$candidate)) { continue }
         try {
             $resolved = Resolve-AmmarTradingLocalPath -Path ([string]$candidate) -PathType Container -Description 'OneDrive root' -TrustedCloudFilesRoot ([string]$candidate)
@@ -172,6 +209,31 @@ function Get-AmmarTradingWritableOneDriveRoots {
             continue
         }
         if(-not $seen.Add($resolved)) { continue }
+        $roots.Add([pscustomobject]@{ Path = $resolved })
+    }
+    return @($roots)
+}
+
+function Test-AmmarTradingOneDriveActivityHint {
+    param([Parameter(Mandatory)][string]$RegisteredRoot)
+
+    foreach($candidate in @($env:OneDrive,$env:OneDriveCommercial,$env:OneDriveConsumer)) {
+        if([string]::IsNullOrWhiteSpace([string]$candidate)) { continue }
+        try {
+            $hint = [Environment]::ExpandEnvironmentVariables(([string]$candidate).Trim())
+            if(Test-AmmarTradingUncPath -Path $hint) { continue }
+            if([IO.Path]::GetFullPath($hint) -ieq $RegisteredRoot) { return $true }
+        } catch {
+            continue
+        }
+    }
+    return $false
+}
+
+function Get-AmmarTradingWritableOneDriveRoots {
+    $roots = [System.Collections.Generic.List[object]]::new()
+    foreach($registered in @(Get-AmmarTradingRegisteredOneDriveRoots)) {
+        $resolved = [string]$registered.Path
         $probe = Join-Path $resolved (".$([guid]::NewGuid().ToString('N')).ammartrading-write-test.tmp")
         try {
             [IO.File]::WriteAllText($probe, '', (New-Object Text.UTF8Encoding($false)))
@@ -179,7 +241,7 @@ function Get-AmmarTradingWritableOneDriveRoots {
                 Name = Split-Path -Leaf $resolved
                 Path = $resolved
                 Available = $true
-                IsActive = $true
+                IsActive = Test-AmmarTradingOneDriveActivityHint -RegisteredRoot $resolved
                 IsWritable = $true
             })
         } catch {
@@ -198,8 +260,24 @@ function Resolve-AmmarTradingOneDriveRoot {
         [switch]$RequireWritable
     )
 
-    $requested = Resolve-AmmarTradingLocalPath -Path $Path -PathType Container -Description 'OneDrive root' -TrustedCloudFilesRoot $Path
-    $matches = @(Get-AmmarTradingWritableOneDriveRoots | Where-Object { $_.Path -ieq $requested })
+    $expanded = [Environment]::ExpandEnvironmentVariables($Path.Trim())
+    if([string]::IsNullOrWhiteSpace($expanded)) { throw 'OneDrive root is required.' }
+    if(Test-AmmarTradingUncPath -Path $expanded) { throw 'OneDrive root must use a local filesystem path; UNC paths are not allowed.' }
+    try {
+        $requested = [IO.Path]::GetFullPath($expanded)
+    } catch {
+        throw 'OneDrive root must use a local filesystem path.'
+    }
+    $registeredMatches = @(
+        @(& $script:AmmarTradingOneDriveRegistrationResolver) | Where-Object {
+            if([string]::IsNullOrWhiteSpace([string]$_)) { return $false }
+            try { return [IO.Path]::GetFullPath([Environment]::ExpandEnvironmentVariables(([string]$_).Trim())) -ieq $requested }
+            catch { return $false }
+        }
+    )
+    if($registeredMatches.Count -ne 1) { throw 'OneDrive root must exactly match a currently signed-in OneDrive root.' }
+    $registeredPath = Resolve-AmmarTradingLocalPath -Path ([string]$registeredMatches[0]) -PathType Container -Description 'OneDrive root' -TrustedCloudFilesRoot ([string]$registeredMatches[0])
+    $matches = @(Get-AmmarTradingWritableOneDriveRoots | Where-Object { $_.Path -ieq $registeredPath })
     if($matches.Count -ne 1) { throw 'OneDrive root must exactly match a currently signed-in OneDrive root.' }
     if($RequireWritable -and -not [bool]$matches[0].IsWritable) { throw 'OneDrive root is not writable.' }
     return [string]$matches[0].Path
@@ -673,11 +751,14 @@ function Test-AmmarTradingReparsePoint {
         [string]$TrustedCloudFilesRoot = ''
     )
 
-    $attributes = [IO.FileAttributes](& $script:AmmarTradingFileAttributesResolver $Path)
-    if(($attributes -band [IO.FileAttributes]::ReparsePoint) -eq 0) { return $false }
+    $metadata = Get-AmmarTradingFileAttributeTagInfo -Path $Path
+    if(($metadata.FileAttributes -band [IO.FileAttributes]::ReparsePoint) -eq 0) {
+        return [uint32]$metadata.ReparseTag -ne 0
+    }
     if(-not [string]::IsNullOrWhiteSpace($TrustedCloudFilesRoot) -and
        (Test-AmmarTradingPathBelow -Path $Path -Root $TrustedCloudFilesRoot) -and
-       (Test-AmmarTradingCloudFilesReparseTag -Tag ([uint32](& $script:AmmarTradingReparseTagResolver $Path))) ) {
+       (([uint32]$metadata.ReparseTag -band [uint32]0x20000000) -eq 0) -and
+       (Test-AmmarTradingCloudFilesReparseTag -Tag ([uint32]$metadata.ReparseTag)) ) {
         return $false
     }
     return $true

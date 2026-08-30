@@ -68,6 +68,12 @@ try {
     $arbitraryRoot = Join-Path $fixtureRoot 'arbitrary-cloud-folder'
     New-Item -ItemType Directory -Path $oneDriveRoot,$runtimeRoot,$sourceRoot,$evidenceRoot,$arbitraryRoot -Force | Out-Null
     $env:OneDrive = $oneDriveRoot
+    $setupModule = Get-Module MoneyMachineSyncSetup
+    & $setupModule {
+        param($Root)
+        $script:AmmarTradingAcceptanceTestRegisteredOneDriveRoot = $Root
+        $script:AmmarTradingOneDriveRegistrationResolver = { @($script:AmmarTradingAcceptanceTestRegisteredOneDriveRoot) }
+    } $oneDriveRoot
     $accounts = @('10000001','10000002')
     $mappings = [Collections.Generic.List[object]]::new()
     foreach($account in $accounts) {

@@ -25,8 +25,13 @@ function Assert-True {
 
 function Assert-ThrowsLike {
     param([string]$Expected,[scriptblock]$Action)
-    try { & $Action; throw "Expected failure containing '$Expected'." }
-    catch { if($_.Exception.Message -notmatch [regex]::Escape($Expected)) { throw } }
+    $threw = $false
+    try { & $Action }
+    catch {
+        $threw = $true
+        if($_.Exception.Message -notmatch [regex]::Escape($Expected)) { throw }
+    }
+    if(-not $threw) { throw "Expected failure containing '$Expected'." }
 }
 
 try {
@@ -38,6 +43,12 @@ try {
     $env:OneDriveCommercial = ''
     $env:OneDriveConsumer = ''
     Import-Module -Name $SetupModulePath -Force -ErrorAction Stop
+    $setupModule = Get-Module -Name MoneyMachineSyncSetup
+    & $setupModule {
+        param($Root)
+        $script:AmmarTradingDesktopSecurityTestRoot = $Root
+        $script:AmmarTradingOneDriveRegistrationResolver = { @($script:AmmarTradingDesktopSecurityTestRoot) }
+    } $trustedRoot
 
     $trusted = Resolve-AmmarTradingOneDriveRoot -Path $trustedRoot -RequireWritable
     Assert-True -Condition ($trusted -ceq (Resolve-Path -LiteralPath $trustedRoot).Path) -Message 'The exact writable signed-in OneDrive root must be accepted.'
@@ -51,7 +62,6 @@ try {
         Resolve-AmmarTradingOneDriveRoot -Path 'FileSystem::\\localhost\AmmarTradingMissing\OneDrive' -RequireWritable | Out-Null
     }
 
-    $setupModule = Get-Module -Name MoneyMachineSyncSetup
     & $setupModule { $script:AmmarTradingDriveTypeResolver = { param([string]$Root) [IO.DriveType]::Network } }
     try {
         Assert-True -Condition (@(Get-AmmarTradingWritableOneDriveRoots).Count -eq 0) -Message 'A mapped-network OneDrive candidate must not be enumerated.'

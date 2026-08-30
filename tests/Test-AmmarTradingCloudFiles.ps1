@@ -21,15 +21,30 @@ function Assert-True {
 
 function Assert-ThrowsLike {
     param([string]$Expected,[scriptblock]$Action)
-    try { & $Action; throw "Expected failure containing '$Expected'." }
-    catch { if($_.Exception.Message -notmatch [regex]::Escape($Expected)) { throw } }
+    $threw = $false
+    try { & $Action }
+    catch {
+        $threw = $true
+        if($_.Exception.Message -notmatch [regex]::Escape($Expected)) { throw }
+    }
+    if(-not $threw) { throw "Expected failure containing '$Expected'." }
 }
+
+$nonThrowingActionWasRejected = $false
+try {
+    Assert-ThrowsLike -Expected 'must fail for a non-throwing action' -Action {}
+} catch {
+    $nonThrowingActionWasRejected = $true
+}
+Assert-True -Condition $nonThrowingActionWasRejected -Message 'Assert-ThrowsLike must fail when its action does not throw.'
 
 try {
     $trustedRoot = Join-Path $testRoot 'TrustedOneDrive'
+    $secondaryRoot = Join-Path $testRoot 'SecondaryOneDrive'
+    $staleRoot = Join-Path $testRoot 'StaleOneDrive'
     $unregisteredRoot = Join-Path $testRoot 'UnregisteredOneDrive'
     $containedDirectory = Join-Path $trustedRoot 'AmmarTrading\Account_123456'
-    New-Item -ItemType Directory -Path $containedDirectory,$unregisteredRoot -Force | Out-Null
+    New-Item -ItemType Directory -Path $containedDirectory,$unregisteredRoot,$secondaryRoot -Force | Out-Null
     $env:OneDrive = $trustedRoot
     $env:OneDriveCommercial = ''
     $env:OneDriveConsumer = ''
@@ -38,30 +53,59 @@ try {
 
     $setupModule = Get-Module -Name MoneyMachineSyncSetup
     if((Get-Command Resolve-AmmarTradingOneDriveRoot).Module.Path -cne $setupModule.Path) { throw 'The Cloud Files test did not bind the requested setup module.' }
+    $nativeInfo = & $setupModule {
+        param($Path)
+        Get-AmmarTradingFileAttributeTagInfo -Path $Path
+    } $testRoot
+    Assert-True -Condition ($null -ne $nativeInfo.FileAttributes -and [uint32]$nativeInfo.ReparseTag -eq 0) -Message 'The Windows FileAttributeTagInfo handle query must return one native attribute/tag result for a normal directory.'
     & $setupModule {
+        param($RegisteredRoot)
         $script:AmmarTradingCloudFilesTestTags = @{}
+        $script:AmmarTradingCloudFilesTestMetadata = @{}
+        $script:AmmarTradingCloudFilesTestMetadataCalls = 0
+        $script:AmmarTradingCloudFilesTestRegisteredRoots = @($RegisteredRoot)
+        $script:AmmarTradingOneDriveRegistrationResolver = { @($script:AmmarTradingCloudFilesTestRegisteredRoots) }
         function script:Get-Item {
             param([Parameter(Mandatory)][string]$LiteralPath,[switch]$Force)
             [pscustomobject]@{ Attributes=([IO.FileAttributes]::Directory -bor [IO.FileAttributes]::ReparsePoint) }
         }
-        $script:AmmarTradingFileAttributesResolver = {
+        $script:AmmarTradingFileAttributeTagResolver = {
             param([Parameter(Mandatory)][string]$Path)
-            if($script:AmmarTradingCloudFilesTestTags.ContainsKey([IO.Path]::GetFullPath($Path))) {
-                return [IO.FileAttributes]::Directory -bor [IO.FileAttributes]::ReparsePoint
+            $script:AmmarTradingCloudFilesTestMetadataCalls++
+            $key = [IO.Path]::GetFullPath($Path)
+            if($script:AmmarTradingCloudFilesTestMetadata.ContainsKey($key)) {
+                return $script:AmmarTradingCloudFilesTestMetadata[$key]
             }
-            return [IO.FileAttributes]::Directory
+            if($script:AmmarTradingCloudFilesTestTags.ContainsKey($key)) {
+                return [pscustomobject]@{
+                    FileAttributes = [IO.FileAttributes]::Directory -bor [IO.FileAttributes]::ReparsePoint
+                    ReparseTag = [uint32]$script:AmmarTradingCloudFilesTestTags[$key]
+                }
+            }
+            return [pscustomobject]@{
+                FileAttributes = [IO.FileAttributes]::Directory
+                ReparseTag = [uint32]0
+            }
         }
-        $script:AmmarTradingReparseTagResolver = {
-            param([Parameter(Mandatory)][string]$Path)
-            return [uint32]$script:AmmarTradingCloudFilesTestTags[[IO.Path]::GetFullPath($Path)]
-        }
-    }
+    } $trustedRoot
     $setCloudFilesTag = {
         param([string]$Path,[uint32]$Tag)
         & $setupModule {
             param($Path,$Tag)
-            $script:AmmarTradingCloudFilesTestTags[[IO.Path]::GetFullPath($Path)] = $Tag
+            $key = [IO.Path]::GetFullPath($Path)
+            [void]$script:AmmarTradingCloudFilesTestMetadata.Remove($key)
+            $script:AmmarTradingCloudFilesTestTags[$key] = $Tag
         } $Path $Tag
+    }
+    $setFileMetadata = {
+        param([string]$Path,[IO.FileAttributes]$Attributes,[uint32]$Tag)
+        & $setupModule {
+            param($Path,$Attributes,$Tag)
+            $script:AmmarTradingCloudFilesTestMetadata[[IO.Path]::GetFullPath($Path)] = [pscustomobject]@{
+                FileAttributes = $Attributes
+                ReparseTag = $Tag
+            }
+        } $Path $Attributes $Tag
     }
 
     foreach($tagCase in @(
@@ -78,6 +122,11 @@ try {
     & $setCloudFilesTag $containedDirectory ([Convert]::ToUInt32('9000701A',16))
     $containedPath = Assert-AmmarTradingTrustedDestinationPath -OneDriveRoot $trustedRoot -Path (Join-Path $containedDirectory 'Baskets.csv') -Description 'Contained Cloud Files destination'
     Assert-True -Condition ($containedPath -ceq [IO.Path]::GetFullPath((Join-Path $containedDirectory 'Baskets.csv'))) -Message 'A contained Cloud Files descendant must be accepted.'
+    & $setFileMetadata $containedDirectory ([IO.FileAttributes]::Directory) ([Convert]::ToUInt32('9000701A',16))
+    Assert-ThrowsLike -Expected 'inconsistent reparse metadata' -Action {
+        Assert-AmmarTradingTrustedDestinationPath -OneDriveRoot $trustedRoot -Path (Join-Path $containedDirectory 'Baskets.csv') -Description 'Inconsistent Cloud Files metadata' | Out-Null
+    }
+    & $setCloudFilesTag $containedDirectory ([Convert]::ToUInt32('9000701A',16))
 
     & $setCloudFilesTag $unregisteredRoot ([Convert]::ToUInt32('9000701A',16))
     Assert-ThrowsLike -Expected 'remain below' -Action {
@@ -85,6 +134,63 @@ try {
     }
     Assert-ThrowsLike -Expected 'signed-in OneDrive root' -Action {
         Resolve-AmmarTradingOneDriveRoot -Path $unregisteredRoot -RequireWritable | Out-Null
+    }
+
+    # OneDrive registry registration, not a process-controlled environment value, is the trust source.
+    & $setupModule {
+        param($RegisteredRoot)
+        $script:AmmarTradingCloudFilesTestRegisteredRoots = @($RegisteredRoot)
+    } $trustedRoot
+    $env:OneDrive = $unregisteredRoot
+    Assert-ThrowsLike -Expected 'signed-in OneDrive root' -Action {
+        Resolve-AmmarTradingOneDriveRoot -Path $unregisteredRoot -RequireWritable | Out-Null
+    }
+    $env:OneDrive = $trustedRoot
+
+    & $setupModule {
+        param($FirstRoot,$SecondRoot)
+        $script:AmmarTradingCloudFilesTestRegisteredRoots = @($FirstRoot,$SecondRoot)
+    } $trustedRoot $secondaryRoot
+    $registeredRoots = @(& $setupModule { @(Get-AmmarTradingWritableOneDriveRoots) })
+    Assert-True -Condition ($registeredRoots.Count -eq 2) -Message 'Each current-user OneDrive account registration must be considered.'
+    Assert-True -Condition ([bool]($registeredRoots | Where-Object { $_.Path -ieq [IO.Path]::GetFullPath($trustedRoot) -and $_.IsActive })) -Message 'An exact environment hint must mark its registered root active.'
+    Assert-True -Condition (-not [bool]($registeredRoots | Where-Object { $_.Path -ieq [IO.Path]::GetFullPath($secondaryRoot) -and $_.IsActive })) -Message 'An unmatched registered root must not be marked active.'
+    $secondaryResolved = Resolve-AmmarTradingOneDriveRoot -Path $secondaryRoot -RequireWritable
+    Assert-True -Condition ($secondaryResolved -ceq [IO.Path]::GetFullPath($secondaryRoot)) -Message 'A second registered OneDrive account root must resolve.'
+
+    & $setupModule {
+        param($StaleRoot)
+        $script:AmmarTradingCloudFilesTestRegisteredRoots = @($StaleRoot)
+    } $staleRoot
+    $env:OneDrive = $staleRoot
+    $staleRoots = @(& $setupModule { @(Get-AmmarTradingWritableOneDriveRoots) })
+    Assert-True -Condition ($staleRoots.Count -eq 0) -Message 'A stale OneDrive registration must not become an eligible root.'
+    Assert-ThrowsLike -Expected 'was not found' -Action {
+        Resolve-AmmarTradingOneDriveRoot -Path $staleRoot -RequireWritable | Out-Null
+    }
+    & $setupModule {
+        param($RegisteredRoot)
+        $script:AmmarTradingCloudFilesTestRegisteredRoots = @($RegisteredRoot)
+    } $trustedRoot
+    $env:OneDrive = $trustedRoot
+
+    foreach($driveCase in @(
+        @{ Name='removable'; Type=[IO.DriveType]::Removable; Expected='local fixed filesystem' },
+        @{ Name='RAM disk'; Type=[IO.DriveType]::Ram; Expected='local fixed filesystem' },
+        @{ Name='unknown drive'; Type=[IO.DriveType]::Unknown; Expected='local fixed filesystem' },
+        @{ Name='network drive'; Type=[IO.DriveType]::Network; Expected='mapped network drives' }
+    )) {
+        & $setupModule {
+            param($DriveType)
+            $script:AmmarTradingCloudFilesTestDriveType = $DriveType
+            $script:AmmarTradingDriveTypeResolver = { param($VolumeRoot) return $script:AmmarTradingCloudFilesTestDriveType }
+        } $driveCase.Type
+        Assert-ThrowsLike -Expected $driveCase.Expected -Action {
+            Resolve-AmmarTradingOneDriveRoot -Path $trustedRoot -RequireWritable | Out-Null
+        }
+    }
+    & $setupModule {
+        $script:AmmarTradingDriveTypeResolver = { param($VolumeRoot) return [IO.DriveType]::Fixed }
     }
 
     foreach($rejectedTag in @(

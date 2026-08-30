@@ -590,13 +590,17 @@ $publishedHeartbeat = Join-Path $publicationOneDrive 'AmmarTrading\Account_89252
 $publishedState = Join-Path $publicationRuntime 'state\last-run.json'
 Invoke-AcceptanceCheck -Checks $checks -Name 'isolated-atomic-publication' -PassMessage 'An isolated direct-process publication produced hash-consistent CSV, heartbeat, and state artifacts.' -Action {
     $previousOneDrive = $env:OneDrive
+    $testOneDriveAccountKey = 'HKCU:\Software\Microsoft\OneDrive\Accounts\AmmarTradingAcceptanceTest_' + [guid]::NewGuid().ToString('N')
     try {
         $env:OneDrive = $publicationOneDrive
+        New-Item -Path $testOneDriveAccountKey -Force | Out-Null
+        New-ItemProperty -LiteralPath $testOneDriveAccountKey -Name 'UserFolder' -Value $publicationOneDrive -PropertyType String -Force | Out-Null
         $run = Invoke-AcceptancePowerShell -WindowsPowerShell $windowsPowerShell -ScriptPath (Join-Path $automationRoot 'Sync-BasketsToOneDrive.ps1') -Parameters ([ordered]@{
             ConfigPath=$publicationConfig; StableCheckSeconds='0'; MaxRetries='1'; RuntimeRoot=$publicationRuntime; MutexWaitMilliseconds='5000'
         }) -LogRoot $logRoot -LogName 'isolated-atomic-publication'
     } finally {
         $env:OneDrive = $previousOneDrive
+        Remove-Item -LiteralPath $testOneDriveAccountKey -Recurse -Force -ErrorAction SilentlyContinue
     }
     if($run.ExitCode -ne 0) { throw "Direct sync process exited $($run.ExitCode)." }
     foreach($path in @($publishedCsv,$publishedHeartbeat,$publishedState)) {

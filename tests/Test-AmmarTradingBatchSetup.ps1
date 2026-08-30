@@ -78,6 +78,7 @@ function New-BatchRequest {
     $env:OneDrive = $OneDriveRoot
     $env:OneDriveCommercial = $null
     $env:OneDriveConsumer = $null
+    Set-TestOneDriveRegistration -Root $OneDriveRoot
     return [pscustomobject]@{
         VpsName = $VpsName
         OneDriveRoot = $OneDriveRoot
@@ -94,6 +95,15 @@ function New-BatchRequest {
 try {
     New-Item -ItemType Directory -Path $tempRoot -Force | Out-Null
     Import-Module -Name $ModulePath -Force -ErrorAction Stop
+    $setupModule = Get-Module -Name MoneyMachineSyncSetup
+    function Set-TestOneDriveRegistration {
+        param([Parameter(Mandatory)][string]$Root)
+        & $setupModule {
+            param($RegisteredRoot)
+            $script:AmmarTradingBatchTestRegisteredOneDriveRoot = $RegisteredRoot
+            $script:AmmarTradingOneDriveRegistrationResolver = { @($script:AmmarTradingBatchTestRegisteredOneDriveRoot) }
+        } $Root
+    }
 
     # A missing batch entry point is the intentional RED failure before Task 3 implementation.
     $successRoot = Join-Path $tempRoot 'success'
@@ -205,6 +215,7 @@ try {
     $env:OneDrive = $reparseOneDrive
     $env:OneDriveCommercial = $null
     $env:OneDriveConsumer = $null
+    Set-TestOneDriveRegistration -Root $reparseOneDrive
     Assert-ThrowsLike -Expected 'reparse' -Action {
         Copy-AmmarTradingLegacyData -OneDriveRoot $reparseOneDrive -AccountNumbers @('90000009') | Out-Null
     }

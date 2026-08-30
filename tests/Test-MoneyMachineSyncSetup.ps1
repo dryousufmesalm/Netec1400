@@ -37,6 +37,12 @@ try {
     Set-Content -LiteralPath $sourceCsv -Value 'discovery-only-fixture' -Encoding utf8
 
     Import-Module -Name $ModulePath -Force -ErrorAction Stop
+    $setupModule = Get-Module -Name MoneyMachineSyncSetup
+    & $setupModule {
+        param($Root)
+        $script:AmmarTradingTestRegisteredOneDriveRoot = $Root
+        $script:AmmarTradingOneDriveRegistrationResolver = { @($script:AmmarTradingTestRegisteredOneDriveRoot) }
+    } $oneDriveRoot
     $discovery = Get-MoneyMachineSetupDiscovery -OneDriveCandidates @($oneDriveRoot) -TerminalDataRoot $terminalRoot
 
     if(@($discovery.OneDriveRoots).Count -ne 1) { throw 'Discovery must return exactly one existing OneDrive root.' }
@@ -110,6 +116,10 @@ try {
     New-Item -ItemType Directory -Path $blockedOneDrive -Force | Out-Null
     Set-Content -LiteralPath (Join-Path $blockedOneDrive 'AmmarTrading') -Value 'blocks destination directory creation' -Encoding utf8
     $env:OneDrive = $blockedOneDrive
+    & $setupModule {
+        param($Root)
+        $script:AmmarTradingTestRegisteredOneDriveRoot = $Root
+    } $blockedOneDrive
     $blockedRequest = Test-MoneyMachineSetupRequest -VpsName 'Blocked VPS' -ExpectedMT4Login '892522910' -SourceCsv $sourceCsv -OneDriveRoot $blockedOneDrive
     Assert-ThrowsLike -Expected 'local publication could not be completed safely' -Action {
         Invoke-MoneyMachineSetup -Request $blockedRequest -ConfigPath $rollbackConfig -RuntimeRoot (Join-Path $tempRoot 'rollback-runtime') -SkipTaskRegistration -StableCheckSeconds 0 | Out-Null

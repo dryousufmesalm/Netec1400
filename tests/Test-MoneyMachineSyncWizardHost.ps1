@@ -41,6 +41,7 @@ Assert-HostThrowsLike -Expected '64 KiB' -Action { Assert-MoneyMachineWizardBody
 
 $tempRoot = Join-Path ([IO.Path]::GetTempPath()) ("MoneyMachineWizardHostTest_" + [guid]::NewGuid().ToString('N'))
 $hostProcess = $null
+$testOneDriveAccountKey = 'HKCU:\Software\Microsoft\OneDrive\Accounts\AmmarTradingWizardHostTest_' + [guid]::NewGuid().ToString('N')
 try {
     $appRoot = Join-Path $tempRoot 'WizardApp'
     $oneDriveRoot = Join-Path $tempRoot 'OneDrive'
@@ -49,6 +50,8 @@ try {
     $runtimeRoot = Join-Path $tempRoot 'runtime'
     $configPath = Join-Path $tempRoot 'config\accounts.csv'
     New-Item -ItemType Directory -Path $appRoot,$oneDriveRoot,$sourceDir,(Split-Path -Parent $configPath) -Force | Out-Null
+    New-Item -Path $testOneDriveAccountKey -Force | Out-Null
+    New-ItemProperty -LiteralPath $testOneDriveAccountKey -Name 'UserFolder' -Value $oneDriveRoot -PropertyType String -Force | Out-Null
     Set-Content -LiteralPath (Join-Path $appRoot 'index.html') -Value '<!doctype html><html><body>Wizard host test</body></html>' -Encoding utf8
     Copy-Item -LiteralPath (Join-Path (Split-Path -Parent $MyInvocation.MyCommand.Path) 'fixtures\AGOLD___Baskets_v3.csv') -Destination (Join-Path $sourceDir 'AGOLD___Baskets.csv')
 
@@ -110,5 +113,6 @@ try {
 }
 finally {
     if($null -ne $hostProcess -and -not $hostProcess.HasExited) { Stop-Process -Id $hostProcess.Id -Force -ErrorAction SilentlyContinue }
+    Remove-Item -LiteralPath $testOneDriveAccountKey -Recurse -Force -ErrorAction SilentlyContinue
     if(Test-Path -LiteralPath $tempRoot) { Remove-Item -LiteralPath $tempRoot -Recurse -Force }
 }

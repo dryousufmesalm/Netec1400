@@ -42,6 +42,12 @@ try {
     }) | Export-Csv -LiteralPath $testConfigPath -NoTypeInformation -Encoding utf8
 
     . $ScriptPath -AsLibrary
+    $setupModule = Get-Module -Name MoneyMachineSyncSetup
+    & $setupModule {
+        param($Root)
+        $script:AmmarTradingCsvSyncTestRegisteredRoot = $Root
+        $script:AmmarTradingOneDriveRegistrationResolver = { @($script:AmmarTradingCsvSyncTestRegisteredRoot) }
+    } $oneDrive
 
     $mutexReady = Join-Path $tempRoot 'mutex-ready.txt'
     $mutexJob = Start-Job -ArgumentList $mutexReady -ScriptBlock {
@@ -181,6 +187,10 @@ try {
             New-Item -ItemType Junction -Path (Join-Path $productDirectory 'Account_892522910') -Target $externalTarget | Out-Null
         }
         $env:OneDrive = $junctionRoot
+        & $setupModule {
+            param($Root)
+            $script:AmmarTradingCsvSyncTestRegisteredRoot = $Root
+        } $junctionRoot
         @([pscustomobject]@{ Enabled='true'; ExpectedMT4Login='892522910'; SourceCsv=$sourceCsv; OneDriveRoot=$junctionRoot }) |
             Export-Csv -LiteralPath $testConfigPath -NoTypeInformation -Encoding utf8
 
@@ -194,6 +204,10 @@ try {
         }
     }
     $env:OneDrive = $oneDrive
+    & $setupModule {
+        param($Root)
+        $script:AmmarTradingCsvSyncTestRegisteredRoot = $Root
+    } $oneDrive
 
     $secretValue = 'credential=do-not-log-this-value'
     $secretPathFragment = 'password=do-not-log-this-path'
