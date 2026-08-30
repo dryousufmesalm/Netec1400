@@ -202,6 +202,9 @@ try {
     New-Item -ItemType Directory -Path $reparseOneDrive,$reparseTarget,$reparseAccount -Force | Out-Null
     Set-Content -LiteralPath (Join-Path $reparseTarget 'outside.csv') -Value 'must-not-migrate' -Encoding utf8
     New-Item -ItemType Junction -Path (Join-Path $reparseAccount 'linked') -Target $reparseTarget | Out-Null
+    $env:OneDrive = $reparseOneDrive
+    $env:OneDriveCommercial = $null
+    $env:OneDriveConsumer = $null
     Assert-ThrowsLike -Expected 'reparse' -Action {
         Copy-AmmarTradingLegacyData -OneDriveRoot $reparseOneDrive -AccountNumbers @('90000009') | Out-Null
     }

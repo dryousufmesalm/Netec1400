@@ -5,16 +5,97 @@ $script:AmmarTradingDriveTypeResolver = {
     param([Parameter(Mandatory)][string]$VolumeRoot)
     return (New-Object IO.DriveInfo($VolumeRoot)).DriveType
 }
+$script:AmmarTradingFileAttributesResolver = {
+    param([Parameter(Mandatory)][string]$Path)
+    return (Get-Item -LiteralPath $Path -Force -ErrorAction Stop).Attributes
+}
+$script:AmmarTradingReparseTagResolver = {
+    param([Parameter(Mandatory)][string]$Path)
+
+    if($null -eq ('AmmarTrading.NativeFileInfo' -as [type])) {
+        Add-Type -TypeDefinition @'
+using System;
+using Microsoft.Win32.SafeHandles;
+using System.Runtime.InteropServices;
+
+namespace AmmarTrading {
+    public static class NativeFileInfo {
+        [StructLayout(LayoutKind.Sequential)]
+        public struct FileAttributeTagInfo {
+            public UInt32 FileAttributes;
+            public UInt32 ReparseTag;
+        }
+
+        [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+        public static extern SafeFileHandle CreateFile(
+            string fileName,
+            UInt32 desiredAccess,
+            UInt32 shareMode,
+            IntPtr securityAttributes,
+            UInt32 creationDisposition,
+            UInt32 flagsAndAttributes,
+            IntPtr templateFile);
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        public static extern bool GetFileInformationByHandleEx(
+            SafeFileHandle file,
+            Int32 fileInformationClass,
+            out FileAttributeTagInfo fileInformation,
+            UInt32 bufferSize);
+    }
+}
+'@ -ErrorAction Stop
+    }
+
+    # FILE_READ_ATTRIBUTES, FILE_SHARE_READ|WRITE|DELETE, OPEN_EXISTING,
+    # FILE_FLAG_BACKUP_SEMANTICS, and FILE_FLAG_OPEN_REPARSE_POINT.
+    $handle = [AmmarTrading.NativeFileInfo]::CreateFile($Path, [uint32]0x80, [uint32]0x7, [IntPtr]::Zero, [uint32]3, [uint32]0x02200000, [IntPtr]::Zero)
+    if($handle.IsInvalid) { throw 'The reparse point could not be opened for tag inspection.' }
+    try {
+        $info = New-Object AmmarTrading.NativeFileInfo+FileAttributeTagInfo
+        $size = [uint32][Runtime.InteropServices.Marshal]::SizeOf($info)
+        if(-not [AmmarTrading.NativeFileInfo]::GetFileInformationByHandleEx($handle, 9, [ref]$info, $size)) {
+            throw 'The reparse point tag could not be inspected.'
+        }
+        return [uint32]$info.ReparseTag
+    } finally {
+        $handle.Dispose()
+    }
+}
 
 function Test-AmmarTradingUncPath {
     param([Parameter(Mandatory)][string]$Path)
     return $Path -match '^(?:[^:]+::)?[\\/]{2}'
 }
 
+function Test-AmmarTradingCloudFilesReparseTag {
+    param([Parameter(Mandatory)][uint32]$Tag)
+
+    return ('{0:X8}' -f $Tag) -in @(
+        '9000001A','9000101A','9000201A','9000301A',
+        '9000401A','9000501A','9000601A','9000701A',
+        '9000801A','9000901A','9000A01A','9000B01A',
+        '9000C01A','9000D01A','9000E01A','9000F01A'
+    )
+}
+
+function Test-AmmarTradingPathBelow {
+    param(
+        [Parameter(Mandatory)][string]$Path,
+        [Parameter(Mandatory)][string]$Root
+    )
+
+    $canonicalPath = [IO.Path]::GetFullPath($Path)
+    $canonicalRoot = [IO.Path]::GetFullPath($Root).TrimEnd([IO.Path]::DirectorySeparatorChar,[IO.Path]::AltDirectorySeparatorChar)
+    return $canonicalPath -ieq $canonicalRoot -or $canonicalPath.StartsWith($canonicalRoot + [IO.Path]::DirectorySeparatorChar, [StringComparison]::OrdinalIgnoreCase)
+}
+
 function Assert-AmmarTradingNoReparseAncestors {
     param(
         [Parameter(Mandatory)][string]$Path,
-        [Parameter(Mandatory)][string]$Description
+        [Parameter(Mandatory)][string]$Description,
+        [string]$TrustedCloudFilesRoot = ''
     )
 
     $fullPath = [IO.Path]::GetFullPath($Path)
@@ -25,9 +106,16 @@ function Assert-AmmarTradingNoReparseAncestors {
         if([string]::IsNullOrWhiteSpace($part)) { continue }
         $current = Join-Path $current $part
         if(-not (Test-Path -LiteralPath $current)) { break }
-        $item = Get-Item -LiteralPath $current -Force -ErrorAction Stop
-        if(($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
-            throw "$Description contains a reparse point."
+        $attributes = [IO.FileAttributes](& $script:AmmarTradingFileAttributesResolver $current)
+        if(($attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+            $tag = [uint32](& $script:AmmarTradingReparseTagResolver $current)
+            if([string]::IsNullOrWhiteSpace($TrustedCloudFilesRoot) -or
+               -not (Test-AmmarTradingPathBelow -Path $current -Root $TrustedCloudFilesRoot)) {
+                throw "$Description contains a reparse point."
+            }
+            if(-not (Test-AmmarTradingCloudFilesReparseTag -Tag $tag)) {
+                throw "$Description contains an unsupported reparse point."
+            }
         }
     }
 }
@@ -36,7 +124,8 @@ function Resolve-AmmarTradingLocalPath {
     param(
         [Parameter(Mandatory)][string]$Path,
         [Parameter(Mandatory)][ValidateSet('Leaf','Container')][string]$PathType,
-        [Parameter(Mandatory)][string]$Description
+        [Parameter(Mandatory)][string]$Description,
+        [string]$TrustedCloudFilesRoot = ''
     )
 
     $expanded = [Environment]::ExpandEnvironmentVariables($Path.Trim())
@@ -67,7 +156,7 @@ function Resolve-AmmarTradingLocalPath {
         throw "$Description must use a local filesystem volume; mapped network drives are not allowed."
     }
 
-    Assert-AmmarTradingNoReparseAncestors -Path $providerPath -Description $Description
+    Assert-AmmarTradingNoReparseAncestors -Path $providerPath -Description $Description -TrustedCloudFilesRoot $TrustedCloudFilesRoot
 
     return [IO.Path]::GetFullPath($providerPath)
 }
@@ -78,7 +167,7 @@ function Get-AmmarTradingWritableOneDriveRoots {
     foreach($candidate in @($env:OneDrive,$env:OneDriveCommercial,$env:OneDriveConsumer)) {
         if([string]::IsNullOrWhiteSpace([string]$candidate)) { continue }
         try {
-            $resolved = Resolve-AmmarTradingLocalPath -Path ([string]$candidate) -PathType Container -Description 'OneDrive root'
+            $resolved = Resolve-AmmarTradingLocalPath -Path ([string]$candidate) -PathType Container -Description 'OneDrive root' -TrustedCloudFilesRoot ([string]$candidate)
         } catch {
             continue
         }
@@ -109,8 +198,8 @@ function Resolve-AmmarTradingOneDriveRoot {
         [switch]$RequireWritable
     )
 
-    $resolved = Resolve-AmmarTradingLocalPath -Path $Path -PathType Container -Description 'OneDrive root'
-    $matches = @(Get-AmmarTradingWritableOneDriveRoots | Where-Object { $_.Path -ieq $resolved })
+    $requested = Resolve-AmmarTradingLocalPath -Path $Path -PathType Container -Description 'OneDrive root' -TrustedCloudFilesRoot $Path
+    $matches = @(Get-AmmarTradingWritableOneDriveRoots | Where-Object { $_.Path -ieq $requested })
     if($matches.Count -ne 1) { throw 'OneDrive root must exactly match a currently signed-in OneDrive root.' }
     if($RequireWritable -and -not [bool]$matches[0].IsWritable) { throw 'OneDrive root is not writable.' }
     return [string]$matches[0].Path
@@ -124,13 +213,13 @@ function Assert-AmmarTradingTrustedDestinationPath {
         [Parameter(Mandatory)][string]$Description
     )
 
-    $canonicalRoot = Resolve-AmmarTradingLocalPath -Path $OneDriveRoot -PathType Container -Description 'OneDrive root'
+    $canonicalRoot = Resolve-AmmarTradingOneDriveRoot -Path $OneDriveRoot
     $canonicalPath = [IO.Path]::GetFullPath($Path)
     $rootPrefix = $canonicalRoot.TrimEnd([IO.Path]::DirectorySeparatorChar,[IO.Path]::AltDirectorySeparatorChar) + [IO.Path]::DirectorySeparatorChar
     if(-not $canonicalPath.StartsWith($rootPrefix, [StringComparison]::OrdinalIgnoreCase)) {
         throw "$Description must remain below the trusted OneDrive root."
     }
-    Assert-AmmarTradingNoReparseAncestors -Path $canonicalPath -Description $Description
+    Assert-AmmarTradingNoReparseAncestors -Path $canonicalPath -Description $Description -TrustedCloudFilesRoot $canonicalRoot
     return $canonicalPath
 }
 
@@ -579,19 +668,29 @@ function Start-AmmarTradingSetupTransaction {
 }
 
 function Test-AmmarTradingReparsePoint {
-    param([Parameter(Mandatory)][string]$Path)
+    param(
+        [Parameter(Mandatory)][string]$Path,
+        [string]$TrustedCloudFilesRoot = ''
+    )
 
-    $item = Get-Item -LiteralPath $Path -Force -ErrorAction Stop
-    return ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0
+    $attributes = [IO.FileAttributes](& $script:AmmarTradingFileAttributesResolver $Path)
+    if(($attributes -band [IO.FileAttributes]::ReparsePoint) -eq 0) { return $false }
+    if(-not [string]::IsNullOrWhiteSpace($TrustedCloudFilesRoot) -and
+       (Test-AmmarTradingPathBelow -Path $Path -Root $TrustedCloudFilesRoot) -and
+       (Test-AmmarTradingCloudFilesReparseTag -Tag ([uint32](& $script:AmmarTradingReparseTagResolver $Path))) ) {
+        return $false
+    }
+    return $true
 }
 
 function Assert-AmmarTradingMigrationPath {
     param(
         [Parameter(Mandatory)][string]$Path,
-        [Parameter(Mandatory)][string]$Description
+        [Parameter(Mandatory)][string]$Description,
+        [string]$TrustedCloudFilesRoot = ''
     )
 
-    if(Test-AmmarTradingReparsePoint -Path $Path) { throw "$Description contains a reparse point: $Path" }
+    if(Test-AmmarTradingReparsePoint -Path $Path -TrustedCloudFilesRoot $TrustedCloudFilesRoot) { throw "$Description contains a reparse point: $Path" }
 }
 
 function Copy-AmmarTradingLegacyData {
@@ -601,8 +700,8 @@ function Copy-AmmarTradingLegacyData {
         [Parameter(Mandatory)][string[]]$AccountNumbers
     )
 
-    $resolvedRoot = (Resolve-Path -LiteralPath ([Environment]::ExpandEnvironmentVariables($OneDriveRoot.Trim())) -ErrorAction Stop).Path
-    Assert-AmmarTradingMigrationPath -Path $resolvedRoot -Description 'OneDrive migration root'
+    $resolvedRoot = Resolve-AmmarTradingOneDriveRoot -Path $OneDriveRoot -RequireWritable
+    Assert-AmmarTradingMigrationPath -Path $resolvedRoot -Description 'OneDrive migration root' -TrustedCloudFilesRoot $resolvedRoot
 
     $accounts = [System.Collections.Generic.List[string]]::new()
     $seenAccounts = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::Ordinal)
@@ -613,21 +712,21 @@ function Copy-AmmarTradingLegacyData {
     }
 
     $canonicalRoot = Join-Path $resolvedRoot 'AmmarTrading'
-    if(Test-Path -LiteralPath $canonicalRoot) { Assert-AmmarTradingMigrationPath -Path $canonicalRoot -Description 'Canonical migration root' }
+    if(Test-Path -LiteralPath $canonicalRoot) { Assert-AmmarTradingMigrationPath -Path $canonicalRoot -Description 'Canonical migration root' -TrustedCloudFilesRoot $resolvedRoot }
 
     $candidates = [System.Collections.Generic.List[object]]::new()
     foreach($legacyName in @('Money Machine','AmarTrading')) {
         $legacyRoot = Join-Path $resolvedRoot $legacyName
         if(-not (Test-Path -LiteralPath $legacyRoot -PathType Container)) { continue }
-        Assert-AmmarTradingMigrationPath -Path $legacyRoot -Description "Legacy '$legacyName' root"
+        Assert-AmmarTradingMigrationPath -Path $legacyRoot -Description "Legacy '$legacyName' root" -TrustedCloudFilesRoot $resolvedRoot
         foreach($accountNumber in $accounts) {
             $sourceAccount = Join-Path $legacyRoot ("Account_{0}" -f $accountNumber)
             if(-not (Test-Path -LiteralPath $sourceAccount -PathType Container)) { continue }
-            Assert-AmmarTradingMigrationPath -Path $sourceAccount -Description "Legacy account '$accountNumber' folder"
+            Assert-AmmarTradingMigrationPath -Path $sourceAccount -Description "Legacy account '$accountNumber' folder" -TrustedCloudFilesRoot $resolvedRoot
             $sourcePrefix = $sourceAccount.TrimEnd([IO.Path]::DirectorySeparatorChar,[IO.Path]::AltDirectorySeparatorChar) + [IO.Path]::DirectorySeparatorChar
             $items = @(Get-ChildItem -LiteralPath $sourceAccount -Recurse -Force -ErrorAction Stop)
             foreach($item in $items) {
-                if(($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+                if(Test-AmmarTradingReparsePoint -Path $item.FullName -TrustedCloudFilesRoot $resolvedRoot) {
                     throw "Legacy account '$accountNumber' data contains a reparse point: $($item.FullName)"
                 }
                 if($item.PSIsContainer) { continue }
@@ -657,17 +756,17 @@ function Copy-AmmarTradingLegacyData {
             if([string]::IsNullOrWhiteSpace($part)) { continue }
             $currentDirectory = Join-Path $currentDirectory $part
             if(Test-Path -LiteralPath $currentDirectory) {
-                Assert-AmmarTradingMigrationPath -Path $currentDirectory -Description 'Legacy migration destination'
+                Assert-AmmarTradingMigrationPath -Path $currentDirectory -Description 'Legacy migration destination' -TrustedCloudFilesRoot $resolvedRoot
             } else {
                 New-Item -ItemType Directory -Path $currentDirectory -Force | Out-Null
-                Assert-AmmarTradingMigrationPath -Path $currentDirectory -Description 'Legacy migration destination'
+                Assert-AmmarTradingMigrationPath -Path $currentDirectory -Description 'Legacy migration destination' -TrustedCloudFilesRoot $resolvedRoot
             }
         }
 
         $sourceItem = Get-Item -LiteralPath $candidate.Source -Force -ErrorAction Stop
         $sourceHash = (Get-FileHash -LiteralPath $candidate.Source -Algorithm SHA256).Hash
         if(Test-Path -LiteralPath $candidate.Destination) {
-            Assert-AmmarTradingMigrationPath -Path $candidate.Destination -Description 'Legacy migration destination file'
+            Assert-AmmarTradingMigrationPath -Path $candidate.Destination -Description 'Legacy migration destination file' -TrustedCloudFilesRoot $resolvedRoot
             $destinationItem = Get-Item -LiteralPath $candidate.Destination -Force -ErrorAction Stop
             $destinationHash = (Get-FileHash -LiteralPath $candidate.Destination -Algorithm SHA256).Hash
             if($sourceItem.Length -eq $destinationItem.Length -and $sourceHash -ceq $destinationHash) { $alreadyPresent++ } else { $conflict++ }

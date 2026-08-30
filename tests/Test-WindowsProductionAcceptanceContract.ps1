@@ -120,6 +120,13 @@ try {
     }
     if(@($reportingEvidence.Accounts | Where-Object { $_.HydrationState -cne 'Hydrated' -or -not [bool]$_.PhysicalReceiptObserved }).Count -ne 0) { throw 'Reporting evidence did not prove hydrated readable local bytes.' }
 
+    $mismatchedDestination = Join-Path $oneDriveRoot 'AmmarTrading\Account_10000001\Baskets.csv'
+    Add-Content -LiteralPath $mismatchedDestination -Value '# independent receipt hash mismatch' -Encoding utf8
+    $hashMismatchRejected = $false
+    try { $null = Get-AmmarTradingReportingAcceptanceEvidence -VpsName 'Demo VPS' -ExpectedAccountNumber $accounts -OneDriveRoot $oneDriveRoot -VpsEvidencePath $vpsEvidencePath } catch { $hashMismatchRejected = $true }
+    if(-not $hashMismatchRejected) { throw 'Reporting acceptance accepted hydrated bytes whose hash differs from independent VPS evidence.' }
+    Copy-Item -LiteralPath $mappings[0].SourceCsv -Destination $mismatchedDestination -Force
+
     Set-AmmarTradingAcceptanceTestContext -MachineIdentityHash ('a' * 64) -OneDriveProcessRunning $true -ReceiptAttributeValue 0 -TaskEvidenceProvider { [pscustomobject]@{ TaskState='Ready'; LastTaskResult=0 } }
     $sameMachineRejected = $false
     try { $null = Get-AmmarTradingReportingAcceptanceEvidence -VpsName 'Demo VPS' -ExpectedAccountNumber $accounts -OneDriveRoot $oneDriveRoot -VpsEvidencePath $vpsEvidencePath } catch { $sameMachineRejected = $true }
