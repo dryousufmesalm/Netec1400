@@ -410,3 +410,150 @@ Runtime `0.030479s`; exit `0`; output `FINAL_BROWSER_PREREQUISITE_EXISTS=False`;
 
 - Browser acceptance is the single explicit skip because its prototype prerequisite is absent from the isolated Windows staging tree.
 - The bounded tests used only temporary local roots and unique synthetic current-user registry keys. No VPS, credentials, customer data, live OneDrive path/data, installer artifact, or generated installer binary was accessed or changed, and no installer was built.
+
+## Round-five breaker recovery: immutable bytes and namespace-safe cleanup
+
+### Bounded correction
+
+- Task-created publication handles now grant only `FILE_SHARE_READ`; write and delete sharing remain denied through create/write-or-copy, flush, both pre-rename checks, handle rename, destination identity verification, and final content verification. The real Windows hook opens the held temporary pathname for write with `FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE`, attempts a same-byte write, and proves that access is blocked until the publishing handle is disposed.
+- A successful `RenameByHandle` now sets `namespaceChanged` immediately, before any fallible destination check. Delete-by-handle cleanup is restricted to `-not $namespaceChanged`, so post-rename identity or hash errors retain the same-handle replacement at the destination and report the original verification error.
+- After rename and same-handle destination identity verification, the same `FileStream` supplies a third length and SHA-256 check. The final values are compared with the expected content and populate the returned result. Focused coverage forces both a mismatching third hash and a throwing third hash read, and successful publication compares the returned hash with an independent destination hash.
+- Callback failure, pre-rename mismatch cleanup, rename failure cleanup, normal replacement, legacy migration no-replace conflict classification, Cloud tag/registration/fixed-volume boundaries, and all older invariants remain covered and unchanged.
+
+### Exact recovery RED evidence
+
+All four RED runs used Windows PowerShell on the isolated `C:\CodexWorker\ammar-task10-cloud` tree before any production edit. Each wrapper deliberately converts the expected test failure to exit `7`, with pass `0`, fail `1`, and skip `0`.
+
+The real in-place writer regression used:
+
+```text
+win ps '$ErrorActionPreference="Stop"; $sw=[Diagnostics.Stopwatch]::StartNew(); try { & "C:\CodexWorker\ammar-task10-cloud\tests\Test-AmmarTradingCloudFiles.ps1" -SetupModulePath "C:\CodexWorker\ammar-task10-cloud\automation\MoneyMachineCsvSync\MoneyMachineSyncSetup.psm1" -SyncScriptPath "C:\CodexWorker\ammar-task10-cloud\automation\MoneyMachineCsvSync\Sync-BasketsToOneDrive.ps1"; $sw.Stop(); Write-Output ("RED_INPLACE_RUNTIME_SECONDS=" + $sw.Elapsed.TotalSeconds); Write-Output "RED_INPLACE_UNEXPECTED_PASS=1"; exit 8 } catch { $sw.Stop(); Write-Output ("TEST-FAIL: " + $_.Exception.Message); Write-Output ("RED_INPLACE_RUNTIME_SECONDS=" + $sw.Elapsed.TotalSeconds); Write-Output "RED_INPLACE_PASS_COUNT=0 RED_INPLACE_FAIL_COUNT=1 RED_INPLACE_SKIP_COUNT=0"; exit 7 }'
+```
+
+Runtime `1.3971758s`; exit `7`; `TEST-FAIL: The held verified temporary leaf must block a real Windows in-place write open with full share flags.` This proves the baseline `FILE_SHARE_WRITE` admitted the competing write handle.
+
+The post-rename hash-read failure regression used:
+
+```text
+win ps '$ErrorActionPreference="Stop"; $sw=[Diagnostics.Stopwatch]::StartNew(); try { & "C:\CodexWorker\ammar-task10-cloud\tests\Test-AmmarTradingCloudFiles.ps1" -SetupModulePath "C:\CodexWorker\ammar-task10-cloud\automation\MoneyMachineCsvSync\MoneyMachineSyncSetup.psm1" -SyncScriptPath "C:\CodexWorker\ammar-task10-cloud\automation\MoneyMachineCsvSync\Sync-BasketsToOneDrive.ps1"; $sw.Stop(); Write-Output ("RED_POST_RENAME_HASH_FAILURE_RUNTIME_SECONDS=" + $sw.Elapsed.TotalSeconds); Write-Output "RED_POST_RENAME_HASH_FAILURE_UNEXPECTED_PASS=1"; exit 8 } catch { $sw.Stop(); Write-Output ("TEST-FAIL: " + $_.Exception.Message); Write-Output ("RED_POST_RENAME_HASH_FAILURE_RUNTIME_SECONDS=" + $sw.Elapsed.TotalSeconds); Write-Output "RED_POST_RENAME_HASH_FAILURE_PASS_COUNT=0 RED_POST_RENAME_HASH_FAILURE_FAIL_COUNT=1 RED_POST_RENAME_HASH_FAILURE_SKIP_COUNT=0"; exit 7 }'
+```
+
+Runtime `1.2974324s`; exit `7`; `TEST-FAIL: Expected failure containing 'deterministic post-rename hash read failure'.` Only the two pre-rename hash reads existed.
+
+The post-rename hash-mismatch regression used:
+
+```text
+win ps '$ErrorActionPreference="Stop"; $sw=[Diagnostics.Stopwatch]::StartNew(); try { & "C:\CodexWorker\ammar-task10-cloud\tests\Test-AmmarTradingCloudFiles.ps1" -SetupModulePath "C:\CodexWorker\ammar-task10-cloud\automation\MoneyMachineCsvSync\MoneyMachineSyncSetup.psm1" -SyncScriptPath "C:\CodexWorker\ammar-task10-cloud\automation\MoneyMachineCsvSync\Sync-BasketsToOneDrive.ps1"; $sw.Stop(); Write-Output ("RED_POST_RENAME_HASH_MISMATCH_RUNTIME_SECONDS=" + $sw.Elapsed.TotalSeconds); Write-Output "RED_POST_RENAME_HASH_MISMATCH_UNEXPECTED_PASS=1"; exit 8 } catch { $sw.Stop(); Write-Output ("TEST-FAIL: " + $_.Exception.Message); Write-Output ("RED_POST_RENAME_HASH_MISMATCH_RUNTIME_SECONDS=" + $sw.Elapsed.TotalSeconds); Write-Output "RED_POST_RENAME_HASH_MISMATCH_PASS_COUNT=0 RED_POST_RENAME_HASH_MISMATCH_FAIL_COUNT=1 RED_POST_RENAME_HASH_MISMATCH_SKIP_COUNT=0"; exit 7 }'
+```
+
+Runtime `1.2889206s`; exit `7`; `TEST-FAIL: Expected failure containing 'content verification failed after publication'.` The baseline neither computed nor compared a post-rename hash.
+
+The post-rename namespace-cleanup regression used:
+
+```text
+win ps '$ErrorActionPreference="Stop"; $sw=[Diagnostics.Stopwatch]::StartNew(); try { & "C:\CodexWorker\ammar-task10-cloud\tests\Test-AmmarTradingCloudFiles.ps1" -SetupModulePath "C:\CodexWorker\ammar-task10-cloud\automation\MoneyMachineCsvSync\MoneyMachineSyncSetup.psm1" -SyncScriptPath "C:\CodexWorker\ammar-task10-cloud\automation\MoneyMachineCsvSync\Sync-BasketsToOneDrive.ps1"; $sw.Stop(); Write-Output ("RED_POST_RENAME_CLEANUP_RUNTIME_SECONDS=" + $sw.Elapsed.TotalSeconds); Write-Output "RED_POST_RENAME_CLEANUP_UNEXPECTED_PASS=1"; exit 8 } catch { $sw.Stop(); Write-Output ("TEST-FAIL: " + $_.Exception.Message); Write-Output ("RED_POST_RENAME_CLEANUP_RUNTIME_SECONDS=" + $sw.Elapsed.TotalSeconds); Write-Output "RED_POST_RENAME_CLEANUP_PASS_COUNT=0 RED_POST_RENAME_CLEANUP_FAIL_COUNT=1 RED_POST_RENAME_CLEANUP_SKIP_COUNT=0"; exit 7 }'
+```
+
+Runtime `1.3145295s`; exit `7`; `TEST-FAIL: A post-rename destination verification failure must not delete-by-handle the published replacement.` The injected destination metadata failure ran after a successful replacing rename, and baseline cleanup deleted the replacement.
+
+### Exact focused GREEN evidence
+
+```text
+win ps '$ErrorActionPreference="Stop"; $sw=[Diagnostics.Stopwatch]::StartNew(); & "C:\CodexWorker\ammar-task10-cloud\tests\Test-AmmarTradingCloudFiles.ps1" -SetupModulePath "C:\CodexWorker\ammar-task10-cloud\automation\MoneyMachineCsvSync\MoneyMachineSyncSetup.psm1" -SyncScriptPath "C:\CodexWorker\ammar-task10-cloud\automation\MoneyMachineCsvSync\Sync-BasketsToOneDrive.ps1"; $sw.Stop(); Write-Output ("FOCUSED_RECOVERY_RUNTIME_SECONDS=" + $sw.Elapsed.TotalSeconds); Write-Output "FOCUSED_RECOVERY_PASS_COUNT=1 FOCUSED_RECOVERY_FAIL_COUNT=0 FOCUSED_RECOVERY_SKIP_COUNT=0"'
+```
+
+Runtime `2.5720016s`; exit `0`; pass `1`; fail `0`; skip `0`; output included `AmmarTrading Cloud Files trust-boundary tests passed.`
+
+```text
+win ps '$ErrorActionPreference="Stop"; $sw=[Diagnostics.Stopwatch]::StartNew(); & "C:\CodexWorker\ammar-task10-cloud\tests\Test-AmmarTradingBatchSetup.ps1" -ModulePath "C:\CodexWorker\ammar-task10-cloud\automation\MoneyMachineCsvSync\MoneyMachineSyncSetup.psm1"; $sw.Stop(); Write-Output ("FOCUSED_MIGRATION_RUNTIME_SECONDS=" + $sw.Elapsed.TotalSeconds); Write-Output "FOCUSED_MIGRATION_PASS_COUNT=1 FOCUSED_MIGRATION_FAIL_COUNT=0 FOCUSED_MIGRATION_SKIP_COUNT=0"'
+```
+
+Runtime `10.8417065s`; exit `0`; pass `1`; fail `0`; skip `0`; output included `AmmarTrading transactional batch setup and legacy migration tests passed.` The existing destination-created-during-migration case retains no-replace conflict behavior.
+
+### Exact final recovery suite evidence
+
+Every final executable gate ran against code/test commit `6d7737cb5f72e4d15b13e31c49bb7c69b4ad9d80`. Local and isolated-worker SHA-256 values matched for the four load-bearing files:
+
+- `MoneyMachineSyncSetup.psm1`: `7821C8A744F899D47F070E249D377DDEAB0D13EC46E2382D46C2FF1F45E1EEFF`
+- `Test-AmmarTradingCloudFiles.ps1`: `73D4C1F1D5001778A4FB101E37A5A7FD6AAC28BEA2BFE5B6AF233F641D6D962A`
+- `Sync-BasketsToOneDrive.ps1`: `0198C8191FE1A3E8762479131AC649315AFAB6A9729E2F1423B6F21786A24F42`
+- `Test-AmmarTradingBatchSetup.ps1`: `80B98058D5C4B9AEDB87C31DF368FFAD50F4D9B4B326DF433D1EBD9F907C0E33`
+
+```text
+win ps '$ErrorActionPreference="Stop"; $sw=[Diagnostics.Stopwatch]::StartNew(); & "C:\CodexWorker\ammar-task10-cloud\tests\Test-AmmarTradingCloudFiles.ps1" -SetupModulePath "C:\CodexWorker\ammar-task10-cloud\automation\MoneyMachineCsvSync\MoneyMachineSyncSetup.psm1" -SyncScriptPath "C:\CodexWorker\ammar-task10-cloud\automation\MoneyMachineCsvSync\Sync-BasketsToOneDrive.ps1"; & "C:\CodexWorker\ammar-task10-cloud\tests\Test-MoneyMachineSyncSetup.ps1" -ModulePath "C:\CodexWorker\ammar-task10-cloud\automation\MoneyMachineCsvSync\MoneyMachineSyncSetup.psm1"; $sw.Stop(); Write-Output ("FINAL_RECOVERY_PS_GROUP_1_RUNTIME_SECONDS=" + $sw.Elapsed.TotalSeconds); Write-Output "FINAL_RECOVERY_PS_GROUP_1_PASS_COUNT=2 FINAL_RECOVERY_PS_GROUP_1_FAIL_COUNT=0 FINAL_RECOVERY_PS_GROUP_1_SKIP_COUNT=0"'
+```
+
+Runtime `6.7888779s`; exit `0`; counts `2/0/0`.
+
+```text
+win ps '$ErrorActionPreference="Stop"; $sw=[Diagnostics.Stopwatch]::StartNew(); & "C:\CodexWorker\ammar-task10-cloud\tests\Test-AmmarTradingBatchSetup.ps1" -ModulePath "C:\CodexWorker\ammar-task10-cloud\automation\MoneyMachineCsvSync\MoneyMachineSyncSetup.psm1"; $sw.Stop(); Write-Output ("FINAL_RECOVERY_PS_GROUP_2A_RUNTIME_SECONDS=" + $sw.Elapsed.TotalSeconds); Write-Output "FINAL_RECOVERY_PS_GROUP_2A_PASS_COUNT=1 FINAL_RECOVERY_PS_GROUP_2A_FAIL_COUNT=0 FINAL_RECOVERY_PS_GROUP_2A_SKIP_COUNT=0"'
+```
+
+Runtime `11.5177921s`; exit `0`; counts `1/0/0`.
+
+```text
+win ps '$ErrorActionPreference="Stop"; $sw=[Diagnostics.Stopwatch]::StartNew(); & "C:\CodexWorker\ammar-task10-cloud\tests\Test-MoneyMachineCsvSync.ps1" -ScriptPath "C:\CodexWorker\ammar-task10-cloud\automation\MoneyMachineCsvSync\Sync-BasketsToOneDrive.ps1"; $sw.Stop(); Write-Output ("FINAL_RECOVERY_PS_GROUP_2B_RUNTIME_SECONDS=" + $sw.Elapsed.TotalSeconds); Write-Output "FINAL_RECOVERY_PS_GROUP_2B_PASS_COUNT=1 FINAL_RECOVERY_PS_GROUP_2B_FAIL_COUNT=0 FINAL_RECOVERY_PS_GROUP_2B_SKIP_COUNT=0"'
+```
+
+Runtime `25.3780604s`; exit `0`; counts `1/0/0`.
+
+```text
+win ps '$ErrorActionPreference="Stop"; $sw=[Diagnostics.Stopwatch]::StartNew(); & "C:\CodexWorker\ammar-task10-cloud\tests\Test-AmmarTradingDesktopSecurity.ps1" -SetupModulePath "C:\CodexWorker\ammar-task10-cloud\automation\MoneyMachineCsvSync\MoneyMachineSyncSetup.psm1" -EntryPoint "C:\CodexWorker\ammar-task10-cloud\automation\MoneyMachineCsvSync\Invoke-AmmarTradingDesktopOperation.ps1"; & "C:\CodexWorker\ammar-task10-cloud\tests\Test-WindowsProductionAcceptanceContract.ps1" -RunnerPath "C:\CodexWorker\ammar-task10-cloud\tests\Run-WindowsProductionAcceptance.ps1" -InstallerAcceptancePath "C:\CodexWorker\ammar-task10-cloud\windows\scripts\Test-AmmarTradingSyncAcceptance.ps1"; $sw.Stop(); Write-Output ("FINAL_RECOVERY_PS_GROUP_3_RUNTIME_SECONDS=" + $sw.Elapsed.TotalSeconds); Write-Output "FINAL_RECOVERY_PS_GROUP_3_PASS_COUNT=2 FINAL_RECOVERY_PS_GROUP_3_FAIL_COUNT=0 FINAL_RECOVERY_PS_GROUP_3_SKIP_COUNT=0"'
+```
+
+Runtime `18.3533552s`; exit `0`; counts `2/0/0`.
+
+```text
+win ps '$ErrorActionPreference="Stop"; $sw=[Diagnostics.Stopwatch]::StartNew(); & "C:\CodexWorker\ammar-task10-cloud\tests\Test-AmmarTradingDesktopOperation.ps1" -EntryPoint "C:\CodexWorker\ammar-task10-cloud\automation\MoneyMachineCsvSync\Invoke-AmmarTradingDesktopOperation.ps1"; $sw.Stop(); Write-Output ("FINAL_RECOVERY_PS_GROUP_4_RUNTIME_SECONDS=" + $sw.Elapsed.TotalSeconds); Write-Output "FINAL_RECOVERY_PS_GROUP_4_PASS_COUNT=1 FINAL_RECOVERY_PS_GROUP_4_FAIL_COUNT=0 FINAL_RECOVERY_PS_GROUP_4_SKIP_COUNT=0"'
+```
+
+Runtime `17.0842934s`; exit `0`; counts `1/0/0`. The real synthetic current-user registry key was absent after the fixture completed.
+
+```text
+win ps '$ErrorActionPreference="Stop"; $sw=[Diagnostics.Stopwatch]::StartNew(); & "C:\CodexWorker\ammar-task10-cloud\tests\Test-AmmarTradingMt4Discovery.ps1" -SetupModulePath "C:\CodexWorker\ammar-task10-cloud\automation\MoneyMachineCsvSync\MoneyMachineSyncSetup.psm1" -SchemaModulePath "C:\CodexWorker\ammar-task10-cloud\automation\MoneyMachineCsvSync\MoneyMachineCsvSchemaV3.psm1"; & "C:\CodexWorker\ammar-task10-cloud\tests\Test-InstallBasketsSyncTask.ps1" -ScriptPath "C:\CodexWorker\ammar-task10-cloud\automation\MoneyMachineCsvSync\Install-BasketsSyncTask.ps1"; & "C:\CodexWorker\ammar-task10-cloud\tests\Test-MoneyMachineDeploymentDefaults.ps1" -AutomationRoot "C:\CodexWorker\ammar-task10-cloud\automation\MoneyMachineCsvSync"; $sw.Stop(); Write-Output ("FINAL_RECOVERY_PS_GROUP_5_RUNTIME_SECONDS=" + $sw.Elapsed.TotalSeconds); Write-Output "FINAL_RECOVERY_PS_GROUP_5_PASS_COUNT=3 FINAL_RECOVERY_PS_GROUP_5_FAIL_COUNT=0 FINAL_RECOVERY_PS_GROUP_5_SKIP_COUNT=0"'
+```
+
+Runtime `1.1766213s`; exit `0`; counts `3/0/0`.
+
+```text
+win ps '$ErrorActionPreference="Stop"; $sw=[Diagnostics.Stopwatch]::StartNew(); & "C:\CodexWorker\ammar-task10-cloud\tests\Test-MoneyMachinePowerQueryContract.ps1" -BasketQueryPath "C:\CodexWorker\ammar-task10-cloud\automation\MoneyMachineCsvSync\PowerQuery\MoneyMachine_Baskets.m" -StatusQueryPath "C:\CodexWorker\ammar-task10-cloud\automation\MoneyMachineCsvSync\PowerQuery\MoneyMachine_SyncStatus.m"; & "C:\CodexWorker\ammar-task10-cloud\tests\Test-V3TelemetryReportingContract.ps1" -SourcePath "C:\CodexWorker\ammar-task10-cloud\AmmarTradingGoldEA - ref reset every bar - V3.mq4"; & "C:\CodexWorker\ammar-task10-cloud\tests\Test-MoneyMachineSyncWizardHost.ps1" -ScriptPath "C:\CodexWorker\ammar-task10-cloud\automation\MoneyMachineCsvSync\Start-MoneyMachineSyncWizard.ps1"; $sw.Stop(); Write-Output ("FINAL_RECOVERY_PS_GROUP_6_RUNTIME_SECONDS=" + $sw.Elapsed.TotalSeconds); Write-Output "FINAL_RECOVERY_PS_GROUP_6_PASS_COUNT=3 FINAL_RECOVERY_PS_GROUP_6_FAIL_COUNT=0 FINAL_RECOVERY_PS_GROUP_6_SKIP_COUNT=0"'
+```
+
+Runtime `7.075418s`; exit `0`; counts `3/0/0`. The wizard-host fixture removed its exact synthetic current-user registry key before success.
+
+The Windows PowerShell total is `13` passed script invocations, `0` failed, `0` skipped, with cumulative measured runtime `87.3744183s`.
+
+```text
+win ps '$ErrorActionPreference="Stop"; Set-Location "C:\CodexWorker\ammar-task10-cloud\windows"; $sw=[Diagnostics.Stopwatch]::StartNew(); dotnet test "AmmarTrading.Sync.sln" --verbosity minimal; if($LASTEXITCODE -ne 0) { throw "dotnet test failed with exit code $LASTEXITCODE" }; $sw.Stop(); Write-Output ("FINAL_RECOVERY_DOTNET_RUNTIME_SECONDS=" + $sw.Elapsed.TotalSeconds); Write-Output "FINAL_RECOVERY_DOTNET_PASS_COUNT=83 FINAL_RECOVERY_DOTNET_FAIL_COUNT=0 FINAL_RECOVERY_DOTNET_SKIP_COUNT=0"'
+```
+
+Runtime `3.9115127s`; exit `0`; pass `83` (`31` Core + `52` App); fail `0`; skip `0`.
+
+```text
+/usr/bin/time -f 'FINAL_RECOVERY_NODE_RUNTIME_SECONDS=%e FINAL_RECOVERY_NODE_EXIT=%x' node --test windows/tests/installer-contract.test.mjs
+```
+
+Runtime `0.77s`; exit `0`; pass `18`; fail `0`; skip `0`.
+
+```text
+/usr/bin/time -f 'FINAL_RECOVERY_DIFF_WORKTREE_RUNTIME_SECONDS=%e FINAL_RECOVERY_DIFF_WORKTREE_EXIT=%x' git diff --check
+/usr/bin/time -f 'FINAL_RECOVERY_DIFF_COMMIT_RUNTIME_SECONDS=%e FINAL_RECOVERY_DIFF_COMMIT_EXIT=%x' git diff --check HEAD^ HEAD
+```
+
+Each runtime was `0.01s`; each exited `0`; pass `2`; fail `0`; skip `0`.
+
+```text
+win ps '$ErrorActionPreference="Stop"; $sw=[Diagnostics.Stopwatch]::StartNew(); $path="C:\CodexWorker\ammar-task10-cloud\prototypes\money-machine-sync-wizard\scripts\accept-windows-wizard.mjs"; $exists=Test-Path -LiteralPath $path; $sw.Stop(); Write-Output ("FINAL_RECOVERY_BROWSER_RUNTIME_SECONDS=" + $sw.Elapsed.TotalSeconds); Write-Output ("FINAL_RECOVERY_BROWSER_PREREQUISITE_EXISTS=" + $exists); if($exists) { Write-Output "FINAL_RECOVERY_BROWSER_PASS_COUNT=0 FINAL_RECOVERY_BROWSER_FAIL_COUNT=0 FINAL_RECOVERY_BROWSER_SKIP_COUNT=0" } else { Write-Output "FINAL_RECOVERY_BROWSER_PASS_COUNT=0 FINAL_RECOVERY_BROWSER_FAIL_COUNT=0 FINAL_RECOVERY_BROWSER_SKIP_COUNT=1" }'
+```
+
+Runtime `0.0369195s`; exit `0`; output `FINAL_RECOVERY_BROWSER_PREREQUISITE_EXISTS=False`; pass `0`; fail `0`; skip `1`.
+
+### Full breaker-recovery commit identities
+
+- `6d7737cb5f72e4d15b13e31c49bb7c69b4ad9d80` — code/tests, `fix: preserve Cloud Files publication identity`.
+- The separate report commit is created after this evidence is finalized; its full identity is supplied in the handoff because a commit cannot contain its own identity.
+
+### Concerns / unrun verification
+
+- Browser acceptance is the single explicit skip because its prototype prerequisite is absent from the isolated Windows staging tree.
+- All recovery tests used temporary local Windows roots. No VPS, credentials, customer data, live OneDrive path/data, installer artifact, or generated installer binary was accessed or changed, and no installer was built.
