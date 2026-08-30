@@ -266,9 +266,110 @@ try {
     Assert-True -Condition (Test-Path -LiteralPath $renameFailureDestination -PathType Container) -Message 'A failed handle rename must preserve the existing destination object.'
     Assert-NoPublicationTemporaryFile -Destination $renameFailureDestination -Message 'A rename failure must delete its unpublished task-created temporary file.'
 
-    # Real Windows sharing integration: the verified temp leaf must deny
-    # rename, deletion, and regular-file replacement until the publishing
-    # handle is disposed. The renamed destination must be freely mutable after.
+    # Once a replacing rename succeeds, a fallible destination metadata check
+    # must report its error without deleting the held file at its new namespace.
+    $postRenameVerificationDestination = Join-Path $publicationDirectory 'post-rename-verification-failure.txt'
+    [IO.File]::WriteAllText($postRenameVerificationDestination, 'verification-original', (New-Object Text.UTF8Encoding($false)))
+    & $setupModule {
+        param($Destination)
+        $script:AmmarTradingCloudFilesPostRenameFailureDestination = [IO.Path]::GetFullPath($Destination)
+        $script:AmmarTradingHeldPathMetadataResolver = {
+            param($Handle,$Path)
+            if([IO.Path]::GetFullPath([string]$Path) -ieq $script:AmmarTradingCloudFilesPostRenameFailureDestination) {
+                throw 'deterministic post-rename destination verification failure'
+            }
+            return Get-AmmarTradingNativeHandleMetadata -Handle $Handle
+        }
+    } $postRenameVerificationDestination
+    try {
+        Assert-ThrowsLike -Expected 'deterministic post-rename destination verification failure' -Action {
+            Publish-AmmarTradingTrustedFile -OneDriveRoot $trustedRoot -Destination $postRenameVerificationDestination -Description 'Post-rename verification failure publication' -ExpectedLength 3 -ExpectedSha256 $abcSha256 -WriteState $abcState -ReplaceIfExists -WriteAction {
+                param($Stream,$State)
+                $Stream.Write([byte[]]$State.Bytes,0,$State.Bytes.Length)
+            } | Out-Null
+        }
+    } finally {
+        & $setupModule {
+            $script:AmmarTradingHeldPathMetadataResolver = $null
+            Remove-Variable -Name AmmarTradingCloudFilesPostRenameFailureDestination -Scope Script -ErrorAction SilentlyContinue
+        }
+    }
+    Assert-True -Condition (Test-Path -LiteralPath $postRenameVerificationDestination -PathType Leaf) -Message 'A post-rename destination verification failure must not delete-by-handle the published replacement.'
+    Assert-True -Condition ((Get-Content -LiteralPath $postRenameVerificationDestination -Raw) -ceq 'abc') -Message 'A post-rename destination verification failure must retain the verified replacement bytes.'
+    Assert-NoPublicationTemporaryFile -Destination $postRenameVerificationDestination -Message 'A post-rename destination verification failure must not leave an unpublished temporary file.'
+
+    # A mismatch on the required third, post-rename hash must report failure
+    # without treating the published replacement as an unpublished temp.
+    $postRenameHashMismatchDestination = Join-Path $publicationDirectory 'post-rename-hash-mismatch.txt'
+    [IO.File]::WriteAllText($postRenameHashMismatchDestination, 'hash-mismatch-original', (New-Object Text.UTF8Encoding($false)))
+    $originalOpenStreamSha256 = & $setupModule { ${function:Get-AmmarTradingOpenStreamSha256} }
+    try {
+        & $setupModule {
+            param($OriginalOpenStreamSha256)
+            $script:AmmarTradingCloudFilesOriginalOpenStreamSha256 = $OriginalOpenStreamSha256
+            $script:AmmarTradingCloudFilesOpenStreamSha256Calls = 0
+            function script:Get-AmmarTradingOpenStreamSha256 {
+                param([Parameter(Mandatory)][IO.FileStream]$Stream)
+                $script:AmmarTradingCloudFilesOpenStreamSha256Calls++
+                if($script:AmmarTradingCloudFilesOpenStreamSha256Calls -eq 3) { return ('0' * 64) }
+                return & $script:AmmarTradingCloudFilesOriginalOpenStreamSha256 -Stream $Stream
+            }
+        } $originalOpenStreamSha256
+        Assert-ThrowsLike -Expected 'content verification failed after publication' -Action {
+            Publish-AmmarTradingTrustedFile -OneDriveRoot $trustedRoot -Destination $postRenameHashMismatchDestination -Description 'Post-rename hash mismatch publication' -ExpectedLength 3 -ExpectedSha256 $abcSha256 -WriteState $abcState -ReplaceIfExists -WriteAction {
+                param($Stream,$State)
+                $Stream.Write([byte[]]$State.Bytes,0,$State.Bytes.Length)
+            } | Out-Null
+        }
+    } finally {
+        & $setupModule {
+            param($OriginalOpenStreamSha256)
+            Set-Item -LiteralPath Function:Get-AmmarTradingOpenStreamSha256 -Value $OriginalOpenStreamSha256
+            Remove-Variable -Name AmmarTradingCloudFilesOriginalOpenStreamSha256,AmmarTradingCloudFilesOpenStreamSha256Calls -Scope Script -ErrorAction SilentlyContinue
+        } $originalOpenStreamSha256
+    }
+    Assert-True -Condition ((Get-Content -LiteralPath $postRenameHashMismatchDestination -Raw) -ceq 'abc') -Message 'A post-rename hash mismatch must retain the verified replacement destination.'
+    Assert-NoPublicationTemporaryFile -Destination $postRenameHashMismatchDestination -Message 'A post-rename hash mismatch must not leave an unpublished temporary file.'
+
+    # A hash read failure on the required third, post-rename read must report
+    # failure without treating the published replacement as an unpublished temp.
+    $postRenameHashFailureDestination = Join-Path $publicationDirectory 'post-rename-hash-failure.txt'
+    [IO.File]::WriteAllText($postRenameHashFailureDestination, 'hash-read-original', (New-Object Text.UTF8Encoding($false)))
+    $originalOpenStreamSha256 = & $setupModule { ${function:Get-AmmarTradingOpenStreamSha256} }
+    try {
+        & $setupModule {
+            param($OriginalOpenStreamSha256)
+            $script:AmmarTradingCloudFilesOriginalOpenStreamSha256 = $OriginalOpenStreamSha256
+            $script:AmmarTradingCloudFilesOpenStreamSha256Calls = 0
+            function script:Get-AmmarTradingOpenStreamSha256 {
+                param([Parameter(Mandatory)][IO.FileStream]$Stream)
+                $script:AmmarTradingCloudFilesOpenStreamSha256Calls++
+                if($script:AmmarTradingCloudFilesOpenStreamSha256Calls -eq 3) {
+                    throw 'deterministic post-rename hash read failure'
+                }
+                return & $script:AmmarTradingCloudFilesOriginalOpenStreamSha256 -Stream $Stream
+            }
+        } $originalOpenStreamSha256
+        Assert-ThrowsLike -Expected 'deterministic post-rename hash read failure' -Action {
+            Publish-AmmarTradingTrustedFile -OneDriveRoot $trustedRoot -Destination $postRenameHashFailureDestination -Description 'Post-rename hash failure publication' -ExpectedLength 3 -ExpectedSha256 $abcSha256 -WriteState $abcState -ReplaceIfExists -WriteAction {
+                param($Stream,$State)
+                $Stream.Write([byte[]]$State.Bytes,0,$State.Bytes.Length)
+            } | Out-Null
+        }
+    } finally {
+        & $setupModule {
+            param($OriginalOpenStreamSha256)
+            Set-Item -LiteralPath Function:Get-AmmarTradingOpenStreamSha256 -Value $OriginalOpenStreamSha256
+            Remove-Variable -Name AmmarTradingCloudFilesOriginalOpenStreamSha256,AmmarTradingCloudFilesOpenStreamSha256Calls -Scope Script -ErrorAction SilentlyContinue
+        } $originalOpenStreamSha256
+    }
+    Assert-True -Condition ((Get-Content -LiteralPath $postRenameHashFailureDestination -Raw) -ceq 'abc') -Message 'A post-rename hash read failure must retain the verified replacement destination.'
+    Assert-NoPublicationTemporaryFile -Destination $postRenameHashFailureDestination -Message 'A post-rename hash read failure must not leave an unpublished temporary file.'
+
+    # Real Windows sharing integration: the verified temp leaf must deny an
+    # in-place writer with otherwise fully compatible share flags, rename,
+    # deletion, and regular-file replacement until the publishing handle is
+    # disposed. The renamed destination must be freely mutable afterward.
     $heldDestination = Join-Path $publicationDirectory 'held-temp.txt'
     $heldReplacement = Join-Path $publicationDirectory 'held-temp-attacker.txt'
     [IO.File]::WriteAllText($heldReplacement, 'attacker-replacement', (New-Object Text.UTF8Encoding($false)))
@@ -278,9 +379,22 @@ try {
         $script:AmmarTradingCloudFilesHeldRenameBlocked = $false
         $script:AmmarTradingCloudFilesHeldDeleteBlocked = $false
         $script:AmmarTradingCloudFilesHeldReplaceBlocked = $false
+        $script:AmmarTradingCloudFilesHeldWriteBlocked = $false
+        $script:AmmarTradingCloudFilesHeldWriteSucceeded = $false
         $script:AmmarTradingTrustedFilePublicationHook = {
             param($Description,$Temporary,$Destination)
             if($Description -cne 'Held temporary Windows integration') { return }
+            $writer = $null
+            try {
+                $writer = [IO.FileStream]::new($Temporary,[IO.FileMode]::Open,[IO.FileAccess]::Write,[IO.FileShare]7)
+                $writer.Write([byte[]]@(97),0,1)
+                $writer.Flush($true)
+                $script:AmmarTradingCloudFilesHeldWriteSucceeded = $true
+            } catch {
+                $script:AmmarTradingCloudFilesHeldWriteBlocked = Test-Path -LiteralPath $Temporary -PathType Leaf
+            } finally {
+                if($null -ne $writer) { $writer.Dispose() }
+            }
             try { Move-Item -LiteralPath $Temporary -Destination "$Temporary.moved" -ErrorAction Stop }
             catch { $script:AmmarTradingCloudFilesHeldRenameBlocked = (Test-Path -LiteralPath $Temporary -PathType Leaf) }
             try { Remove-Item -LiteralPath $Temporary -Force -ErrorAction Stop }
@@ -289,21 +403,33 @@ try {
             catch { $script:AmmarTradingCloudFilesHeldReplaceBlocked = (Test-Path -LiteralPath $Temporary -PathType Leaf) }
         }
     } $heldReplacement
-    Publish-AmmarTradingTrustedFile -OneDriveRoot $trustedRoot -Destination $heldDestination -Description 'Held temporary Windows integration' -ExpectedLength 3 -ExpectedSha256 $abcSha256 -WriteState $abcState -ReplaceIfExists -WriteAction {
+    $heldPublication = Publish-AmmarTradingTrustedFile -OneDriveRoot $trustedRoot -Destination $heldDestination -Description 'Held temporary Windows integration' -ExpectedLength 3 -ExpectedSha256 $abcSha256 -WriteState $abcState -ReplaceIfExists -WriteAction {
         param($Stream,$State)
         $Stream.Write([byte[]]$State.Bytes,0,$State.Bytes.Length)
-    } | Out-Null
+    }
     $heldResults = & $setupModule {
         [pscustomobject]@{
             RenameBlocked = $script:AmmarTradingCloudFilesHeldRenameBlocked
             DeleteBlocked = $script:AmmarTradingCloudFilesHeldDeleteBlocked
             ReplaceBlocked = $script:AmmarTradingCloudFilesHeldReplaceBlocked
+            WriteBlocked = $script:AmmarTradingCloudFilesHeldWriteBlocked
+            WriteSucceeded = $script:AmmarTradingCloudFilesHeldWriteSucceeded
         }
     }
+    Assert-True -Condition ([bool]$heldResults.WriteBlocked -and -not [bool]$heldResults.WriteSucceeded) -Message 'The held verified temporary leaf must block a real Windows in-place write open with full share flags.'
     Assert-True -Condition ([bool]$heldResults.RenameBlocked) -Message 'The held verified temporary leaf must block a real Windows rename attempt.'
     Assert-True -Condition ([bool]$heldResults.DeleteBlocked) -Message 'The held verified temporary leaf must block a real Windows deletion attempt.'
     Assert-True -Condition ([bool]$heldResults.ReplaceBlocked) -Message 'The held verified temporary leaf must block a real Windows regular-file replacement attempt.'
     Assert-True -Condition ((Get-Content -LiteralPath $heldDestination -Raw) -ceq 'abc') -Message 'The held-handle integration must publish only the verified bytes.'
+    Assert-True -Condition ([string]$heldPublication.Hash -ceq (Get-FileHash -LiteralPath $heldDestination -Algorithm SHA256).Hash) -Message 'A successful publication must return the final destination SHA-256 computed from its held handle.'
+    $postDisposalWriter = [IO.FileStream]::new($heldDestination,[IO.FileMode]::Open,[IO.FileAccess]::Write,[IO.FileShare]7)
+    try {
+        $postDisposalWriter.Write([byte[]]@(97),0,1)
+        $postDisposalWriter.Flush($true)
+    } finally {
+        $postDisposalWriter.Dispose()
+    }
+    Assert-True -Condition ((Get-Content -LiteralPath $heldDestination -Raw) -ceq 'abc') -Message 'A real Windows in-place write open must succeed after the publication handle is disposed.'
     [IO.File]::WriteAllText($heldReplacement, 'post-disposal-replacement', (New-Object Text.UTF8Encoding($false)))
     $heldPostDisposalBackup = "$heldDestination.post-replace.bak"
     [IO.File]::Replace($heldReplacement,$heldDestination,$heldPostDisposalBackup,$true)

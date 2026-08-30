@@ -220,9 +220,10 @@ function Open-AmmarTradingNewFileHandle {
         [void](& $script:AmmarTradingFileAttributeTagResolver $parent)
     }
     # GENERIC_READ|GENERIC_WRITE|DELETE|FILE_READ_ATTRIBUTES|FILE_WRITE_ATTRIBUTES,
-    # FILE_SHARE_READ|FILE_SHARE_WRITE, CREATE_NEW, FILE_ATTRIBUTE_NORMAL, and
-    # FILE_FLAG_OPEN_REPARSE_POINT. Delete sharing is deliberately omitted.
-    $handle = [AmmarTrading.NativeFileInfo]::CreateFile($Path, [uint32]3221291392, [uint32]0x3, [IntPtr]::Zero, [uint32]1, [uint32]0x00200080, [IntPtr]::Zero)
+    # FILE_SHARE_READ, CREATE_NEW, FILE_ATTRIBUTE_NORMAL, and
+    # FILE_FLAG_OPEN_REPARSE_POINT. Write and delete sharing are deliberately
+    # omitted so the verified bytes remain immutable through final verification.
+    $handle = [AmmarTrading.NativeFileInfo]::CreateFile($Path, [uint32]3221291392, [uint32]0x1, [IntPtr]::Zero, [uint32]1, [uint32]0x00200080, [IntPtr]::Zero)
     if($handle.IsInvalid) {
         $nativeError = [Runtime.InteropServices.Marshal]::GetLastWin32Error()
         $handle.Dispose()
@@ -713,7 +714,7 @@ function Publish-AmmarTradingCanonicalTrustedFile {
         $publicationResult = $null
         $operationFailure = $null
         $cleanupFailure = $null
-        $published = $false
+        $namespaceChanged = $false
         try {
             $temporaryHandle = Open-AmmarTradingNewFileHandle -Path $temporary
             $temporaryStream = [IO.FileStream]::new($temporaryHandle,[IO.FileAccess]::ReadWrite,4096,$false)
@@ -745,16 +746,21 @@ function Publish-AmmarTradingCanonicalTrustedFile {
 
             $extendedDestination = if($canonicalDestination.StartsWith('\\?\')) { $canonicalDestination } else { '\\?\' + $canonicalDestination }
             [AmmarTrading.NativeFileInfo]::RenameByHandle($temporaryHandle,$null,$extendedDestination,[bool]$ReplaceIfExists)
+            $namespaceChanged = $true
             [void](Assert-AmmarTradingHeldFileIdentityAtPath -Handle $temporaryHandle -Path $canonicalDestination -ExpectedMetadata $initialMetadata -TrustedCloudFilesRoot $canonicalRoot -Description "$Description destination")
-            $published = $true
+            $finalLength = [int64]$temporaryStream.Length
+            $finalHash = Get-AmmarTradingOpenStreamSha256 -Stream $temporaryStream
+            if($finalLength -ne $ExpectedLength -or $finalHash -cne $normalizedExpectedHash) {
+                throw "$Description content verification failed after publication."
+            }
             $publicationResult = [pscustomobject]@{
                 Path = $canonicalDestination
-                Length = $actualLength
-                Hash = $actualHash
+                Length = $finalLength
+                Hash = $finalHash
             }
         } catch {
             $operationFailure = $_.Exception
-            if($null -ne $temporaryHandle -and -not $temporaryHandle.IsInvalid -and -not $temporaryHandle.IsClosed -and -not $published) {
+            if($null -ne $temporaryHandle -and -not $temporaryHandle.IsInvalid -and -not $temporaryHandle.IsClosed -and -not $namespaceChanged) {
                 try { [AmmarTrading.NativeFileInfo]::DeleteByHandle($temporaryHandle) }
                 catch { $cleanupFailure = $_.Exception }
             }
