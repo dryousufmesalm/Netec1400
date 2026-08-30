@@ -156,6 +156,103 @@ test("uninstall requires a transaction-bound prior-uninstaller proof created out
   assert.match(acceptance, /Corrupt prior-uninstaller proof uninstall unexpectedly succeeded/);
 });
 
+test("committed incoming uninstall uses its own fully bound pre-uninstall proof", () => {
+  const priorMagic = installer.match(/AMMAR_UNINS_PROOF_MAGIC\s*=\s*'([^']+)'/);
+  const incomingMagic = installer.match(/AMMAR_INCOMING_UNINS_PROOF_MAGIC\s*=\s*'([^']+)'/);
+  assert.ok(priorMagic, "the prior proof magic must remain explicit");
+  assert.ok(incomingMagic, "the incoming proof magic must be explicit");
+  assert.notEqual(incomingMagic[1], priorMagic[1], "incoming and prior proof formats must remain distinct");
+  assert.match(installer, /incoming-uninstaller-verified\.txt/);
+  assert.match(installer, /incoming-uninstaller-verified\.sha256/);
+  assert.match(installer, /function WriteIncomingUninstallerProof/);
+  assert.match(installer, /function ValidateIncomingUninstallerProof/);
+
+  const incomingProofWriter = installer.slice(
+    installer.indexOf("function WriteIncomingUninstallerProof"),
+    installer.indexOf("function WriteCommittedMarker"),
+  );
+  for (const binding of [
+    "APPID|",
+    "ROOT|",
+    "TXID|",
+    "STATE|",
+    "COMMITTED|",
+    "INCOMINGMANIFEST|",
+    "INCOMINGHASHES|",
+    "REGISTRATION|",
+    "UNINSEXE|",
+    "UNINSDAT|",
+  ]) {
+    assert.match(incomingProofWriter, new RegExp(binding.replace("|", "\\|")));
+  }
+  assert.match(incomingProofWriter, /state\.sha256/);
+  assert.match(incomingProofWriter, /committed\.sha256/);
+  assert.match(incomingProofWriter, /VerifyIncomingCommittedPayload/);
+  assert.match(incomingProofWriter, /CurrentUninstallerMeta\('unins000\.exe'/);
+  assert.match(incomingProofWriter, /CurrentUninstallerMeta\('unins000\.dat'/);
+  assert.match(incomingProofWriter, /RegistrationDigestWithUninstallerMeta/);
+  assert.match(incomingProofWriter, /AtomicWriteLines/);
+  assert.match(incomingProofWriter, /AtomicWriteText/);
+  assert.match(incomingProofWriter, /ValidateIncomingUninstallerProofEnvelope/);
+
+  const markerWriter = installer.slice(
+    installer.indexOf("function WriteCommittedMarker"),
+    installer.indexOf("function ClassifyActiveTransaction"),
+  );
+  const validationSteps = [
+    "TryParseState",
+    "VerifyIncomingCommittedPayload",
+    "CurrentUninstallerMeta('unins000.exe'",
+    "CurrentUninstallerMeta('unins000.dat'",
+    "RegistrationDigestWithUninstallerMeta",
+    "AtomicWriteLines(RecoveryChild(RecoveryRoot, 'committed.txt')",
+    "AtomicWriteText(RecoveryChild(RecoveryRoot, 'committed.sha256')",
+    "WriteIncomingUninstallerProof",
+  ].map((step) => markerWriter.indexOf(step));
+  assert.ok(validationSteps.every((index) => index >= 0), "the committed proof pipeline must retain every validation and write step");
+  assert.deepEqual(validationSteps, [...validationSteps].sort((a, b) => a - b), "the incoming proof must only be produced after live commit validation");
+});
+
+test("incoming proof is only a locked-uninstaller exception to live metadata validation", () => {
+  assert.match(installer, /function RegistrationDigestWithUninstallerMeta/);
+  const committedValidator = installer.slice(
+    installer.indexOf("function ValidateCommittedMarker"),
+    installer.indexOf("function WriteIncomingUninstallerProof"),
+  );
+  assert.match(committedValidator, /if InsideUninstaller then/);
+  assert.match(committedValidator, /ValidateIncomingUninstallerProof/);
+  assert.match(committedValidator, /RegistrationDigest\(RegistrationFound\)/);
+  assert.match(committedValidator, /CurrentUninstallerMeta\('unins000\.dat'/);
+  assert.match(acceptance, /Valid incoming proof bypassed live DAT validation outside uninstall/);
+  assert.match(acceptance, /Valid incoming proof bypassed live registration validation outside uninstall/);
+});
+
+test("Task 9 rejects every invalid incoming proof before a valid incoming final uninstall", () => {
+  assert.match(acceptance, /function Invoke-BlockedIncomingProofUninstallCase/);
+  assert.match(acceptance, /\$Label incoming proof uninstall unexpectedly succeeded/);
+  for (const label of [
+    "Missing",
+    "Malformed",
+    "Corrupt-checksum",
+    "Wrong-AppId",
+    "Wrong-root",
+    "Wrong-transaction",
+    "Wrong-state",
+    "Wrong-marker",
+    "Wrong-manifest",
+    "Wrong-hashes",
+    "Wrong-registration",
+    "Wrong-EXE",
+    "Wrong-DAT",
+    "Stale",
+    "Unsafe-path",
+    "Reparse",
+  ]) {
+    assert.match(acceptance, new RegExp(`-Label '${label}'`));
+  }
+  assert.match(acceptance, /Incoming committed transaction did not finalize before final uninstall/);
+});
+
 test("V3 snapshots finalized installer metadata before Inno mutation", () => {
   assert.match(installer, /AMMAR_STATE_MAGIC = 'AMMAR_TX_V3'/);
   assert.match(installer, /SnapshotPriorRegistration/);

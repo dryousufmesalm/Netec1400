@@ -102,6 +102,7 @@ const
   AMMAR_STATE_MAGIC = 'AMMAR_TX_V3';
   AMMAR_COMMIT_MAGIC = 'AMMAR_COMMIT_V1';
   AMMAR_UNINS_PROOF_MAGIC = 'AMMAR_PRIOR_UNINS_PROOF_V1';
+  AMMAR_INCOMING_UNINS_PROOF_MAGIC = 'AMMAR_INCOMING_UNINS_PROOF_V1';
   AMMAR_MANIFEST_NAME = 'AmmarTrading.Sync.payload-manifest.txt';
   AMMAR_RECOVERY_BUILDING = '.ammar-installer-recovery.building';
   AMMAR_RECOVERY_ACTIVE = '.ammar-installer-recovery.active';
@@ -294,10 +295,41 @@ begin
   if Result then SizeText := IntToStr(Size);
 end;
 
-function RegistrationDigest(var Found: Boolean): String;
+function CurrentUninstallerMeta(const FileName: String; var Meta: String): Boolean; forward;
+
+function IsSHA256Digest(const Value: String): Boolean;
+var
+  Index: Integer;
+begin
+  Result := False;
+  if Length(Value) <> 64 then exit;
+  for Index := 1 to Length(Value) do
+    if not (((Value[Index] >= '0') and (Value[Index] <= '9')) or
+            ((Value[Index] >= 'a') and (Value[Index] <= 'f')) or
+            ((Value[Index] >= 'A') and (Value[Index] <= 'F'))) then exit;
+  Result := True;
+end;
+
+function IsValidUninstallerMeta(const Meta: String): Boolean;
+var
+  Separator: Integer;
+  SizeText, Digest: String;
+begin
+  Result := False;
+  Separator := Pos('|', Meta);
+  if Separator < 2 then exit;
+  SizeText := Copy(Meta, 1, Separator - 1);
+  Digest := Copy(Meta, Separator + 1, Length(Meta) - Separator);
+  if (Pos('|', Digest) <> 0) or (StrToInt64Def(SizeText, -1) < 0) or
+     (not IsSHA256Digest(Digest)) then exit;
+  Result := True;
+end;
+
+function RegistrationDigestWithUninstallerMeta(const ExeMeta, DatMeta: String;
+  var Found: Boolean): String;
 var
   Key, DisplayName, DisplayVersion, InstallLocation, UninstallString, QuietUninstallString: String;
-  UninstallerPath, UninstallerDataPath, ExeSize, DataSize, QuietValue: String;
+  QuietValue: String;
 begin
   Key := 'SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\{8F488698-AB96-45DB-A2BB-D9E868823F43}_is1';
   Found := RegQueryStringValue(HKEY_LOCAL_MACHINE, Key, 'DisplayName', DisplayName) and
@@ -306,19 +338,29 @@ begin
            RegQueryStringValue(HKEY_LOCAL_MACHINE, Key, 'UninstallString', UninstallString);
   if not Found then begin if RegKeyExists(HKEY_LOCAL_MACHINE, Key) then Result := 'INVALID' else Result := 'NONE'; exit; end;
   if CompareText(NormalizedPath(InstallLocation), AppRoot) <> 0 then begin Result := 'INVALID'; exit; end;
-  UninstallerPath := AddBackslash(AppRoot) + 'unins000.exe';
-  UninstallerDataPath := AddBackslash(AppRoot) + 'unins000.dat';
-  if (not FileExists(UninstallerPath)) or (not FileExists(UninstallerDataPath)) or
-     IsReparsePath(UninstallerPath) or IsReparsePath(UninstallerDataPath) or
-     (not TryGetFileSizeText(UninstallerPath, ExeSize)) or
-     (not TryGetFileSizeText(UninstallerDataPath, DataSize)) then begin Result := 'INVALID'; exit; end;
+  if (not IsValidUninstallerMeta(ExeMeta)) or (not IsValidUninstallerMeta(DatMeta)) then
+  begin Result := 'INVALID'; exit; end;
   if RegQueryStringValue(HKEY_LOCAL_MACHINE, Key, 'QuietUninstallString', QuietUninstallString) then
     QuietValue := 'PRESENT|' + QuietUninstallString
   else QuietValue := 'MISSING';
   Result := GetSHA256OfUnicodeString(DisplayName + #10 + DisplayVersion + #10 +
     NormalizedPath(InstallLocation) + #10 + UninstallString + #10 + QuietValue + #10 +
-    ExeSize + '|' + GetSHA256OfFile(UninstallerPath) + #10 +
-    DataSize + '|' + GetSHA256OfFile(UninstallerDataPath));
+    ExeMeta + #10 + DatMeta);
+end;
+
+function RegistrationDigest(var Found: Boolean): String;
+var
+  ExeMeta, DatMeta: String;
+begin
+  if (not CurrentUninstallerMeta('unins000.exe', ExeMeta)) or
+     (not CurrentUninstallerMeta('unins000.dat', DatMeta)) then
+  begin
+    Found := RegKeyExists(HKEY_LOCAL_MACHINE,
+      'SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\{8F488698-AB96-45DB-A2BB-D9E868823F43}_is1');
+    if Found then Result := 'INVALID' else Result := 'NONE';
+    exit;
+  end;
+  Result := RegistrationDigestWithUninstallerMeta(ExeMeta, DatMeta, Found);
 end;
 
 function UninstallKey: String;
@@ -883,13 +925,85 @@ begin
   Result := True;
 end;
 
+function IncomingProofPathsAreNonReparse(const RecoveryRoot: String): Boolean;
+var
+  ProofPath, ProofHashPath: String;
+begin
+  ProofPath := RecoveryChild(RecoveryRoot, 'incoming-uninstaller-verified.txt');
+  ProofHashPath := RecoveryChild(RecoveryRoot, 'incoming-uninstaller-verified.sha256');
+  Result := IsExactRecoveryRootSafe(RecoveryRoot) and
+            (not IsReparsePath(ProofPath)) and
+            (not IsReparsePath(ProofPath + '.new')) and
+            (not IsReparsePath(ProofHashPath)) and
+            (not IsReparsePath(ProofHashPath + '.new'));
+end;
+
+function ValidateIncomingUninstallerProofEnvelope(const RecoveryRoot, TransactionId, StateHash,
+  MarkerHash, IncomingManifestHash, IncomingHashesHash, RegistrationHash,
+  ExeMeta, DatMeta: String): Boolean;
+var
+  Lines: TArrayOfString;
+  ProofPath, ProofHashPath, ExpectedProofHash: String;
+begin
+  Result := False;
+  ProofPath := RecoveryChild(RecoveryRoot, 'incoming-uninstaller-verified.txt');
+  ProofHashPath := RecoveryChild(RecoveryRoot, 'incoming-uninstaller-verified.sha256');
+  if (not IncomingProofPathsAreNonReparse(RecoveryRoot)) or
+     (not FileExists(ProofPath)) or (not FileExists(ProofHashPath)) or
+     (not LoadStringsFromFile(ProofPath, Lines)) or (GetArrayLength(Lines) <> 11) or
+     (not LoadSingleLine(ProofHashPath, ExpectedProofHash)) or
+     (not IsSHA256Digest(Trim(ExpectedProofHash))) or
+     (CompareText(GetSHA256OfFile(ProofPath), Trim(ExpectedProofHash)) <> 0) then exit;
+  if (Lines[0] <> AMMAR_INCOMING_UNINS_PROOF_MAGIC) or
+     (Lines[1] <> 'APPID|' + AMMAR_APP_ID) or
+     (Lines[2] <> 'ROOT|' + AppRoot) or
+     (Lines[3] <> 'TXID|' + TransactionId) or
+     (Lines[4] <> 'STATE|' + StateHash) or
+     (Lines[5] <> 'COMMITTED|' + MarkerHash) or
+     (Lines[6] <> 'INCOMINGMANIFEST|' + IncomingManifestHash) or
+     (Lines[7] <> 'INCOMINGHASHES|' + IncomingHashesHash) or
+     (Lines[8] <> 'REGISTRATION|' + RegistrationHash) or
+     (Lines[9] <> 'UNINSEXE|' + ExeMeta) or
+     (Lines[10] <> 'UNINSDAT|' + DatMeta) or
+     (not IsSHA256Digest(StateHash)) or (not IsSHA256Digest(MarkerHash)) or
+     (not IsSHA256Digest(IncomingManifestHash)) or
+     (not IsSHA256Digest(IncomingHashesHash)) or
+     (not IsSHA256Digest(RegistrationHash)) or
+     (not IsValidUninstallerMeta(ExeMeta)) or
+     (not IsValidUninstallerMeta(DatMeta)) then exit;
+  Result := True;
+end;
+
+function ValidateIncomingUninstallerProof(const RecoveryRoot, TransactionId, StateHash,
+  MarkerHash, IncomingManifestHash, IncomingHashesHash, RegistrationHash,
+  ExeMeta, DatMeta: String): Boolean;
+var
+  CurrentExeMeta, CurrentDigest, CurrentDatPath: String;
+  RegistrationFound: Boolean;
+begin
+  Result := False;
+  if not ValidateIncomingUninstallerProofEnvelope(RecoveryRoot, TransactionId,
+    StateHash, MarkerHash, IncomingManifestHash, IncomingHashesHash,
+    RegistrationHash, ExeMeta, DatMeta) then exit;
+  CurrentDatPath := AddBackslash(AppRoot) + 'unins000.dat';
+  if (not CurrentUninstallerMeta('unins000.exe', CurrentExeMeta)) or
+     (CompareText(CurrentExeMeta, ExeMeta) <> 0) or
+     (not FileExists(CurrentDatPath)) or IsReparsePath(CurrentDatPath) then exit;
+  CurrentDigest := RegistrationDigestWithUninstallerMeta(ExeMeta, DatMeta, RegistrationFound);
+  if (not RegistrationFound) or (CompareText(CurrentDigest, RegistrationHash) <> 0) or
+     (not VerifyIncomingCommittedPayload(RecoveryRoot, IncomingManifestHash,
+       IncomingHashesHash)) then exit;
+  Log('Durable incoming uninstaller proof accepted.');
+  Result := True;
+end;
+
 function ValidateCommittedMarker(const RecoveryRoot: String): Boolean;
 var
   Entries: TPayloadEntries;
   Lines: TArrayOfString;
   TransactionId, OldManifestHash, IncomingManifestHash, IncomingHashesHash,
   PriorRegistrationHash, PriorUninsExeMeta, PriorUninsDatMeta, PriorDigest,
-  StateHash, ExpectedMarkerHash, CurrentDigest, ExeMeta, DatMeta: String;
+  StateHash, ExpectedMarkerHash, MarkerHash, CurrentDigest, ExeMeta, DatMeta: String;
   RegistrationFound: Boolean;
 begin
   Result := False;
@@ -903,13 +1017,25 @@ begin
      (not LoadSingleLine(RecoveryChild(RecoveryRoot, 'committed.sha256'), ExpectedMarkerHash)) or
      (CompareText(GetSHA256OfFile(RecoveryChild(RecoveryRoot, 'committed.txt')), Trim(ExpectedMarkerHash)) <> 0) then exit;
   StateHash := GetSHA256OfFile(RecoveryChild(RecoveryRoot, 'state.txt'));
+  MarkerHash := GetSHA256OfFile(RecoveryChild(RecoveryRoot, 'committed.txt'));
   if (Lines[0] <> AMMAR_COMMIT_MAGIC) or (Lines[1] <> 'APPID|' + AMMAR_APP_ID) or
      (Lines[2] <> 'ROOT|' + AppRoot) or (Lines[3] <> 'TXID|' + TransactionId) or
      (Lines[4] <> 'STATE|' + StateHash) or
      (Lines[5] <> 'INCOMINGMANIFEST|' + IncomingManifestHash) or
      (Lines[6] <> 'INCOMINGHASHES|' + IncomingHashesHash) or
      (Pos('REGISTRATION|', Lines[7]) <> 1) or
-     (Pos('UNINSEXE|', Lines[8]) <> 1) or (Pos('UNINSDAT|', Lines[9]) <> 1) then exit;
+     (Pos('UNINSEXE|', Lines[8]) <> 1) or (Pos('UNINSDAT|', Lines[9]) <> 1) or
+     (not IsSHA256Digest(Copy(Lines[7], 14, Length(Lines[7])))) or
+     (not IsValidUninstallerMeta(Copy(Lines[8], 10, Length(Lines[8])))) or
+     (not IsValidUninstallerMeta(Copy(Lines[9], 10, Length(Lines[9])))) then exit;
+  if InsideUninstaller then
+  begin
+    Result := ValidateIncomingUninstallerProof(RecoveryRoot, TransactionId, StateHash,
+      MarkerHash, IncomingManifestHash, IncomingHashesHash,
+      Copy(Lines[7], 14, Length(Lines[7])), Copy(Lines[8], 10, Length(Lines[8])),
+      Copy(Lines[9], 10, Length(Lines[9])));
+    exit;
+  end;
   CurrentDigest := RegistrationDigest(RegistrationFound);
   if (not RegistrationFound) or
      (CompareText(CurrentDigest, Copy(Lines[7], 14, Length(Lines[7]))) <> 0) or
@@ -919,6 +1045,73 @@ begin
      (CompareText(DatMeta, Copy(Lines[9], 10, Length(Lines[9]))) <> 0) or
      (not VerifyIncomingCommittedPayload(RecoveryRoot, IncomingManifestHash, IncomingHashesHash)) then exit;
   Result := True;
+end;
+
+function WriteIncomingUninstallerProof(const RecoveryRoot, TransactionId, StateHash,
+  MarkerHash, IncomingManifestHash, IncomingHashesHash, RegistrationHash,
+  ExeMeta, DatMeta: String): Boolean;
+var
+  MarkerLines, ProofLines: TArrayOfString;
+  ExpectedStateHash, Phase, ExpectedMarkerHash, ProofPath, ProofHashPath,
+  CurrentExeMeta, CurrentDatMeta, CurrentDigest: String;
+  RegistrationFound: Boolean;
+begin
+  Result := False;
+  if InsideUninstaller or (not IsExactRecoveryRootSafe(RecoveryRoot)) or
+     (not IncomingProofPathsAreNonReparse(RecoveryRoot)) or
+     (not LoadSingleLine(RecoveryChild(RecoveryRoot, 'state.sha256'), ExpectedStateHash)) or
+     (CompareText(Trim(ExpectedStateHash), StateHash) <> 0) or
+     (CompareText(GetSHA256OfFile(RecoveryChild(RecoveryRoot, 'state.txt')), StateHash) <> 0) or
+     (not LoadSingleLine(RecoveryChild(RecoveryRoot, 'phase.txt'), Phase)) or
+     (Phase <> 'ACTIVE|' + TransactionId + '|' + StateHash) or
+     (not LoadStringsFromFile(RecoveryChild(RecoveryRoot, 'committed.txt'), MarkerLines)) or
+     (GetArrayLength(MarkerLines) <> 10) or
+     (not LoadSingleLine(RecoveryChild(RecoveryRoot, 'committed.sha256'), ExpectedMarkerHash)) or
+     (CompareText(Trim(ExpectedMarkerHash), MarkerHash) <> 0) or
+     (CompareText(GetSHA256OfFile(RecoveryChild(RecoveryRoot, 'committed.txt')), MarkerHash) <> 0) or
+     (MarkerLines[0] <> AMMAR_COMMIT_MAGIC) or
+     (MarkerLines[1] <> 'APPID|' + AMMAR_APP_ID) or
+     (MarkerLines[2] <> 'ROOT|' + AppRoot) or
+     (MarkerLines[3] <> 'TXID|' + TransactionId) or
+     (MarkerLines[4] <> 'STATE|' + StateHash) or
+     (MarkerLines[5] <> 'INCOMINGMANIFEST|' + IncomingManifestHash) or
+     (MarkerLines[6] <> 'INCOMINGHASHES|' + IncomingHashesHash) or
+     (MarkerLines[7] <> 'REGISTRATION|' + RegistrationHash) or
+     (MarkerLines[8] <> 'UNINSEXE|' + ExeMeta) or
+     (MarkerLines[9] <> 'UNINSDAT|' + DatMeta) or
+     (CompareText(GetSHA256OfFile(RecoveryChild(RecoveryRoot, 'incoming-manifest.txt')),
+       IncomingManifestHash) <> 0) or
+     (CompareText(GetSHA256OfFile(RecoveryChild(RecoveryRoot, 'incoming-hashes.txt')),
+       IncomingHashesHash) <> 0) or
+     (not CurrentUninstallerMeta('unins000.exe', CurrentExeMeta)) or
+     (not CurrentUninstallerMeta('unins000.dat', CurrentDatMeta)) or
+     (CompareText(CurrentExeMeta, ExeMeta) <> 0) or
+     (CompareText(CurrentDatMeta, DatMeta) <> 0) or
+     (not VerifyIncomingCommittedPayload(RecoveryRoot, IncomingManifestHash,
+       IncomingHashesHash)) then exit;
+  CurrentDigest := RegistrationDigestWithUninstallerMeta(CurrentExeMeta,
+    CurrentDatMeta, RegistrationFound);
+  if (not RegistrationFound) or (CompareText(CurrentDigest, RegistrationHash) <> 0) then exit;
+  SetArrayLength(ProofLines, 11);
+  ProofLines[0] := AMMAR_INCOMING_UNINS_PROOF_MAGIC;
+  ProofLines[1] := 'APPID|' + AMMAR_APP_ID;
+  ProofLines[2] := 'ROOT|' + AppRoot;
+  ProofLines[3] := 'TXID|' + TransactionId;
+  ProofLines[4] := 'STATE|' + StateHash;
+  ProofLines[5] := 'COMMITTED|' + MarkerHash;
+  ProofLines[6] := 'INCOMINGMANIFEST|' + IncomingManifestHash;
+  ProofLines[7] := 'INCOMINGHASHES|' + IncomingHashesHash;
+  ProofLines[8] := 'REGISTRATION|' + RegistrationHash;
+  ProofLines[9] := 'UNINSEXE|' + ExeMeta;
+  ProofLines[10] := 'UNINSDAT|' + DatMeta;
+  ProofPath := RecoveryChild(RecoveryRoot, 'incoming-uninstaller-verified.txt');
+  ProofHashPath := RecoveryChild(RecoveryRoot, 'incoming-uninstaller-verified.sha256');
+  AtomicWriteLines(ProofPath, ProofLines);
+  AtomicWriteText(ProofHashPath, GetSHA256OfFile(ProofPath));
+  if not IncomingProofPathsAreNonReparse(RecoveryRoot) then exit;
+  Result := ValidateIncomingUninstallerProofEnvelope(RecoveryRoot, TransactionId,
+    StateHash, MarkerHash, IncomingManifestHash, IncomingHashesHash,
+    RegistrationHash, ExeMeta, DatMeta);
 end;
 
 function WriteCommittedMarker(const RecoveryRoot: String): Boolean;
@@ -938,8 +1131,9 @@ begin
      (not VerifyIncomingCommittedPayload(RecoveryRoot, IncomingManifestHash, IncomingHashesHash)) or
      (not CurrentUninstallerMeta('unins000.exe', ExeMeta)) or
      (not CurrentUninstallerMeta('unins000.dat', DatMeta)) then exit;
-  CurrentDigest := RegistrationDigest(RegistrationFound);
-  if not RegistrationFound then exit;
+  CurrentDigest := RegistrationDigestWithUninstallerMeta(ExeMeta, DatMeta,
+    RegistrationFound);
+  if (not RegistrationFound) or (not IsSHA256Digest(CurrentDigest)) then exit;
   StateHash := GetSHA256OfFile(RecoveryChild(RecoveryRoot, 'state.txt'));
   SetArrayLength(Lines, 10);
   Lines[0] := AMMAR_COMMIT_MAGIC; Lines[1] := 'APPID|' + AMMAR_APP_ID;
@@ -950,7 +1144,9 @@ begin
   AtomicWriteLines(RecoveryChild(RecoveryRoot, 'committed.txt'), Lines);
   MarkerHash := GetSHA256OfFile(RecoveryChild(RecoveryRoot, 'committed.txt'));
   AtomicWriteText(RecoveryChild(RecoveryRoot, 'committed.sha256'), MarkerHash);
-  Result := ValidateCommittedMarker(RecoveryRoot);
+  Result := WriteIncomingUninstallerProof(RecoveryRoot, TransactionId, StateHash,
+    MarkerHash, IncomingManifestHash, IncomingHashesHash, CurrentDigest, ExeMeta,
+    DatMeta);
 end;
 
 function ClassifyActiveTransaction(const RecoveryRoot: String): Integer;

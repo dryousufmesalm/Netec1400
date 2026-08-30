@@ -184,6 +184,87 @@ function Assert-ProductPathStateEqual {
     }
 }
 
+function Get-ExactRegistrationBoundaryState {
+    $keyPath = "HKLM:\Software\Microsoft\Windows\CurrentVersion\Uninstall\$uninstallSubKey"
+    $key = Get-Item -LiteralPath $keyPath -ErrorAction Stop
+    $lines = New-Object Collections.Generic.List[string]
+    foreach($name in @('DisplayName','DisplayVersion','InstallLocation','UninstallString','QuietUninstallString','MajorVersion','MinorVersion')) {
+        if(-not ($key.GetValueNames() -contains $name)) {
+            [void]$lines.Add("MISSING|$name")
+            continue
+        }
+        $kind = $key.GetValueKind($name)
+        $value = $key.GetValue($name,$null,[Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)
+        $encoded = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes([string]$value))
+        [void]$lines.Add("$kind|$name|$encoded")
+    }
+    return $lines -join "`n"
+}
+
+function Write-IncomingProofLines {
+    param(
+        [Parameter(Mandatory)][string]$ProofPath,
+        [Parameter(Mandatory)][string]$ProofHashPath,
+        [Parameter(Mandatory)][string[]]$Lines
+    )
+    [IO.File]::WriteAllLines($ProofPath,$Lines,(New-Object Text.UTF8Encoding($false)))
+    $digest = (Get-FileHash -LiteralPath $ProofPath -Algorithm SHA256).Hash.ToLowerInvariant()
+    [IO.File]::WriteAllText($ProofHashPath,$digest,(New-Object Text.UTF8Encoding($false)))
+}
+
+function Set-IncomingProofLine {
+    param(
+        [Parameter(Mandatory)][string]$ProofPath,
+        [Parameter(Mandatory)][string]$ProofHashPath,
+        [Parameter(Mandatory)][int]$Index,
+        [Parameter(Mandatory)][string]$Value
+    )
+    $lines = @(Get-Content -LiteralPath $ProofPath)
+    if($lines.Count -ne 11 -or $Index -lt 0 -or $Index -ge $lines.Count) {
+        throw 'The incoming proof fixture is not the expected V1 shape.'
+    }
+    $lines[$Index] = $Value
+    Write-IncomingProofLines -ProofPath $ProofPath -ProofHashPath $ProofHashPath -Lines $lines
+}
+
+function Invoke-BlockedIncomingProofUninstallCase {
+    param(
+        [Parameter(Mandatory)][string]$Label,
+        [Parameter(Mandatory)][string]$Uninstaller,
+        [Parameter(Mandatory)][string]$ProofPath,
+        [Parameter(Mandatory)][string]$ProofHashPath,
+        [Parameter(Mandatory)][byte[]]$GoodProofBytes,
+        [Parameter(Mandatory)][byte[]]$GoodProofHashBytes,
+        [Parameter(Mandatory)][string]$InstallRoot,
+        [Parameter(Mandatory)][string]$ActiveRecovery,
+        [Parameter(Mandatory)][string[]]$RelativePaths,
+        [Parameter(Mandatory)][scriptblock]$Mutate
+    )
+    $beforePayload = Get-ProductPathState -InstallRoot $InstallRoot -RelativePaths $RelativePaths
+    $beforeRegistration = Get-ExactRegistrationBoundaryState
+    try {
+        & $Mutate $ProofPath $ProofHashPath
+        $exitCode = Invoke-BoundedProcess -FilePath $Uninstaller -ArgumentList @('/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART')
+        if($exitCode -eq 0) { throw "$Label incoming proof uninstall unexpectedly succeeded." }
+        if(-not (Test-Path -LiteralPath $ActiveRecovery -PathType Container)) {
+            throw "$Label incoming proof uninstall removed ACTIVE evidence."
+        }
+        Assert-ExactUninstallEntry -ExpectedInstallRoot $InstallRoot | Out-Null
+        $afterPayload = Get-ProductPathState -InstallRoot $InstallRoot -RelativePaths $RelativePaths
+        Assert-ProductPathStateEqual -Expected $beforePayload -Actual $afterPayload -Message "$Label incoming proof uninstall mutated product payload."
+        if((Get-ExactRegistrationBoundaryState) -cne $beforeRegistration) {
+            throw "$Label incoming proof uninstall mutated registration."
+        }
+    } finally {
+        if(Test-Path -LiteralPath $ProofPath) { Remove-Item -LiteralPath $ProofPath -Force }
+        if(Test-Path -LiteralPath $ProofHashPath) { Remove-Item -LiteralPath $ProofHashPath -Force }
+        if(Test-Path -LiteralPath $ActiveRecovery -PathType Container) {
+            [IO.File]::WriteAllBytes($ProofPath,$GoodProofBytes)
+            [IO.File]::WriteAllBytes($ProofHashPath,$GoodProofHashBytes)
+        }
+    }
+}
+
 function Repair-FailedSetupAttempt {
     param(
         [Parameter(Mandatory)][string]$AcceptanceRoot,
@@ -287,6 +368,8 @@ $uninstallLog = Assert-SafeAcceptancePath -Path (Join-Path $acceptanceRoot 'unin
 $webViewFailureLog = Assert-SafeAcceptancePath -Path (Join-Path $acceptanceRoot 'webview-preflight-failure.log') -AcceptanceRoot $acceptanceRoot
 $incomingCompleteLog = Assert-SafeAcceptancePath -Path (Join-Path $acceptanceRoot 'incoming-complete-crash.log') -AcceptanceRoot $acceptanceRoot
 $postMarkerLog = Assert-SafeAcceptancePath -Path (Join-Path $acceptanceRoot 'post-marker-crash.log') -AcceptanceRoot $acceptanceRoot
+$finalIncomingLog = Assert-SafeAcceptancePath -Path (Join-Path $acceptanceRoot 'final-incoming-crash.log') -AcceptanceRoot $acceptanceRoot
+$finalIncomingUninstallLog = Assert-SafeAcceptancePath -Path (Join-Path $acceptanceRoot 'final-incoming-uninstall.log') -AcceptanceRoot $acceptanceRoot
 
 $runtimeRoot = Join-Path $env:LOCALAPPDATA 'AmmarTrading\Sync'
 $runtimeExisted = Test-Path -LiteralPath $runtimeRoot -PathType Container
@@ -301,6 +384,8 @@ $setupAttempted = $false
 $taskCreated = $false
 $launchTaskCreated = $false
 $launchedProcessId = $null
+$staleIncomingProofBytes = $null
+$staleIncomingProofHashBytes = $null
 try {
     Assert-SafeAcceptancePath -Path $oneDriveSentinel -AcceptanceRoot $acceptanceRoot | Out-Null
     New-Item -ItemType Directory -Path (Split-Path -Parent $oneDriveSentinel) -Force | Out-Null
@@ -521,6 +606,14 @@ try {
     if(-not (Test-Path -LiteralPath $postMarkerReady -PathType Leaf)) { if(-not $postMarkerProcess.HasExited){& "$env:SystemRoot\System32\taskkill.exe" /PID $postMarkerProcess.Id /T /F|Out-Null}; throw 'Fault installer did not reach the post-marker boundary.' }
     & "$env:SystemRoot\System32\taskkill.exe" /PID $postMarkerProcess.Id /T /F | Out-Null
     [void]$postMarkerProcess.WaitForExit(10000)
+    $firstIncomingProofPath = Assert-SafeProtectedInstallPath -Path (Join-Path $activeRecovery 'incoming-uninstaller-verified.txt')
+    $firstIncomingProofHashPath = Assert-SafeProtectedInstallPath -Path (Join-Path $activeRecovery 'incoming-uninstaller-verified.sha256')
+    if(-not (Test-Path -LiteralPath $firstIncomingProofPath -PathType Leaf) -or
+       -not (Test-Path -LiteralPath $firstIncomingProofHashPath -PathType Leaf)) {
+        throw 'Post-marker transaction did not retain the incoming uninstaller proof.'
+    }
+    $staleIncomingProofBytes = [IO.File]::ReadAllBytes($firstIncomingProofPath)
+    $staleIncomingProofHashBytes = [IO.File]::ReadAllBytes($firstIncomingProofHashPath)
     $postMarkerRecoveryExit = Invoke-BoundedProcess -FilePath $resolvedFaultInstaller -ArgumentList @('/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART','/SP-',"/DIR=`"$installRoot`"",'/TASK9MODE=recoveryonly')
     if($postMarkerRecoveryExit -eq 0) { throw 'Post-marker recovery-only test unexpectedly continued.' }
     if(Test-Path -LiteralPath $activeRecovery) { throw 'Post-marker recovery did not finalize ACTIVE state.' }
@@ -585,6 +678,173 @@ try {
     if(Test-Path -LiteralPath $activeRecovery) { throw 'Active transaction uninstall did not recover before removal.' }
     if((Test-Path -LiteralPath $installedExe) -or (Test-Path -LiteralPath $startMenuShortcut) -or (Test-Path -LiteralPath $desktopShortcut) -or @(Get-UninstallEntry).Count) { throw 'Uninstall did not remove product files and registration.' }
     if(-not (Test-Path -LiteralPath $runtimeSentinel) -or -not (Test-Path -LiteralPath $oneDriveSentinel) -or $null -eq (Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue)) { throw 'Uninstall removed preserved state.' }
+
+    # Reinstall, retain a finalized incoming transaction, and prove its separate proof is
+    # fail-closed at every binding before the locked-DAT final-uninstall path is accepted.
+    Invoke-CheckedProcess -FilePath $resolvedInstaller -ArgumentList @('/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART','/SP-',"/DIR=`"$installRoot`"",'/TASKS=desktopicon')
+    $installedExe = Assert-SafeProtectedInstallPath -Path (Join-Path $installRoot 'AmmarTrading.Sync.exe')
+    Assert-ExactUninstallEntry -ExpectedInstallRoot $installRoot | Out-Null
+    if(-not (Test-Path -LiteralPath $runtimeSentinel) -or -not (Test-Path -LiteralPath $oneDriveSentinel) -or
+       $null -eq (Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue)) {
+        throw 'Reinstall before incoming-proof acceptance removed preserved state.'
+    }
+
+    $finalPostMarkerArguments = @('/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART','/SP-',"/DIR=`"$installRoot`"",'/TASK9MODE=postmarkercrash',"/LOG=`"$finalIncomingLog`"")
+    $finalPostMarkerProcess = Start-Process -FilePath $resolvedFaultInstaller -ArgumentList $finalPostMarkerArguments -PassThru
+    $finalPostMarkerReady = Assert-SafeProtectedInstallPath -Path (Join-Path $activeRecovery 'postmarker-ready')
+    $finalPostMarkerDeadline = [DateTime]::UtcNow.AddSeconds(45)
+    while(-not (Test-Path -LiteralPath $finalPostMarkerReady -PathType Leaf) -and
+          -not $finalPostMarkerProcess.HasExited -and [DateTime]::UtcNow -lt $finalPostMarkerDeadline) {
+        Start-Sleep -Milliseconds 250
+        $finalPostMarkerProcess.Refresh()
+    }
+    if(-not (Test-Path -LiteralPath $finalPostMarkerReady -PathType Leaf)) {
+        if(-not $finalPostMarkerProcess.HasExited) { & "$env:SystemRoot\System32\taskkill.exe" /PID $finalPostMarkerProcess.Id /T /F | Out-Null }
+        throw 'Final incoming-proof setup did not reach the post-marker boundary.'
+    }
+    & "$env:SystemRoot\System32\taskkill.exe" /PID $finalPostMarkerProcess.Id /T /F | Out-Null
+    [void]$finalPostMarkerProcess.WaitForExit(10000)
+    if(-not (Test-Path -LiteralPath $activeRecovery -PathType Container)) { throw 'Final incoming-proof setup did not retain ACTIVE state.' }
+    $incomingProofPath = Assert-SafeProtectedInstallPath -Path (Join-Path $activeRecovery 'incoming-uninstaller-verified.txt')
+    $incomingProofHashPath = Assert-SafeProtectedInstallPath -Path (Join-Path $activeRecovery 'incoming-uninstaller-verified.sha256')
+    if(-not (Test-Path -LiteralPath $incomingProofPath -PathType Leaf) -or
+       -not (Test-Path -LiteralPath $incomingProofHashPath -PathType Leaf)) {
+        throw 'Final committed transaction did not retain its incoming uninstaller proof.'
+    }
+    if($null -eq $staleIncomingProofBytes -or $null -eq $staleIncomingProofHashBytes) {
+        throw 'The earlier committed transaction did not provide a stale-proof fixture.'
+    }
+    $goodIncomingProofBytes = [IO.File]::ReadAllBytes($incomingProofPath)
+    $goodIncomingProofHashBytes = [IO.File]::ReadAllBytes($incomingProofHashPath)
+    $finalIncomingPaths = @((Get-InstalledPayloadHashes -InstallRoot $installRoot).Keys)
+    $finalIncomingState = Get-ProductPathState -InstallRoot $installRoot -RelativePaths $finalIncomingPaths
+    $finalIncomingRegistration = Get-ExactRegistrationBoundaryState
+    $uninstaller = Assert-SafeProtectedInstallPath -Path (Join-Path $installRoot 'unins000.exe')
+
+    $currentDatPath = Assert-SafeProtectedInstallPath -Path (Join-Path $installRoot 'unins000.dat')
+    $goodCurrentDatBytes = [IO.File]::ReadAllBytes($currentDatPath)
+    try {
+        [IO.File]::WriteAllText($currentDatPath,'task9-live-dat-tamper',(New-Object Text.UTF8Encoding($false)))
+        $datTamperExit = Invoke-BoundedProcess -FilePath $resolvedFaultInstaller -ArgumentList @('/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART','/SP-',"/DIR=`"$installRoot`"",'/TASK9MODE=recoveryonly')
+        if($datTamperExit -eq 0 -or -not (Test-Path -LiteralPath $activeRecovery -PathType Container)) {
+            throw 'Valid incoming proof bypassed live DAT validation outside uninstall.'
+        }
+    } finally {
+        [IO.File]::WriteAllBytes($currentDatPath,$goodCurrentDatBytes)
+    }
+    Assert-ProductPathStateEqual -Expected $finalIncomingState -Actual (Get-ProductPathState -InstallRoot $installRoot -RelativePaths $finalIncomingPaths) -Message 'Live DAT validation changed incoming payload.'
+    if((Get-ExactRegistrationBoundaryState) -cne $finalIncomingRegistration) { throw 'Live DAT validation changed incoming registration.' }
+
+    $registrationKeyPath = "HKLM:\Software\Microsoft\Windows\CurrentVersion\Uninstall\$uninstallSubKey"
+    $goodDisplayName = [string](Get-ItemProperty -LiteralPath $registrationKeyPath -Name DisplayName).DisplayName
+    try {
+        Set-ItemProperty -LiteralPath $registrationKeyPath -Name DisplayName -Value 'Task9 registration tamper'
+        $registrationTamperExit = Invoke-BoundedProcess -FilePath $resolvedFaultInstaller -ArgumentList @('/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART','/SP-',"/DIR=`"$installRoot`"",'/TASK9MODE=recoveryonly')
+        if($registrationTamperExit -eq 0 -or -not (Test-Path -LiteralPath $activeRecovery -PathType Container)) {
+            throw 'Valid incoming proof bypassed live registration validation outside uninstall.'
+        }
+    } finally {
+        Set-ItemProperty -LiteralPath $registrationKeyPath -Name DisplayName -Value $goodDisplayName
+    }
+    Assert-ProductPathStateEqual -Expected $finalIncomingState -Actual (Get-ProductPathState -InstallRoot $installRoot -RelativePaths $finalIncomingPaths) -Message 'Live registration validation changed incoming payload.'
+    if((Get-ExactRegistrationBoundaryState) -cne $finalIncomingRegistration) { throw 'Live registration validation was not restored exactly.' }
+
+    $zeroDigest = ('0' * 64) -join ''
+    $blockedCaseParameters = @{
+        Uninstaller = $uninstaller
+        ProofPath = $incomingProofPath
+        ProofHashPath = $incomingProofHashPath
+        GoodProofBytes = $goodIncomingProofBytes
+        GoodProofHashBytes = $goodIncomingProofHashBytes
+        InstallRoot = $installRoot
+        ActiveRecovery = $activeRecovery
+        RelativePaths = $finalIncomingPaths
+    }
+    Invoke-BlockedIncomingProofUninstallCase @blockedCaseParameters -Label 'Missing' -Mutate {
+        param($path,$hashPath)
+        Remove-Item -LiteralPath $path,$hashPath -Force
+    }
+    Invoke-BlockedIncomingProofUninstallCase @blockedCaseParameters -Label 'Malformed' -Mutate {
+        param($path,$hashPath)
+        Write-IncomingProofLines -ProofPath $path -ProofHashPath $hashPath -Lines @('malformed')
+    }
+    Invoke-BlockedIncomingProofUninstallCase @blockedCaseParameters -Label 'Corrupt-checksum' -Mutate {
+        param($path,$hashPath)
+        [IO.File]::WriteAllText($hashPath,'corrupt',(New-Object Text.UTF8Encoding($false)))
+    }
+    Invoke-BlockedIncomingProofUninstallCase @blockedCaseParameters -Label 'Wrong-AppId' -Mutate {
+        param($path,$hashPath)
+        Set-IncomingProofLine -ProofPath $path -ProofHashPath $hashPath -Index 1 -Value 'APPID|{00000000-0000-0000-0000-000000000000}'
+    }
+    Invoke-BlockedIncomingProofUninstallCase @blockedCaseParameters -Label 'Wrong-root' -Mutate {
+        param($path,$hashPath)
+        Set-IncomingProofLine -ProofPath $path -ProofHashPath $hashPath -Index 2 -Value "ROOT|$installRoot-wrong"
+    }
+    Invoke-BlockedIncomingProofUninstallCase @blockedCaseParameters -Label 'Wrong-transaction' -Mutate {
+        param($path,$hashPath)
+        Set-IncomingProofLine -ProofPath $path -ProofHashPath $hashPath -Index 3 -Value 'TXID|wrong-transaction'
+    }
+    Invoke-BlockedIncomingProofUninstallCase @blockedCaseParameters -Label 'Wrong-state' -Mutate {
+        param($path,$hashPath)
+        Set-IncomingProofLine -ProofPath $path -ProofHashPath $hashPath -Index 4 -Value "STATE|$zeroDigest"
+    }
+    Invoke-BlockedIncomingProofUninstallCase @blockedCaseParameters -Label 'Wrong-marker' -Mutate {
+        param($path,$hashPath)
+        Set-IncomingProofLine -ProofPath $path -ProofHashPath $hashPath -Index 5 -Value "COMMITTED|$zeroDigest"
+    }
+    Invoke-BlockedIncomingProofUninstallCase @blockedCaseParameters -Label 'Wrong-manifest' -Mutate {
+        param($path,$hashPath)
+        Set-IncomingProofLine -ProofPath $path -ProofHashPath $hashPath -Index 6 -Value "INCOMINGMANIFEST|$zeroDigest"
+    }
+    Invoke-BlockedIncomingProofUninstallCase @blockedCaseParameters -Label 'Wrong-hashes' -Mutate {
+        param($path,$hashPath)
+        Set-IncomingProofLine -ProofPath $path -ProofHashPath $hashPath -Index 7 -Value "INCOMINGHASHES|$zeroDigest"
+    }
+    Invoke-BlockedIncomingProofUninstallCase @blockedCaseParameters -Label 'Wrong-registration' -Mutate {
+        param($path,$hashPath)
+        Set-IncomingProofLine -ProofPath $path -ProofHashPath $hashPath -Index 8 -Value "REGISTRATION|$zeroDigest"
+    }
+    Invoke-BlockedIncomingProofUninstallCase @blockedCaseParameters -Label 'Wrong-EXE' -Mutate {
+        param($path,$hashPath)
+        Set-IncomingProofLine -ProofPath $path -ProofHashPath $hashPath -Index 9 -Value "UNINSEXE|0|$zeroDigest"
+    }
+    Invoke-BlockedIncomingProofUninstallCase @blockedCaseParameters -Label 'Wrong-DAT' -Mutate {
+        param($path,$hashPath)
+        Set-IncomingProofLine -ProofPath $path -ProofHashPath $hashPath -Index 10 -Value "UNINSDAT|0|$zeroDigest"
+    }
+    Invoke-BlockedIncomingProofUninstallCase @blockedCaseParameters -Label 'Stale' -Mutate {
+        param($path,$hashPath)
+        [IO.File]::WriteAllBytes($path,$staleIncomingProofBytes)
+        [IO.File]::WriteAllBytes($hashPath,$staleIncomingProofHashBytes)
+    }
+    Invoke-BlockedIncomingProofUninstallCase @blockedCaseParameters -Label 'Unsafe-path' -Mutate {
+        param($path,$hashPath)
+        Set-IncomingProofLine -ProofPath $path -ProofHashPath $hashPath -Index 2 -Value 'ROOT|C:\'
+    }
+    $reparseTarget = Assert-SafeProtectedInstallPath -Path (Join-Path $activeRecovery 'incoming-proof-reparse-target.txt')
+    try {
+        Invoke-BlockedIncomingProofUninstallCase @blockedCaseParameters -Label 'Reparse' -Mutate {
+            param($path,$hashPath)
+            [IO.File]::WriteAllBytes($reparseTarget,$goodIncomingProofBytes)
+            Remove-Item -LiteralPath $path -Force
+            New-Item -ItemType SymbolicLink -Path $path -Target $reparseTarget | Out-Null
+        }
+    } finally {
+        Remove-Item -LiteralPath $reparseTarget -Force -ErrorAction SilentlyContinue
+    }
+
+    Invoke-CheckedProcess -FilePath $uninstaller -ArgumentList @('/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART',"/LOG=`"$finalIncomingUninstallLog`"")
+    if(Test-Path -LiteralPath $activeRecovery) { throw 'Incoming committed transaction did not finalize before final uninstall.' }
+    $finalIncomingUninstallContent = Get-Content -LiteralPath $finalIncomingUninstallLog -Raw
+    if($finalIncomingUninstallContent -notmatch 'Durable incoming uninstaller proof accepted') { throw 'Final uninstall did not validate the incoming proof.' }
+    if((Test-Path -LiteralPath $installedExe) -or (Test-Path -LiteralPath $incomingOnlyPath) -or
+       (Test-Path -LiteralPath $startMenuShortcut) -or (Test-Path -LiteralPath $desktopShortcut) -or @(Get-UninstallEntry).Count) {
+        throw 'Incoming final uninstall did not remove product files and registration.'
+    }
+    if(-not (Test-Path -LiteralPath $runtimeSentinel) -or -not (Test-Path -LiteralPath $oneDriveSentinel) -or
+       $null -eq (Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue)) {
+        throw 'Incoming final uninstall removed preserved state.'
+    }
     $setupAttempted = $false
     Write-Host 'AmmarTrading Sync install, failed-upgrade rollback, successful upgrade, and uninstall acceptance passed.'
 } finally {
