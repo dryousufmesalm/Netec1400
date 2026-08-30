@@ -101,18 +101,19 @@ function Write-AtomicText {
     $temporary = "$Path.$([guid]::NewGuid().ToString('N')).tmp"
     $backup = "$Path.$([guid]::NewGuid().ToString('N')).bak"
     try {
-        if(-not [string]::IsNullOrWhiteSpace($TrustedOneDriveRoot)) {
-            [void](Assert-AmmarTradingTrustedDestinationPath -OneDriveRoot $TrustedOneDriveRoot -Path $temporary -Description 'Temporary publication file')
-        }
-        [IO.File]::WriteAllText($temporary, $Content, (New-Object System.Text.UTF8Encoding($false)))
-        if(-not [string]::IsNullOrWhiteSpace($TrustedOneDriveRoot)) {
-            [void](Assert-AmmarTradingTrustedDestinationPath -OneDriveRoot $TrustedOneDriveRoot -Path $temporary -Description 'Temporary publication file')
-            [void](Assert-AmmarTradingTrustedDestinationPath -OneDriveRoot $TrustedOneDriveRoot -Path $Path -Description 'Publication file')
-        }
-        if(Test-Path -LiteralPath $Path) {
-            [IO.File]::Replace($temporary, $Path, $backup, $true)
+        if([string]::IsNullOrWhiteSpace($TrustedOneDriveRoot)) {
+            [IO.File]::WriteAllText($temporary, $Content, (New-Object System.Text.UTF8Encoding($false)))
+            if(Test-Path -LiteralPath $Path) {
+                [IO.File]::Replace($temporary, $Path, $backup, $true)
+            } else {
+                [IO.File]::Move($temporary, $Path)
+            }
         } else {
-            [IO.File]::Move($temporary, $Path)
+            [void](Assert-AmmarTradingTrustedDestinationPath -OneDriveRoot $TrustedOneDriveRoot -Path $temporary -Description 'Temporary publication file')
+            [void](Invoke-AmmarTradingTrustedPathOperation -OneDriveRoot $TrustedOneDriveRoot -Path @($temporary) -Description 'Temporary publication write' -Action {
+                [IO.File]::WriteAllText($temporary, $Content, (New-Object System.Text.UTF8Encoding($false)))
+            })
+            [void](Move-AmmarTradingTrustedFileByHandle -OneDriveRoot $TrustedOneDriveRoot -Source $temporary -Destination $Path -Description 'Atomic text publication' -ReplaceIfExists)
         }
     } finally {
         if(Test-Path -LiteralPath $temporary) { Remove-Item -LiteralPath $temporary -Force -ErrorAction SilentlyContinue }
@@ -137,18 +138,19 @@ function Publish-AtomicFile {
     $temporary = Join-Path $directory ("$([IO.Path]::GetFileName($Destination)).$([guid]::NewGuid().ToString('N')).tmp")
     $backup = Join-Path $directory ("$([IO.Path]::GetFileName($Destination)).$([guid]::NewGuid().ToString('N')).bak")
     try {
-        if(-not [string]::IsNullOrWhiteSpace($TrustedOneDriveRoot)) {
-            [void](Assert-AmmarTradingTrustedDestinationPath -OneDriveRoot $TrustedOneDriveRoot -Path $temporary -Description 'Atomic publication file')
-        }
-        [IO.File]::Copy($Source, $temporary, $true)
-        if(-not [string]::IsNullOrWhiteSpace($TrustedOneDriveRoot)) {
-            [void](Assert-AmmarTradingTrustedDestinationPath -OneDriveRoot $TrustedOneDriveRoot -Path $temporary -Description 'Atomic publication file')
-            [void](Assert-AmmarTradingTrustedDestinationPath -OneDriveRoot $TrustedOneDriveRoot -Path $Destination -Description 'Published destination file')
-        }
-        if(Test-Path -LiteralPath $Destination) {
-            [IO.File]::Replace($temporary, $Destination, $backup, $true)
+        if([string]::IsNullOrWhiteSpace($TrustedOneDriveRoot)) {
+            [IO.File]::Copy($Source, $temporary, $true)
+            if(Test-Path -LiteralPath $Destination) {
+                [IO.File]::Replace($temporary, $Destination, $backup, $true)
+            } else {
+                [IO.File]::Move($temporary, $Destination)
+            }
         } else {
-            [IO.File]::Move($temporary, $Destination)
+            [void](Assert-AmmarTradingTrustedDestinationPath -OneDriveRoot $TrustedOneDriveRoot -Path $temporary -Description 'Atomic publication file')
+            [void](Invoke-AmmarTradingTrustedPathOperation -OneDriveRoot $TrustedOneDriveRoot -Path @($Source,$temporary) -Description 'Atomic publication copy' -Action {
+                [IO.File]::Copy($Source, $temporary, $true)
+            })
+            [void](Move-AmmarTradingTrustedFileByHandle -OneDriveRoot $TrustedOneDriveRoot -Source $temporary -Destination $Destination -Description 'Atomic CSV publication' -ReplaceIfExists)
         }
     } finally {
         if(Test-Path -LiteralPath $temporary) { Remove-Item -LiteralPath $temporary -Force -ErrorAction SilentlyContinue }
@@ -289,15 +291,20 @@ function Invoke-MoneyMachineCsvSync {
                     $temporary = Join-Path $destinationDir ("Baskets.csv.$([guid]::NewGuid().ToString('N')).source.tmp")
                     try {
                         [void](Assert-AmmarTradingTrustedDestinationPath -OneDriveRoot $oneDriveRoot -Path $temporary -Description 'Temporary basket copy')
-                        [IO.File]::Copy($sourceCsv, $temporary, $true)
-                        [void](Assert-AmmarTradingTrustedDestinationPath -OneDriveRoot $oneDriveRoot -Path $temporary -Description 'Temporary basket copy')
+                        [void](Invoke-AmmarTradingTrustedPathOperation -OneDriveRoot $oneDriveRoot -Path @($temporary) -Description 'Temporary basket copy' -Action {
+                            [IO.File]::Copy($sourceCsv, $temporary, $true)
+                        })
                         $sourceAfter = Get-FileIdentity -Path $sourceCsv
-                        $temporaryIdentity = Get-FileIdentity -Path $temporary
+                        $temporaryIdentity = @(Invoke-AmmarTradingTrustedPathOperation -OneDriveRoot $oneDriveRoot -Path @($temporary) -Description 'Temporary basket verification' -Action {
+                            Get-FileIdentity -Path $temporary
+                        })[0]
                         if($sourceBefore.Hash -ne $sourceAfter.Hash -or $sourceBefore.Length -ne $sourceAfter.Length -or $sourceBefore.LastWriteUtc -ne $sourceAfter.LastWriteUtc) { throw 'Source changed while temporary copy was being made.' }
                         if($temporaryIdentity.Hash -ne $sourceBefore.Hash) { throw 'Temporary copy hash does not match the source hash.' }
                         $temporaryValidation = Read-MoneyMachineBasketsCsv -Path $temporary -ExpectedLogin $expectedLogin
                         Publish-AtomicFile -Source $temporary -Destination $destination -TrustedOneDriveRoot $oneDriveRoot
-                        $destinationIdentity = Get-FileIdentity -Path $destination
+                        $destinationIdentity = @(Invoke-AmmarTradingTrustedPathOperation -OneDriveRoot $oneDriveRoot -Path @($destination) -Description 'Published basket verification' -Action {
+                            Get-FileIdentity -Path $destination
+                        })[0]
                         if($destinationIdentity.Hash -ne $sourceBefore.Hash) { throw 'Published destination hash does not match the source hash.' }
                         $publicationUtc = [DateTime]::UtcNow.ToString('o')
                         $heartbeat = [ordered]@{

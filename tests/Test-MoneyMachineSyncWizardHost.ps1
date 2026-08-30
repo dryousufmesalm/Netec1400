@@ -17,6 +17,17 @@ function Assert-HostThrowsLike {
     if(-not $threw) { throw "Expected an error containing '$Expected'." }
 }
 
+function Remove-VerifiedSyntheticOneDriveAccountKey {
+    param([Parameter(Mandatory)][string]$LiteralPath)
+    $cleanupFailure = $null
+    try {
+        if(Test-Path -LiteralPath $LiteralPath) { Remove-Item -LiteralPath $LiteralPath -Recurse -Force -ErrorAction Stop }
+    } catch { $cleanupFailure = $_ }
+    $stillExists = $true
+    try { $stillExists = Test-Path -LiteralPath $LiteralPath } catch { if($null -eq $cleanupFailure) { $cleanupFailure = $_ } }
+    if($null -ne $cleanupFailure -or $stillExists) { throw "Synthetic OneDrive account registry cleanup failed for '$LiteralPath'." }
+}
+
 . $ScriptPath -AsLibrary
 
 $prefix = Get-MoneyMachineWizardPrefix -Port 8765
@@ -113,6 +124,8 @@ try {
 }
 finally {
     if($null -ne $hostProcess -and -not $hostProcess.HasExited) { Stop-Process -Id $hostProcess.Id -Force -ErrorAction SilentlyContinue }
-    Remove-Item -LiteralPath $testOneDriveAccountKey -Recurse -Force -ErrorAction SilentlyContinue
-    if(Test-Path -LiteralPath $tempRoot) { Remove-Item -LiteralPath $tempRoot -Recurse -Force }
+    try { Remove-VerifiedSyntheticOneDriveAccountKey -LiteralPath $testOneDriveAccountKey }
+    finally {
+        if(Test-Path -LiteralPath $tempRoot) { Remove-Item -LiteralPath $tempRoot -Recurse -Force }
+    }
 }

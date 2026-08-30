@@ -600,7 +600,18 @@ Invoke-AcceptanceCheck -Checks $checks -Name 'isolated-atomic-publication' -Pass
         }) -LogRoot $logRoot -LogName 'isolated-atomic-publication'
     } finally {
         $env:OneDrive = $previousOneDrive
-        Remove-Item -LiteralPath $testOneDriveAccountKey -Recurse -Force -ErrorAction SilentlyContinue
+        $registryCleanupFailure = $null
+        try {
+            if(Test-Path -LiteralPath $testOneDriveAccountKey) {
+                Remove-Item -LiteralPath $testOneDriveAccountKey -Recurse -Force -ErrorAction Stop
+            }
+        } catch { $registryCleanupFailure = $_ }
+        $registryKeyStillExists = $true
+        try { $registryKeyStillExists = Test-Path -LiteralPath $testOneDriveAccountKey }
+        catch { if($null -eq $registryCleanupFailure) { $registryCleanupFailure = $_ } }
+        if($null -ne $registryCleanupFailure -or $registryKeyStillExists) {
+            throw "Synthetic OneDrive account registry cleanup failed for '$testOneDriveAccountKey'."
+        }
     }
     if($run.ExitCode -ne 0) { throw "Direct sync process exited $($run.ExitCode)." }
     foreach($path in @($publishedCsv,$publishedHeartbeat,$publishedState)) {

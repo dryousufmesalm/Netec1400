@@ -15,6 +15,7 @@ $runtimeRoot = Join-Path $testRoot 'runtime'
 $requestRoot = Join-Path $runtimeRoot 'requests'
 $fixturePath = Join-Path $PSScriptRoot 'fixtures\AGOLD___Baskets_v3.csv'
 $testOneDriveAccountKey = 'HKCU:\Software\Microsoft\OneDrive\Accounts\AmmarTradingTest_' + [guid]::NewGuid().ToString('N')
+$previousOneDrive = $env:OneDrive
 $powerShell = if(Test-Path -LiteralPath (Join-Path $PSHOME 'pwsh.exe')) {
     Join-Path $PSHOME 'pwsh.exe'
 } else {
@@ -24,6 +25,17 @@ $powerShell = if(Test-Path -LiteralPath (Join-Path $PSHOME 'pwsh.exe')) {
 function Assert-True {
     param([bool]$Condition,[string]$Message)
     if(-not $Condition) { throw $Message }
+}
+
+function Remove-VerifiedSyntheticOneDriveAccountKey {
+    param([Parameter(Mandatory)][string]$LiteralPath)
+    $cleanupFailure = $null
+    try {
+        if(Test-Path -LiteralPath $LiteralPath) { Remove-Item -LiteralPath $LiteralPath -Recurse -Force -ErrorAction Stop }
+    } catch { $cleanupFailure = $_ }
+    $stillExists = $true
+    try { $stillExists = Test-Path -LiteralPath $LiteralPath } catch { if($null -eq $cleanupFailure) { $cleanupFailure = $_ } }
+    if($null -ne $cleanupFailure -or $stillExists) { throw "Synthetic OneDrive account registry cleanup failed for '$LiteralPath'." }
 }
 
 function Invoke-DesktopOperation {
@@ -67,7 +79,6 @@ try {
 
     $oneDriveRoot = Join-Path $testRoot 'OneDrive'
     New-Item -ItemType Directory -Path $oneDriveRoot -Force | Out-Null
-    $previousOneDrive = $env:OneDrive
     $env:OneDrive = $oneDriveRoot
     New-Item -Path $testOneDriveAccountKey -Force | Out-Null
     New-ItemProperty -LiteralPath $testOneDriveAccountKey -Name 'UserFolder' -Value $oneDriveRoot -PropertyType String -Force | Out-Null
@@ -115,11 +126,14 @@ try {
         Assert-True -Condition ($null -ne $configured[0].TaskResultCode) -Message 'Status must include task result evidence.'
     } finally {
         $env:OneDrive = $previousOneDrive
-        Remove-Item -LiteralPath $testOneDriveAccountKey -Recurse -Force -ErrorAction SilentlyContinue
     }
 
     Write-Host 'AmmarTrading desktop operation entry-point tests passed.'
 }
 finally {
-    if(Test-Path -LiteralPath $testRoot) { Remove-Item -LiteralPath $testRoot -Recurse -Force }
+    $env:OneDrive = $previousOneDrive
+    try { Remove-VerifiedSyntheticOneDriveAccountKey -LiteralPath $testOneDriveAccountKey }
+    finally {
+        if(Test-Path -LiteralPath $testRoot) { Remove-Item -LiteralPath $testRoot -Recurse -Force }
+    }
 }

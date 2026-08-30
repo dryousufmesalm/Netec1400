@@ -148,6 +148,26 @@ try {
     Assert-Equal -Actual $alreadyPresent.AlreadyPresent -Expected 1 -Message 'An identical migrated file must be counted as already present.'
     Assert-Equal -Actual $alreadyPresent.Copied -Expected 0 -Message 'An identical migrated file must not be copied again.'
 
+    $racingLegacyFile = Join-Path $successOneDrive 'Money Machine\Account_10000001\History\racing.csv'
+    $racingDestination = Join-Path $successOneDrive 'AmmarTrading\Account_10000001\History\racing.csv'
+    Set-Content -LiteralPath $racingLegacyFile -Value 'legacy-racing-source' -Encoding utf8
+    & $setupModule {
+        param($Destination)
+        $script:AmmarTradingBatchRaceDestination = $Destination
+        $script:AmmarTradingTrustedPathOperationHook = {
+            param($Description,$Path)
+            if($Description -ceq 'Legacy migration publication') {
+                Set-Content -LiteralPath $script:AmmarTradingBatchRaceDestination -Value 'concurrent-destination' -Encoding utf8
+                $script:AmmarTradingTrustedPathOperationHook = $null
+            }
+        }
+    } $racingDestination
+    $racingConflict = Copy-AmmarTradingLegacyData -OneDriveRoot $successOneDrive -AccountNumbers @('10000001')
+    Assert-Equal -Actual $racingConflict.Conflict -Expected 1 -Message 'A destination created during legacy publication must be counted as a conflict.'
+    Assert-Equal -Actual $racingConflict.Copied -Expected 0 -Message 'Legacy migration must not replace a destination created during publication.'
+    Assert-Equal -Actual (Get-Content -LiteralPath $racingDestination -Raw) -Expected "concurrent-destination`r`n" -Message 'Legacy migration must preserve a destination created during publication.'
+    Remove-Item -LiteralPath $racingLegacyFile,$racingDestination -Force -ErrorAction Stop
+
     Set-Content -LiteralPath $migratedFile -Value 'different-canonical-history' -Encoding utf8
     $conflict = Copy-AmmarTradingLegacyData -OneDriveRoot $successOneDrive -AccountNumbers @('10000001')
     Assert-Equal -Actual $conflict.Conflict -Expected 1 -Message 'A different destination file must be counted as a conflict.'

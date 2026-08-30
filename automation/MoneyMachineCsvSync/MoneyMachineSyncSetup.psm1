@@ -20,6 +20,8 @@ $script:AmmarTradingOneDriveRegistrationResolver = {
     }
     return @($roots)
 }
+$script:AmmarTradingHeldPathMetadataResolver = $null
+$script:AmmarTradingTrustedPathOperationHook = $null
 $script:AmmarTradingFileAttributeTagResolver = {
     param([Parameter(Mandatory)][string]$Path)
 
@@ -35,6 +37,26 @@ namespace AmmarTrading {
         public struct FileAttributeTagInfo {
             public UInt32 FileAttributes;
             public UInt32 ReparseTag;
+        }
+
+        [StructLayout(LayoutKind.Sequential)]
+        public struct NativeFileTime {
+            public UInt32 LowDateTime;
+            public UInt32 HighDateTime;
+        }
+
+        [StructLayout(LayoutKind.Sequential)]
+        public struct ByHandleFileInformation {
+            public UInt32 FileAttributes;
+            public NativeFileTime CreationTime;
+            public NativeFileTime LastAccessTime;
+            public NativeFileTime LastWriteTime;
+            public UInt32 VolumeSerialNumber;
+            public UInt32 FileSizeHigh;
+            public UInt32 FileSizeLow;
+            public UInt32 NumberOfLinks;
+            public UInt32 FileIndexHigh;
+            public UInt32 FileIndexLow;
         }
 
         [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
@@ -54,6 +76,42 @@ namespace AmmarTrading {
             Int32 fileInformationClass,
             out FileAttributeTagInfo fileInformation,
             UInt32 bufferSize);
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        public static extern bool GetFileInformationByHandle(
+            SafeFileHandle file,
+            out ByHandleFileInformation fileInformation);
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool SetFileInformationByHandle(
+            SafeFileHandle file,
+            Int32 fileInformationClass,
+            IntPtr fileInformation,
+            UInt32 bufferSize);
+
+        public static void RenameByHandle(SafeFileHandle file, SafeFileHandle rootDirectory, string destination, bool replaceIfExists) {
+            char[] name = destination.ToCharArray();
+            int rootOffset = IntPtr.Size == 8 ? 8 : 4;
+            int lengthOffset = IntPtr.Size == 8 ? 16 : 8;
+            int nameOffset = IntPtr.Size == 8 ? 20 : 12;
+            int bufferSize = nameOffset + (name.Length * 2) + 2;
+            IntPtr buffer = Marshal.AllocHGlobal(bufferSize);
+            try {
+                for(int index = 0; index < bufferSize; index++) { Marshal.WriteByte(buffer, index, 0); }
+                Marshal.WriteInt32(buffer, 0, replaceIfExists ? 1 : 0);
+                Marshal.WriteIntPtr(buffer, rootOffset, rootDirectory == null ? IntPtr.Zero : rootDirectory.DangerousGetHandle());
+                Marshal.WriteInt32(buffer, lengthOffset, name.Length * 2);
+                Marshal.Copy(name, 0, IntPtr.Add(buffer, nameOffset), name.Length);
+                if(!SetFileInformationByHandle(file, 3, buffer, (UInt32)bufferSize)) {
+                    int error = Marshal.GetLastWin32Error();
+                    throw new System.ComponentModel.Win32Exception(error, "The trusted file could not be renamed atomically by handle (Win32 " + error + ").");
+                }
+            } finally {
+                Marshal.FreeHGlobal(buffer);
+            }
+        }
     }
 }
 '@ -ErrorAction Stop
@@ -116,6 +174,215 @@ function Get-AmmarTradingFileAttributeTagInfo {
     return [pscustomobject]@{
         FileAttributes = [IO.FileAttributes]$result.FileAttributes
         ReparseTag = [uint32]$result.ReparseTag
+    }
+}
+
+function Open-AmmarTradingPathHandle {
+    param(
+        [Parameter(Mandatory)][string]$Path,
+        [uint32]$DesiredAccess = [uint32]0x80,
+        [uint32]$ShareMode = [uint32]0x3
+    )
+
+    if($null -eq ('AmmarTrading.NativeFileInfo' -as [type])) {
+        # Initialize the bounded native type through the existing real resolver.
+        [void](& $script:AmmarTradingFileAttributeTagResolver $Path)
+    }
+    # FILE_SHARE_READ|FILE_SHARE_WRITE deliberately omits FILE_SHARE_DELETE so
+    # the validated object cannot be renamed or replaced while the handle lives.
+    $handle = [AmmarTrading.NativeFileInfo]::CreateFile($Path, $DesiredAccess, $ShareMode, [IntPtr]::Zero, [uint32]3, [uint32]0x02200000, [IntPtr]::Zero)
+    if($handle.IsInvalid) {
+        $handle.Dispose()
+        throw "A trusted path component could not be held for identity validation: $Path"
+    }
+    return $handle
+}
+
+function Get-AmmarTradingNativeHandleMetadata {
+    param([Parameter(Mandatory)]$Handle)
+
+    $attributeTag = New-Object AmmarTrading.NativeFileInfo+FileAttributeTagInfo
+    $attributeTagSize = [uint32][Runtime.InteropServices.Marshal]::SizeOf($attributeTag)
+    if(-not [AmmarTrading.NativeFileInfo]::GetFileInformationByHandleEx($Handle, 9, [ref]$attributeTag, $attributeTagSize)) {
+        throw 'A held path component attribute/tag snapshot could not be inspected.'
+    }
+    $identity = New-Object AmmarTrading.NativeFileInfo+ByHandleFileInformation
+    if(-not [AmmarTrading.NativeFileInfo]::GetFileInformationByHandle($Handle, [ref]$identity)) {
+        throw 'A held path component identity could not be inspected.'
+    }
+    $fileIndex = ([uint64]$identity.FileIndexHigh * [uint64]4294967296) + [uint64]$identity.FileIndexLow
+    return [pscustomobject]@{
+        FileAttributes = [IO.FileAttributes][uint32]$attributeTag.FileAttributes
+        ReparseTag = [uint32]$attributeTag.ReparseTag
+        VolumeSerialNumber = [uint32]$identity.VolumeSerialNumber
+        FileIndex = [uint64]$fileIndex
+    }
+}
+
+function Get-AmmarTradingHeldPathMetadata {
+    param(
+        [Parameter(Mandatory)]$Handle,
+        [Parameter(Mandatory)][string]$Path
+    )
+
+    $result = if($null -ne $script:AmmarTradingHeldPathMetadataResolver) {
+        & $script:AmmarTradingHeldPathMetadataResolver $Handle $Path
+    } else {
+        Get-AmmarTradingNativeHandleMetadata -Handle $Handle
+    }
+    foreach($required in @('FileAttributes','ReparseTag','VolumeSerialNumber','FileIndex')) {
+        if($null -eq $result -or -not $result.PSObject.Properties[$required] -or $null -eq $result.$required) {
+            throw 'A held path component metadata snapshot was incomplete.'
+        }
+    }
+    return [pscustomobject]@{
+        FileAttributes = [IO.FileAttributes]$result.FileAttributes
+        ReparseTag = [uint32]$result.ReparseTag
+        VolumeSerialNumber = [uint32]$result.VolumeSerialNumber
+        FileIndex = [uint64]$result.FileIndex
+    }
+}
+
+function Assert-AmmarTradingHeldPathMetadataInvariant {
+    param(
+        [Parameter(Mandatory)][string]$Path,
+        [Parameter(Mandatory)]$Metadata,
+        [Parameter(Mandatory)][string]$TrustedCloudFilesRoot,
+        [Parameter(Mandatory)][string]$Description
+    )
+
+    $isReparse = ($Metadata.FileAttributes -band [IO.FileAttributes]::ReparsePoint) -ne 0
+    if(-not $isReparse) {
+        if([uint32]$Metadata.ReparseTag -ne 0) { throw "$Description contains inconsistent reparse metadata." }
+        return
+    }
+    $tag = [uint32]$Metadata.ReparseTag
+    if(-not (Test-AmmarTradingPathBelow -Path $Path -Root $TrustedCloudFilesRoot)) {
+        throw "$Description contains a reparse point."
+    }
+    if(($tag -band [uint32]0x20000000) -ne 0 -or -not (Test-AmmarTradingCloudFilesReparseTag -Tag $tag)) {
+        throw "$Description contains an unsupported reparse point."
+    }
+}
+
+function Test-AmmarTradingHeldPathMetadataMatch {
+    param([Parameter(Mandatory)]$Expected,[Parameter(Mandatory)]$Actual)
+
+    $expectedReparse = ($Expected.FileAttributes -band [IO.FileAttributes]::ReparsePoint) -ne 0
+    $actualReparse = ($Actual.FileAttributes -band [IO.FileAttributes]::ReparsePoint) -ne 0
+    return [uint32]$Expected.VolumeSerialNumber -eq [uint32]$Actual.VolumeSerialNumber -and
+           [uint64]$Expected.FileIndex -eq [uint64]$Actual.FileIndex -and
+           $expectedReparse -eq $actualReparse -and
+           [uint32]$Expected.ReparseTag -eq [uint32]$Actual.ReparseTag
+}
+
+function Add-AmmarTradingHeldPathLocks {
+    param(
+        [Parameter(Mandatory)][string[]]$Path,
+        [Parameter(Mandatory)][AllowEmptyCollection()][System.Collections.Generic.List[object]]$Locks,
+        [Parameter(Mandatory)][AllowEmptyCollection()][System.Collections.Generic.HashSet[string]]$Seen,
+        [Parameter(Mandatory)][string]$TrustedCloudFilesRoot,
+        [Parameter(Mandatory)][string]$Description
+    )
+
+    foreach($requestedPath in @($Path)) {
+        $fullPath = [IO.Path]::GetFullPath($requestedPath)
+        if(-not (Test-AmmarTradingPathBelow -Path $fullPath -Root $TrustedCloudFilesRoot)) {
+            throw "$Description must remain below the trusted OneDrive root."
+        }
+        $volumeRoot = [IO.Path]::GetPathRoot($fullPath)
+        $components = [System.Collections.Generic.List[string]]::new()
+        $components.Add($volumeRoot)
+        $current = $volumeRoot
+        foreach($part in @($fullPath.Substring($volumeRoot.Length) -split '[\\/]')) {
+            if([string]::IsNullOrWhiteSpace($part)) { continue }
+            $current = Join-Path $current $part
+            $components.Add($current)
+        }
+        foreach($component in $components) {
+            $canonicalComponent = [IO.Path]::GetFullPath($component)
+            if($Seen.Contains($canonicalComponent)) { continue }
+            if(-not (Test-Path -LiteralPath $canonicalComponent)) { break }
+            $handle = $null
+            try {
+                $isRequestedLeaf = $canonicalComponent -ieq $fullPath
+                $isDirectory = Test-Path -LiteralPath $canonicalComponent -PathType Container
+                $requiresDeleteLock = (Test-AmmarTradingPathBelow -Path $canonicalComponent -Root $TrustedCloudFilesRoot) -and
+                                      (-not $isRequestedLeaf -or $isDirectory)
+                $desiredAccess = if($requiresDeleteLock) { [uint32]0x00010080 } else { [uint32]0x80 }
+                $handle = Open-AmmarTradingPathHandle -Path $canonicalComponent -DesiredAccess $desiredAccess
+                $metadata = Get-AmmarTradingHeldPathMetadata -Handle $handle -Path $canonicalComponent
+                Assert-AmmarTradingHeldPathMetadataInvariant -Path $canonicalComponent -Metadata $metadata -TrustedCloudFilesRoot $TrustedCloudFilesRoot -Description $Description
+                $Locks.Add([pscustomobject]@{ Path=$canonicalComponent; Handle=$handle; Initial=$metadata })
+                [void]$Seen.Add($canonicalComponent)
+                $handle = $null
+            } finally {
+                if($null -ne $handle) { $handle.Dispose() }
+            }
+        }
+    }
+}
+
+function Assert-AmmarTradingHeldPathLocksUnchanged {
+    param(
+        [Parameter(Mandatory)][AllowEmptyCollection()][System.Collections.Generic.List[object]]$Locks,
+        [Parameter(Mandatory)][string]$TrustedCloudFilesRoot,
+        [Parameter(Mandatory)][string]$Description
+    )
+
+    foreach($lock in $Locks) {
+        $current = Get-AmmarTradingHeldPathMetadata -Handle $lock.Handle -Path $lock.Path
+        Assert-AmmarTradingHeldPathMetadataInvariant -Path $lock.Path -Metadata $current -TrustedCloudFilesRoot $TrustedCloudFilesRoot -Description $Description
+        if(-not (Test-AmmarTradingHeldPathMetadataMatch -Expected $lock.Initial -Actual $current)) {
+            throw "$Description identity changed while the trusted path operation was protected."
+        }
+        $pathHandle = $null
+        try {
+            # FILE_SHARE_DELETE is required only for this inspection handle to
+            # coexist with our own DELETE-access lock; it never replaces the lock.
+            $pathHandle = Open-AmmarTradingPathHandle -Path $lock.Path -ShareMode ([uint32]0x7)
+            $pathMetadata = Get-AmmarTradingHeldPathMetadata -Handle $pathHandle -Path $lock.Path
+            Assert-AmmarTradingHeldPathMetadataInvariant -Path $lock.Path -Metadata $pathMetadata -TrustedCloudFilesRoot $TrustedCloudFilesRoot -Description $Description
+            if(-not (Test-AmmarTradingHeldPathMetadataMatch -Expected $lock.Initial -Actual $pathMetadata)) {
+                throw "$Description identity changed while the trusted path operation was protected."
+            }
+        } catch {
+            if($_.Exception.Message -match 'identity changed|reparse|metadata') { throw }
+            throw "$Description identity changed while the trusted path operation was protected."
+        } finally {
+            if($null -ne $pathHandle) { $pathHandle.Dispose() }
+        }
+    }
+}
+
+function Invoke-AmmarTradingCanonicalPathOperation {
+    param(
+        [Parameter(Mandatory)][string]$CanonicalOneDriveRoot,
+        [Parameter(Mandatory)][string[]]$Path,
+        [Parameter(Mandatory)][string]$Description,
+        [Parameter(Mandatory)][scriptblock]$Action
+    )
+
+    $canonicalRoot = [IO.Path]::GetFullPath($CanonicalOneDriveRoot)
+    $volumeRoot = [IO.Path]::GetPathRoot($canonicalRoot)
+    try { $driveType = & $script:AmmarTradingDriveTypeResolver $volumeRoot }
+    catch { throw "$Description local filesystem volume could not be verified." }
+    if([IO.DriveType]$driveType -ne [IO.DriveType]::Fixed) { throw "$Description must use a local fixed filesystem volume." }
+
+    $locks = [System.Collections.Generic.List[object]]::new()
+    $seen = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::OrdinalIgnoreCase)
+    try {
+        Add-AmmarTradingHeldPathLocks -Path $Path -Locks $locks -Seen $seen -TrustedCloudFilesRoot $canonicalRoot -Description $Description
+        if($null -ne $script:AmmarTradingTrustedPathOperationHook) { & $script:AmmarTradingTrustedPathOperationHook $Description @($Path) }
+        Assert-AmmarTradingHeldPathLocksUnchanged -Locks $locks -TrustedCloudFilesRoot $canonicalRoot -Description $Description
+        $result = @(& $Action)
+        Add-AmmarTradingHeldPathLocks -Path $Path -Locks $locks -Seen $seen -TrustedCloudFilesRoot $canonicalRoot -Description $Description
+        Assert-AmmarTradingHeldPathLocksUnchanged -Locks $locks -TrustedCloudFilesRoot $canonicalRoot -Description $Description
+        return $result
+    } finally {
+        for($index = $locks.Count - 1; $index -ge 0; $index--) {
+            $locks[$index].Handle.Dispose()
+        }
     }
 }
 
@@ -198,20 +465,39 @@ function Resolve-AmmarTradingLocalPath {
     return [IO.Path]::GetFullPath($providerPath)
 }
 
-function Get-AmmarTradingRegisteredOneDriveRoots {
+function Get-AmmarTradingOneDriveRegistrationSnapshot {
+    $sample = @(& $script:AmmarTradingOneDriveRegistrationResolver)
     $roots = [System.Collections.Generic.List[object]]::new()
+    $rejected = [System.Collections.Generic.List[object]]::new()
+    $canonicalCandidates = [System.Collections.Generic.List[string]]::new()
     $seen = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::OrdinalIgnoreCase)
-    foreach($candidate in @(& $script:AmmarTradingOneDriveRegistrationResolver)) {
+    foreach($candidate in $sample) {
         if([string]::IsNullOrWhiteSpace([string]$candidate)) { continue }
         try {
-            $resolved = Resolve-AmmarTradingLocalPath -Path ([string]$candidate) -PathType Container -Description 'OneDrive root' -TrustedCloudFilesRoot ([string]$candidate)
+            $expanded = [Environment]::ExpandEnvironmentVariables(([string]$candidate).Trim())
+            if(Test-AmmarTradingUncPath -Path $expanded) { continue }
+            $canonical = [IO.Path]::GetFullPath($expanded)
         } catch {
             continue
         }
-        if(-not $seen.Add($resolved)) { continue }
-        $roots.Add([pscustomobject]@{ Path = $resolved })
+        if($seen.Add($canonical)) { $canonicalCandidates.Add($canonical) }
     }
-    return @($roots)
+    foreach($canonical in $canonicalCandidates) {
+        try {
+            $resolved = Resolve-AmmarTradingLocalPath -Path $canonical -PathType Container -Description 'OneDrive root' -TrustedCloudFilesRoot $canonical
+            $roots.Add([pscustomobject]@{ Path = $resolved })
+        } catch {
+            $rejected.Add([pscustomobject]@{ Path=$canonical; Error=[string]$_.Exception.Message })
+        }
+    }
+    return [pscustomobject]@{ Roots=@($roots); Rejected=@($rejected) }
+}
+
+function Get-AmmarTradingRegisteredOneDriveRoots {
+    param($Snapshot = $null)
+
+    if($null -eq $Snapshot) { $Snapshot = Get-AmmarTradingOneDriveRegistrationSnapshot }
+    return @($Snapshot.Roots)
 }
 
 function Test-AmmarTradingOneDriveActivityHint {
@@ -230,13 +516,21 @@ function Test-AmmarTradingOneDriveActivityHint {
     return $false
 }
 
-function Get-AmmarTradingWritableOneDriveRoots {
+function Get-AmmarTradingWritableOneDriveRootsFromSnapshot {
+    param(
+        [Parameter(Mandatory)]$Snapshot,
+        [string]$OnlyPath = ''
+    )
+
     $roots = [System.Collections.Generic.List[object]]::new()
-    foreach($registered in @(Get-AmmarTradingRegisteredOneDriveRoots)) {
+    foreach($registered in @(Get-AmmarTradingRegisteredOneDriveRoots -Snapshot $Snapshot)) {
         $resolved = [string]$registered.Path
+        if(-not [string]::IsNullOrWhiteSpace($OnlyPath) -and $resolved -ine $OnlyPath) { continue }
         $probe = Join-Path $resolved (".$([guid]::NewGuid().ToString('N')).ammartrading-write-test.tmp")
         try {
-            [IO.File]::WriteAllText($probe, '', (New-Object Text.UTF8Encoding($false)))
+            [void](Invoke-AmmarTradingCanonicalPathOperation -CanonicalOneDriveRoot $resolved -Path @($probe) -Description 'OneDrive write probe' -Action {
+                [IO.File]::WriteAllText($probe, '', (New-Object Text.UTF8Encoding($false)))
+            })
             $roots.Add([pscustomobject][ordered]@{
                 Name = Split-Path -Leaf $resolved
                 Path = $resolved
@@ -251,6 +545,11 @@ function Get-AmmarTradingWritableOneDriveRoots {
         }
     }
     return @($roots)
+}
+
+function Get-AmmarTradingWritableOneDriveRoots {
+    $snapshot = Get-AmmarTradingOneDriveRegistrationSnapshot
+    return @(Get-AmmarTradingWritableOneDriveRootsFromSnapshot -Snapshot $snapshot)
 }
 
 function Resolve-AmmarTradingOneDriveRoot {
@@ -268,19 +567,112 @@ function Resolve-AmmarTradingOneDriveRoot {
     } catch {
         throw 'OneDrive root must use a local filesystem path.'
     }
-    $registeredMatches = @(
-        @(& $script:AmmarTradingOneDriveRegistrationResolver) | Where-Object {
-            if([string]::IsNullOrWhiteSpace([string]$_)) { return $false }
-            try { return [IO.Path]::GetFullPath([Environment]::ExpandEnvironmentVariables(([string]$_).Trim())) -ieq $requested }
-            catch { return $false }
-        }
-    )
-    if($registeredMatches.Count -ne 1) { throw 'OneDrive root must exactly match a currently signed-in OneDrive root.' }
-    $registeredPath = Resolve-AmmarTradingLocalPath -Path ([string]$registeredMatches[0]) -PathType Container -Description 'OneDrive root' -TrustedCloudFilesRoot ([string]$registeredMatches[0])
-    $matches = @(Get-AmmarTradingWritableOneDriveRoots | Where-Object { $_.Path -ieq $registeredPath })
+    $snapshot = Get-AmmarTradingOneDriveRegistrationSnapshot
+    $registeredMatches = @($snapshot.Roots | Where-Object { $_.Path -ieq $requested })
+    if($registeredMatches.Count -ne 1) {
+        $rejectedMatch = @($snapshot.Rejected | Where-Object { $_.Path -ieq $requested } | Select-Object -First 1)
+        if($rejectedMatch.Count -eq 1) { throw [string]$rejectedMatch[0].Error }
+        throw 'OneDrive root must exactly match a currently signed-in OneDrive root.'
+    }
+    $registeredPath = [string]$registeredMatches[0].Path
+    $matches = @(Get-AmmarTradingWritableOneDriveRootsFromSnapshot -Snapshot $snapshot -OnlyPath $registeredPath)
     if($matches.Count -ne 1) { throw 'OneDrive root must exactly match a currently signed-in OneDrive root.' }
     if($RequireWritable -and -not [bool]$matches[0].IsWritable) { throw 'OneDrive root is not writable.' }
     return [string]$matches[0].Path
+}
+
+function Invoke-AmmarTradingTrustedPathOperation {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$OneDriveRoot,
+        [Parameter(Mandatory)][string[]]$Path,
+        [Parameter(Mandatory)][string]$Description,
+        [Parameter(Mandatory)][scriptblock]$Action
+    )
+
+    $canonicalRoot = Resolve-AmmarTradingOneDriveRoot -Path $OneDriveRoot -RequireWritable
+    return Invoke-AmmarTradingCanonicalPathOperation -CanonicalOneDriveRoot $canonicalRoot -Path $Path -Description $Description -Action $Action
+}
+
+function Move-AmmarTradingCanonicalTrustedFileByHandle {
+    param(
+        [Parameter(Mandatory)][string]$CanonicalOneDriveRoot,
+        [Parameter(Mandatory)][string]$Source,
+        [Parameter(Mandatory)][string]$Destination,
+        [Parameter(Mandatory)][string]$Description,
+        [switch]$ReplaceIfExists
+    )
+
+    $canonicalRoot = [IO.Path]::GetFullPath($CanonicalOneDriveRoot)
+    $canonicalSource = Assert-AmmarTradingCanonicalDestinationPath -CanonicalOneDriveRoot $canonicalRoot -Path $Source -Description "$Description source"
+    $canonicalDestination = Assert-AmmarTradingCanonicalDestinationPath -CanonicalOneDriveRoot $canonicalRoot -Path $Destination -Description "$Description destination"
+    if(-not (Test-Path -LiteralPath $canonicalSource -PathType Leaf)) { throw "$Description source was not found." }
+    $sourceDirectory = Split-Path -Parent $canonicalSource
+    $destinationDirectory = Split-Path -Parent $canonicalDestination
+    if($sourceDirectory -ine $destinationDirectory) { throw "$Description must remain within one trusted directory." }
+
+    [void](Invoke-AmmarTradingCanonicalPathOperation -CanonicalOneDriveRoot $canonicalRoot -Path @($sourceDirectory,$destinationDirectory) -Description $Description -Action {
+        # DELETE on this source handle authorizes the handle-bound rename. Its
+        # share mode still omits delete, so no other actor can rename it first.
+        $sourceHandle = Open-AmmarTradingPathHandle -Path $canonicalSource -DesiredAccess ([uint32]0x00010080)
+        try {
+            $sourceMetadata = Get-AmmarTradingHeldPathMetadata -Handle $sourceHandle -Path $canonicalSource
+            Assert-AmmarTradingHeldPathMetadataInvariant -Path $canonicalSource -Metadata $sourceMetadata -TrustedCloudFilesRoot $canonicalRoot -Description "$Description source"
+            if(Test-Path -LiteralPath $canonicalDestination) {
+                $destinationHandle = Open-AmmarTradingPathHandle -Path $canonicalDestination
+                try {
+                    $destinationMetadata = Get-AmmarTradingHeldPathMetadata -Handle $destinationHandle -Path $canonicalDestination
+                    Assert-AmmarTradingHeldPathMetadataInvariant -Path $canonicalDestination -Metadata $destinationMetadata -TrustedCloudFilesRoot $canonicalRoot -Description "$Description destination"
+                } finally {
+                    $destinationHandle.Dispose()
+                }
+            }
+
+            $extendedDestination = if($canonicalDestination.StartsWith('\\?\')) { $canonicalDestination } else { '\\?\' + $canonicalDestination }
+            [AmmarTrading.NativeFileInfo]::RenameByHandle($sourceHandle, $null, $extendedDestination, [bool]$ReplaceIfExists)
+            if(-not (Test-Path -LiteralPath $canonicalDestination -PathType Leaf)) { throw "$Description handle-bound destination could not be confirmed." }
+            $renamedMetadata = Get-AmmarTradingHeldPathMetadata -Handle $sourceHandle -Path $canonicalDestination
+            Assert-AmmarTradingHeldPathMetadataInvariant -Path $canonicalDestination -Metadata $renamedMetadata -TrustedCloudFilesRoot $canonicalRoot -Description "$Description destination"
+            if(-not (Test-AmmarTradingHeldPathMetadataMatch -Expected $sourceMetadata -Actual $renamedMetadata)) {
+                throw "$Description identity changed during handle-bound publication."
+            }
+
+        } finally {
+            $sourceHandle.Dispose()
+        }
+    })
+    return $canonicalDestination
+}
+
+function Move-AmmarTradingTrustedFileByHandle {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$OneDriveRoot,
+        [Parameter(Mandatory)][string]$Source,
+        [Parameter(Mandatory)][string]$Destination,
+        [Parameter(Mandatory)][string]$Description,
+        [switch]$ReplaceIfExists
+    )
+
+    $canonicalRoot = Resolve-AmmarTradingOneDriveRoot -Path $OneDriveRoot -RequireWritable
+    return Move-AmmarTradingCanonicalTrustedFileByHandle -CanonicalOneDriveRoot $canonicalRoot -Source $Source -Destination $Destination -Description $Description -ReplaceIfExists:$ReplaceIfExists
+}
+
+function Assert-AmmarTradingCanonicalDestinationPath {
+    param(
+        [Parameter(Mandatory)][string]$CanonicalOneDriveRoot,
+        [Parameter(Mandatory)][string]$Path,
+        [Parameter(Mandatory)][string]$Description
+    )
+
+    $canonicalRoot = [IO.Path]::GetFullPath($CanonicalOneDriveRoot)
+    $canonicalPath = [IO.Path]::GetFullPath($Path)
+    $rootPrefix = $canonicalRoot.TrimEnd([IO.Path]::DirectorySeparatorChar,[IO.Path]::AltDirectorySeparatorChar) + [IO.Path]::DirectorySeparatorChar
+    if(-not $canonicalPath.StartsWith($rootPrefix, [StringComparison]::OrdinalIgnoreCase)) {
+        throw "$Description must remain below the trusted OneDrive root."
+    }
+    Assert-AmmarTradingNoReparseAncestors -Path $canonicalPath -Description $Description -TrustedCloudFilesRoot $canonicalRoot
+    return $canonicalPath
 }
 
 function Assert-AmmarTradingTrustedDestinationPath {
@@ -292,13 +684,7 @@ function Assert-AmmarTradingTrustedDestinationPath {
     )
 
     $canonicalRoot = Resolve-AmmarTradingOneDriveRoot -Path $OneDriveRoot
-    $canonicalPath = [IO.Path]::GetFullPath($Path)
-    $rootPrefix = $canonicalRoot.TrimEnd([IO.Path]::DirectorySeparatorChar,[IO.Path]::AltDirectorySeparatorChar) + [IO.Path]::DirectorySeparatorChar
-    if(-not $canonicalPath.StartsWith($rootPrefix, [StringComparison]::OrdinalIgnoreCase)) {
-        throw "$Description must remain below the trusted OneDrive root."
-    }
-    Assert-AmmarTradingNoReparseAncestors -Path $canonicalPath -Description $Description -TrustedCloudFilesRoot $canonicalRoot
-    return $canonicalPath
+    return Assert-AmmarTradingCanonicalDestinationPath -CanonicalOneDriveRoot $canonicalRoot -Path $Path -Description $Description
 }
 
 function New-AmmarTradingTrustedDirectory {
@@ -310,19 +696,20 @@ function New-AmmarTradingTrustedDirectory {
     )
 
     $canonicalRoot = Resolve-AmmarTradingOneDriveRoot -Path $OneDriveRoot -RequireWritable
-    $canonicalPath = Assert-AmmarTradingTrustedDestinationPath -OneDriveRoot $canonicalRoot -Path $Path -Description $Description
+    $canonicalPath = Assert-AmmarTradingCanonicalDestinationPath -CanonicalOneDriveRoot $canonicalRoot -Path $Path -Description $Description
     $relativePath = $canonicalPath.Substring($canonicalRoot.Length).TrimStart([IO.Path]::DirectorySeparatorChar,[IO.Path]::AltDirectorySeparatorChar)
     $current = $canonicalRoot
     foreach($part in @($relativePath -split '[\\/]')) {
         if([string]::IsNullOrWhiteSpace($part)) { continue }
         $current = Join-Path $current $part
-        [void](Assert-AmmarTradingTrustedDestinationPath -OneDriveRoot $canonicalRoot -Path $current -Description $Description)
-        if(Test-Path -LiteralPath $current) {
-            if(-not (Test-Path -LiteralPath $current -PathType Container)) { throw "$Description is blocked by a non-directory path." }
-        } else {
-            [void][IO.Directory]::CreateDirectory($current)
-        }
-        [void](Assert-AmmarTradingTrustedDestinationPath -OneDriveRoot $canonicalRoot -Path $current -Description $Description)
+        [void](Assert-AmmarTradingCanonicalDestinationPath -CanonicalOneDriveRoot $canonicalRoot -Path $current -Description $Description)
+        [void](Invoke-AmmarTradingCanonicalPathOperation -CanonicalOneDriveRoot $canonicalRoot -Path @($current) -Description $Description -Action {
+            if(Test-Path -LiteralPath $current) {
+                if(-not (Test-Path -LiteralPath $current -PathType Container)) { throw "$Description is blocked by a non-directory path." }
+            } else {
+                [void][IO.Directory]::CreateDirectory($current)
+            }
+        })
     }
     return $canonicalPath
 }
@@ -836,42 +1223,70 @@ function Copy-AmmarTradingLegacyData {
         foreach($part in @($relativeDirectory -split '[\\/]')) {
             if([string]::IsNullOrWhiteSpace($part)) { continue }
             $currentDirectory = Join-Path $currentDirectory $part
-            if(Test-Path -LiteralPath $currentDirectory) {
+            [void](Invoke-AmmarTradingCanonicalPathOperation -CanonicalOneDriveRoot $resolvedRoot -Path @($currentDirectory) -Description 'Legacy migration destination' -Action {
+                if(-not (Test-Path -LiteralPath $currentDirectory)) {
+                    [void][IO.Directory]::CreateDirectory($currentDirectory)
+                }
                 Assert-AmmarTradingMigrationPath -Path $currentDirectory -Description 'Legacy migration destination' -TrustedCloudFilesRoot $resolvedRoot
-            } else {
-                New-Item -ItemType Directory -Path $currentDirectory -Force | Out-Null
-                Assert-AmmarTradingMigrationPath -Path $currentDirectory -Description 'Legacy migration destination' -TrustedCloudFilesRoot $resolvedRoot
-            }
+            })
         }
 
-        $sourceItem = Get-Item -LiteralPath $candidate.Source -Force -ErrorAction Stop
-        $sourceHash = (Get-FileHash -LiteralPath $candidate.Source -Algorithm SHA256).Hash
+        $sourceDetails = @(Invoke-AmmarTradingCanonicalPathOperation -CanonicalOneDriveRoot $resolvedRoot -Path @($candidate.Source) -Description 'Legacy migration source file' -Action {
+            $sourceItem = Get-Item -LiteralPath $candidate.Source -Force -ErrorAction Stop
+            [pscustomobject]@{
+                Length = [int64]$sourceItem.Length
+                Hash = (Get-FileHash -LiteralPath $candidate.Source -Algorithm SHA256).Hash
+            }
+        })[0]
         if(Test-Path -LiteralPath $candidate.Destination) {
-            Assert-AmmarTradingMigrationPath -Path $candidate.Destination -Description 'Legacy migration destination file' -TrustedCloudFilesRoot $resolvedRoot
-            $destinationItem = Get-Item -LiteralPath $candidate.Destination -Force -ErrorAction Stop
-            $destinationHash = (Get-FileHash -LiteralPath $candidate.Destination -Algorithm SHA256).Hash
-            if($sourceItem.Length -eq $destinationItem.Length -and $sourceHash -ceq $destinationHash) { $alreadyPresent++ } else { $conflict++ }
+            $destinationDetails = @(Invoke-AmmarTradingCanonicalPathOperation -CanonicalOneDriveRoot $resolvedRoot -Path @($candidate.Destination) -Description 'Legacy migration destination file' -Action {
+                Assert-AmmarTradingMigrationPath -Path $candidate.Destination -Description 'Legacy migration destination file' -TrustedCloudFilesRoot $resolvedRoot
+                $destinationItem = Get-Item -LiteralPath $candidate.Destination -Force -ErrorAction Stop
+                [pscustomobject]@{
+                    Length = [int64]$destinationItem.Length
+                    Hash = (Get-FileHash -LiteralPath $candidate.Destination -Algorithm SHA256).Hash
+                }
+            })[0]
+            if($sourceDetails.Length -eq $destinationDetails.Length -and $sourceDetails.Hash -ceq $destinationDetails.Hash) { $alreadyPresent++ } else { $conflict++ }
             continue
         }
 
         $temporary = Join-Path $destinationDirectory ("$([IO.Path]::GetFileName($candidate.Destination)).$([guid]::NewGuid().ToString('N')).migration.tmp")
         try {
-            [IO.File]::Copy($candidate.Source, $temporary, $false)
-            $temporaryItem = Get-Item -LiteralPath $temporary -Force -ErrorAction Stop
-            $temporaryHash = (Get-FileHash -LiteralPath $temporary -Algorithm SHA256).Hash
-            if($temporaryItem.Length -ne $sourceItem.Length -or $temporaryHash -cne $sourceHash) { throw "Legacy migration verification failed for '$($candidate.Source)'." }
+            $temporaryDetails = @(Invoke-AmmarTradingCanonicalPathOperation -CanonicalOneDriveRoot $resolvedRoot -Path @($candidate.Source,$temporary) -Description 'Legacy migration copy' -Action {
+                [IO.File]::Copy($candidate.Source, $temporary, $false)
+                $temporaryItem = Get-Item -LiteralPath $temporary -Force -ErrorAction Stop
+                [pscustomobject]@{
+                    Length = [int64]$temporaryItem.Length
+                    Hash = (Get-FileHash -LiteralPath $temporary -Algorithm SHA256).Hash
+                }
+            })[0]
+            if($temporaryDetails.Length -ne $sourceDetails.Length -or $temporaryDetails.Hash -cne $sourceDetails.Hash) { throw "Legacy migration verification failed for '$($candidate.Source)'." }
             try {
-                [IO.File]::Move($temporary, $candidate.Destination)
-            } catch [IO.IOException] {
+                [void](Move-AmmarTradingCanonicalTrustedFileByHandle -CanonicalOneDriveRoot $resolvedRoot -Source $temporary -Destination $candidate.Destination -Description 'Legacy migration publication')
+            } catch {
+                $renameFailure = $_.Exception
+                while($null -ne $renameFailure.InnerException) { $renameFailure = $renameFailure.InnerException }
+                if($renameFailure -isnot [ComponentModel.Win32Exception] -or $renameFailure.NativeErrorCode -notin @(80,183)) { throw }
                 if(-not (Test-Path -LiteralPath $candidate.Destination -PathType Leaf)) { throw }
-                $destinationItem = Get-Item -LiteralPath $candidate.Destination -Force -ErrorAction Stop
-                $destinationHash = (Get-FileHash -LiteralPath $candidate.Destination -Algorithm SHA256).Hash
-                if($sourceItem.Length -eq $destinationItem.Length -and $sourceHash -ceq $destinationHash) { $alreadyPresent++ } else { $conflict++ }
+                $destinationDetails = @(Invoke-AmmarTradingCanonicalPathOperation -CanonicalOneDriveRoot $resolvedRoot -Path @($candidate.Destination) -Description 'Legacy migration destination file' -Action {
+                    $destinationItem = Get-Item -LiteralPath $candidate.Destination -Force -ErrorAction Stop
+                    [pscustomobject]@{
+                        Length = [int64]$destinationItem.Length
+                        Hash = (Get-FileHash -LiteralPath $candidate.Destination -Algorithm SHA256).Hash
+                    }
+                })[0]
+                if($sourceDetails.Length -eq $destinationDetails.Length -and $sourceDetails.Hash -ceq $destinationDetails.Hash) { $alreadyPresent++ } else { $conflict++ }
                 continue
             }
-            $destinationItem = Get-Item -LiteralPath $candidate.Destination -Force -ErrorAction Stop
-            $destinationHash = (Get-FileHash -LiteralPath $candidate.Destination -Algorithm SHA256).Hash
-            if($destinationItem.Length -ne $sourceItem.Length -or $destinationHash -cne $sourceHash) { throw "Legacy migration destination verification failed for '$($candidate.Destination)'." }
+            $destinationDetails = @(Invoke-AmmarTradingCanonicalPathOperation -CanonicalOneDriveRoot $resolvedRoot -Path @($candidate.Destination) -Description 'Legacy migration destination verification' -Action {
+                $destinationItem = Get-Item -LiteralPath $candidate.Destination -Force -ErrorAction Stop
+                [pscustomobject]@{
+                    Length = [int64]$destinationItem.Length
+                    Hash = (Get-FileHash -LiteralPath $candidate.Destination -Algorithm SHA256).Hash
+                }
+            })[0]
+            if($destinationDetails.Length -ne $sourceDetails.Length -or $destinationDetails.Hash -cne $sourceDetails.Hash) { throw "Legacy migration destination verification failed for '$($candidate.Destination)'." }
             $copied++
         } finally {
             if(Test-Path -LiteralPath $temporary) { Remove-Item -LiteralPath $temporary -Force -ErrorAction SilentlyContinue }
@@ -1040,4 +1455,4 @@ function Invoke-MoneyMachineSetup {
     }
 }
 
-Export-ModuleMember -Function Resolve-AmmarTradingLocalPath,Get-AmmarTradingWritableOneDriveRoots,Resolve-AmmarTradingOneDriveRoot,Assert-AmmarTradingTrustedDestinationPath,New-AmmarTradingTrustedDirectory,Start-AmmarTradingSetupTransaction,Restore-AmmarTradingSetupTransaction,Get-AmmarTradingMt4Accounts,Get-MoneyMachineSetupDiscovery,Test-MoneyMachineSetupRequest,Save-MoneyMachineAccountConfig,Save-AmmarTradingAccountBatch,Copy-AmmarTradingLegacyData,Invoke-AmmarTradingBatchSetup,Invoke-MoneyMachineSetup
+Export-ModuleMember -Function Resolve-AmmarTradingLocalPath,Get-AmmarTradingWritableOneDriveRoots,Resolve-AmmarTradingOneDriveRoot,Assert-AmmarTradingTrustedDestinationPath,New-AmmarTradingTrustedDirectory,Invoke-AmmarTradingTrustedPathOperation,Move-AmmarTradingTrustedFileByHandle,Start-AmmarTradingSetupTransaction,Restore-AmmarTradingSetupTransaction,Get-AmmarTradingMt4Accounts,Get-MoneyMachineSetupDiscovery,Test-MoneyMachineSetupRequest,Save-MoneyMachineAccountConfig,Save-AmmarTradingAccountBatch,Copy-AmmarTradingLegacyData,Invoke-AmmarTradingBatchSetup,Invoke-MoneyMachineSetup

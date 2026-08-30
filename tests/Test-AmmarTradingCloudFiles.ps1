@@ -44,7 +44,9 @@ try {
     $staleRoot = Join-Path $testRoot 'StaleOneDrive'
     $unregisteredRoot = Join-Path $testRoot 'UnregisteredOneDrive'
     $containedDirectory = Join-Path $trustedRoot 'AmmarTrading\Account_123456'
-    New-Item -ItemType Directory -Path $containedDirectory,$unregisteredRoot,$secondaryRoot -Force | Out-Null
+    $identityMutationDirectory = Join-Path $trustedRoot 'IdentityMutationTarget'
+    $handleLockDirectory = Join-Path $trustedRoot 'HandleLockTarget'
+    New-Item -ItemType Directory -Path $containedDirectory,$identityMutationDirectory,$handleLockDirectory,$unregisteredRoot,$secondaryRoot -Force | Out-Null
     $env:OneDrive = $trustedRoot
     $env:OneDriveCommercial = ''
     $env:OneDriveConsumer = ''
@@ -63,8 +65,12 @@ try {
         $script:AmmarTradingCloudFilesTestTags = @{}
         $script:AmmarTradingCloudFilesTestMetadata = @{}
         $script:AmmarTradingCloudFilesTestMetadataCalls = 0
+        $script:AmmarTradingCloudFilesTestRegistrationCalls = 0
         $script:AmmarTradingCloudFilesTestRegisteredRoots = @($RegisteredRoot)
-        $script:AmmarTradingOneDriveRegistrationResolver = { @($script:AmmarTradingCloudFilesTestRegisteredRoots) }
+        $script:AmmarTradingOneDriveRegistrationResolver = {
+            $script:AmmarTradingCloudFilesTestRegistrationCalls++
+            @($script:AmmarTradingCloudFilesTestRegisteredRoots)
+        }
         function script:Get-Item {
             param([Parameter(Mandatory)][string]$LiteralPath,[switch]$Force)
             [pscustomobject]@{ Attributes=([IO.FileAttributes]::Directory -bor [IO.FileAttributes]::ReparsePoint) }
@@ -108,6 +114,95 @@ try {
         } $Path $Attributes $Tag
     }
 
+    # A changed ancestor/final file identity sampled after initial validation
+    # must fail before the protected path operation executes.
+    & $setupModule {
+        param($MutationPath)
+        $script:AmmarTradingCloudFilesIdentityMutationPath = [IO.Path]::GetFullPath($MutationPath)
+        $script:AmmarTradingCloudFilesIdentityMutationArmed = $false
+        $script:AmmarTradingCloudFilesProtectedActionRan = $false
+        $script:AmmarTradingHeldPathMetadataResolver = {
+            param($Handle,$Path)
+            $metadata = Get-AmmarTradingNativeHandleMetadata -Handle $Handle
+            if($script:AmmarTradingCloudFilesIdentityMutationArmed -and
+               [IO.Path]::GetFullPath($Path) -ieq $script:AmmarTradingCloudFilesIdentityMutationPath) {
+                return [pscustomobject]@{
+                    FileAttributes = $metadata.FileAttributes
+                    ReparseTag = [uint32]$metadata.ReparseTag
+                    VolumeSerialNumber = [uint32]$metadata.VolumeSerialNumber
+                    FileIndex = [uint64]($metadata.FileIndex + 1)
+                }
+            }
+            return $metadata
+        }
+        $script:AmmarTradingTrustedPathOperationHook = {
+            param($Description,$Path)
+            if($Description -ceq 'Identity mutation seam') {
+                $script:AmmarTradingCloudFilesIdentityMutationArmed = $true
+            }
+        }
+    } $identityMutationDirectory
+    Assert-ThrowsLike -Expected 'identity changed' -Action {
+        & $setupModule {
+            param($Root,$Path)
+            Invoke-AmmarTradingTrustedPathOperation -OneDriveRoot $Root -Path @($Path) -Description 'Identity mutation seam' -Action {
+                $script:AmmarTradingCloudFilesProtectedActionRan = $true
+            } | Out-Null
+        } $trustedRoot $identityMutationDirectory
+    }
+    $protectedActionRan = & $setupModule { $script:AmmarTradingCloudFilesProtectedActionRan }
+    Assert-True -Condition (-not $protectedActionRan) -Message 'A changed held-path identity must fail before the protected action executes.'
+    $identityMutationMoved = "$identityMutationDirectory.moved"
+    Move-Item -LiteralPath $identityMutationDirectory -Destination $identityMutationMoved -ErrorAction Stop
+    Move-Item -LiteralPath $identityMutationMoved -Destination $identityMutationDirectory -ErrorAction Stop
+
+    # Real Windows integration: held component handles deny rename and delete
+    # during the critical section, then deterministic disposal releases both.
+    & $setupModule {
+        param($LockPath)
+        $script:AmmarTradingHeldPathMetadataResolver = $null
+        $script:AmmarTradingCloudFilesLockPath = [IO.Path]::GetFullPath($LockPath)
+        $script:AmmarTradingCloudFilesLockMovedPath = "$($script:AmmarTradingCloudFilesLockPath).moved"
+        $script:AmmarTradingCloudFilesRenameBlocked = $false
+        $script:AmmarTradingCloudFilesDeleteBlocked = $false
+        $script:AmmarTradingTrustedPathOperationHook = {
+            param($Description,$Path)
+            if($Description -cne 'Windows held-handle integration') { return }
+            try {
+                Move-Item -LiteralPath $script:AmmarTradingCloudFilesLockPath -Destination $script:AmmarTradingCloudFilesLockMovedPath -ErrorAction Stop
+            } catch {
+                $script:AmmarTradingCloudFilesRenameBlocked =
+                    (Test-Path -LiteralPath $script:AmmarTradingCloudFilesLockPath -PathType Container) -and
+                    -not (Test-Path -LiteralPath $script:AmmarTradingCloudFilesLockMovedPath)
+            }
+            try {
+                Remove-Item -LiteralPath $script:AmmarTradingCloudFilesLockPath -Recurse -Force -ErrorAction Stop
+            } catch {
+                $script:AmmarTradingCloudFilesDeleteBlocked = Test-Path -LiteralPath $script:AmmarTradingCloudFilesLockPath -PathType Container
+            }
+        }
+    } $handleLockDirectory
+    & $setupModule {
+        param($Root,$Path)
+        Invoke-AmmarTradingTrustedPathOperation -OneDriveRoot $Root -Path @($Path) -Description 'Windows held-handle integration' -Action {} | Out-Null
+    } $trustedRoot $handleLockDirectory
+    $lockResults = & $setupModule {
+        [pscustomobject]@{
+            RenameBlocked = $script:AmmarTradingCloudFilesRenameBlocked
+            DeleteBlocked = $script:AmmarTradingCloudFilesDeleteBlocked
+        }
+    }
+    Assert-True -Condition ([bool]$lockResults.RenameBlocked) -Message 'A held validated Windows handle must block rename replacement during the critical section.'
+    Assert-True -Condition ([bool]$lockResults.DeleteBlocked) -Message 'A held validated Windows handle must block deletion during the critical section.'
+    $handleLockMoved = "$handleLockDirectory.moved"
+    Move-Item -LiteralPath $handleLockDirectory -Destination $handleLockMoved -ErrorAction Stop
+    Remove-Item -LiteralPath $handleLockMoved -Recurse -Force -ErrorAction Stop
+    Assert-True -Condition (-not (Test-Path -LiteralPath $handleLockMoved)) -Message 'Rename and deletion must be permitted after held handles are disposed.'
+    & $setupModule {
+        $script:AmmarTradingTrustedPathOperationHook = $null
+        $script:AmmarTradingHeldPathMetadataResolver = $null
+    }
+
     foreach($tagCase in @(
         @{ Name='base Cloud Files'; Tag=[Convert]::ToUInt32('9000001A',16) },
         @{ Name='observed Cloud Files 7'; Tag=[Convert]::ToUInt32('9000701A',16) },
@@ -147,9 +242,51 @@ try {
     }
     $env:OneDrive = $trustedRoot
 
+    # Duplicate registry rows that canonicalize to one root are one registration,
+    # and resolution must consume the same immutable sample used for eligibility.
+    & $setupModule {
+        param($RegisteredRoot)
+        $script:AmmarTradingCloudFilesTestRegisteredRoots = @($RegisteredRoot,(Join-Path $RegisteredRoot '.'))
+        $script:AmmarTradingCloudFilesTestRegistrationCalls = 0
+    } $trustedRoot
+    $duplicateRoots = @(& $setupModule { @(Get-AmmarTradingWritableOneDriveRoots) })
+    Assert-True -Condition ($duplicateRoots.Count -eq 1) -Message 'Duplicate account rows for one canonical root must be deduplicated.'
+    $enumerationSamples = & $setupModule { $script:AmmarTradingCloudFilesTestRegistrationCalls }
+    Assert-True -Condition ($enumerationSamples -eq 1) -Message 'A public root enumeration must obtain exactly one registration snapshot.'
+    & $setupModule { $script:AmmarTradingCloudFilesTestRegistrationCalls = 0 }
+    $duplicateResolved = Resolve-AmmarTradingOneDriveRoot -Path $trustedRoot -RequireWritable
+    Assert-True -Condition ($duplicateResolved -ceq [IO.Path]::GetFullPath($trustedRoot)) -Message 'Duplicate account rows for one canonical root must resolve.'
+    $resolutionSamples = & $setupModule { $script:AmmarTradingCloudFilesTestRegistrationCalls }
+    Assert-True -Condition ($resolutionSamples -eq 1) -Message 'A public root resolution must obtain exactly one registration snapshot.'
+
+    # A resolver mutation after its first sample cannot change authorization or
+    # writability decisions within the same resolution operation.
     & $setupModule {
         param($FirstRoot,$SecondRoot)
+        $script:AmmarTradingCloudFilesTestRegisteredRoots = @($FirstRoot)
+        $script:AmmarTradingCloudFilesTestMutatedRoots = @($SecondRoot)
+        $script:AmmarTradingCloudFilesTestRegistrationCalls = 0
+        $script:AmmarTradingOneDriveRegistrationResolver = {
+            $script:AmmarTradingCloudFilesTestRegistrationCalls++
+            if($script:AmmarTradingCloudFilesTestRegistrationCalls -eq 1) {
+                return @($script:AmmarTradingCloudFilesTestRegisteredRoots)
+            }
+            return @($script:AmmarTradingCloudFilesTestMutatedRoots)
+        }
+    } $trustedRoot $secondaryRoot
+    $mutationResolved = Resolve-AmmarTradingOneDriveRoot -Path $trustedRoot -RequireWritable
+    Assert-True -Condition ($mutationResolved -ceq [IO.Path]::GetFullPath($trustedRoot)) -Message 'Resolution must remain authorized against its first immutable registration snapshot.'
+    $mutationSamples = & $setupModule { $script:AmmarTradingCloudFilesTestRegistrationCalls }
+    Assert-True -Condition ($mutationSamples -eq 1) -Message 'A changing resolver must not be sampled twice by one resolution.'
+
+    & $setupModule {
+        param($FirstRoot,$SecondRoot)
+        $script:AmmarTradingCloudFilesTestRegistrationCalls = 0
         $script:AmmarTradingCloudFilesTestRegisteredRoots = @($FirstRoot,$SecondRoot)
+        $script:AmmarTradingOneDriveRegistrationResolver = {
+            $script:AmmarTradingCloudFilesTestRegistrationCalls++
+            @($script:AmmarTradingCloudFilesTestRegisteredRoots)
+        }
     } $trustedRoot $secondaryRoot
     $registeredRoots = @(& $setupModule { @(Get-AmmarTradingWritableOneDriveRoots) })
     Assert-True -Condition ($registeredRoots.Count -eq 2) -Message 'Each current-user OneDrive account registration must be considered.'
@@ -157,6 +294,21 @@ try {
     Assert-True -Condition (-not [bool]($registeredRoots | Where-Object { $_.Path -ieq [IO.Path]::GetFullPath($secondaryRoot) -and $_.IsActive })) -Message 'An unmatched registered root must not be marked active.'
     $secondaryResolved = Resolve-AmmarTradingOneDriveRoot -Path $secondaryRoot -RequireWritable
     Assert-True -Condition ($secondaryResolved -ceq [IO.Path]::GetFullPath($secondaryRoot)) -Message 'A second registered OneDrive account root must resolve.'
+
+    # An existing registration without an exact environment activity hint stays
+    # eligible but inactive; activity hints are not an authorization source.
+    $env:OneDrive = $trustedRoot
+    $env:OneDriveCommercial = ''
+    $env:OneDriveConsumer = ''
+    & $setupModule {
+        param($RegisteredRoot)
+        $script:AmmarTradingCloudFilesTestRegisteredRoots = @($RegisteredRoot)
+    } $secondaryRoot
+    $existingStaleRoots = @(& $setupModule { @(Get-AmmarTradingWritableOneDriveRoots) })
+    Assert-True -Condition ($existingStaleRoots.Count -eq 1) -Message 'An existing registered root without an activity hint must remain eligible.'
+    Assert-True -Condition (-not [bool]$existingStaleRoots[0].IsActive) -Message 'An existing registered root without an exact activity hint must be inactive.'
+    $existingStaleResolved = Resolve-AmmarTradingOneDriveRoot -Path $secondaryRoot -RequireWritable
+    Assert-True -Condition ($existingStaleResolved -ceq [IO.Path]::GetFullPath($secondaryRoot)) -Message 'An existing inactive registration must still resolve.'
 
     & $setupModule {
         param($StaleRoot)
