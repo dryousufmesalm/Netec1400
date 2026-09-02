@@ -17,7 +17,7 @@ function Get-AmmarTradingDestinationPath {
         [Parameter(Mandatory)][string]$AccountNumber
     )
 
-    Join-Path $OneDriveRoot (Join-Path 'AmmarTrading' (Join-Path ("Account_{0}" -f $AccountNumber) 'Baskets.csv'))
+    Join-Path $OneDriveRoot (Join-Path 'amartrading' (Join-Path ("Account_{0}" -f $AccountNumber) 'Baskets.csv'))
 }
 
 function Get-AmmarTradingHeartbeatStatus {

@@ -1087,7 +1087,7 @@ function Get-AmmarTradingDestinationPath {
         [Parameter(Mandatory)][string]$AccountNumber
     )
 
-    Join-Path $OneDriveRoot (Join-Path 'AmmarTrading' (Join-Path ("Account_{0}" -f $AccountNumber) 'Baskets.csv'))
+    Join-Path $OneDriveRoot (Join-Path 'amartrading' (Join-Path ("Account_{0}" -f $AccountNumber) 'Baskets.csv'))
 }
 
 function Get-AmmarTradingDiscoveryHash {
@@ -1551,11 +1551,11 @@ function Copy-AmmarTradingLegacyData {
         if($seenAccounts.Add($accountNumber)) { $accounts.Add($accountNumber) }
     }
 
-    $canonicalRoot = Join-Path $resolvedRoot 'AmmarTrading'
+    $canonicalRoot = Join-Path $resolvedRoot 'amartrading'
     if(Test-Path -LiteralPath $canonicalRoot) { Assert-AmmarTradingMigrationPath -Path $canonicalRoot -Description 'Canonical migration root' -TrustedCloudFilesRoot $resolvedRoot }
 
     $candidates = [System.Collections.Generic.List[object]]::new()
-    foreach($legacyName in @('Money Machine','AmarTrading')) {
+    foreach($legacyName in @('Money Machine','AmarTrading','AmmarTrading')) {
         $legacyRoot = Join-Path $resolvedRoot $legacyName
         if(-not (Test-Path -LiteralPath $legacyRoot -PathType Container)) { continue }
         Assert-AmmarTradingMigrationPath -Path $legacyRoot -Description "Legacy '$legacyName' root" -TrustedCloudFilesRoot $resolvedRoot
