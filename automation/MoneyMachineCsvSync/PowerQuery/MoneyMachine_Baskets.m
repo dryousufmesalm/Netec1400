@@ -18,7 +18,7 @@ let
             WithPriority = Table.AddColumn(Loaded, "FolderPriority", each Priority, Int64.Type)
         in
             WithPriority,
-    CanonicalFiles = GetFolderFiles(OneDriveRoot & "\AmarTrading", 0),
+    CanonicalFiles = GetFolderFiles(OneDriveRoot & "\amartrading", 0),
     LegacyFiles = GetFolderFiles(OneDriveRoot & "\AmmarTrading", 1),
     Files = Table.Combine({CanonicalFiles, LegacyFiles}),
     BasketFiles = Table.SelectRows(Files, each [Name] = "Baskets.csv" and Text.StartsWith(List.Last(Text.Split(Text.TrimEnd([Folder Path], "\"), "\")), "Account_")),
