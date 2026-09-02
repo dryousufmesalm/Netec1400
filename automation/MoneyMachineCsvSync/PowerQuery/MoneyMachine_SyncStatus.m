@@ -7,8 +7,8 @@ let
             WithPriority = Table.AddColumn(Loaded, "FolderPriority", each Priority, Int64.Type)
         in
             WithPriority,
-    CanonicalFiles = GetFolderFiles(OneDriveRoot & "\AmmarTrading", 0),
-    LegacyFiles = GetFolderFiles(OneDriveRoot & "\AmarTrading", 1),
+    CanonicalFiles = GetFolderFiles(OneDriveRoot & "\AmarTrading", 0),
+    LegacyFiles = GetFolderFiles(OneDriveRoot & "\AmmarTrading", 1),
     Files = Table.Combine({CanonicalFiles, LegacyFiles}),
     StatusFiles = Table.SelectRows(Files, each [Name] = "SyncStatus.json" and Text.StartsWith(List.Last(Text.Split(Text.TrimEnd([Folder Path], "\"), "\")), "Account_")),
     WithFolderLogin = Table.AddColumn(StatusFiles, "FolderAccountNumber", each Text.AfterDelimiter(List.Last(Text.Split(Text.TrimEnd([Folder Path], "\"), "\")), "Account_"), type text),
