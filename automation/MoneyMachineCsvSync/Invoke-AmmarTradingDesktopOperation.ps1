@@ -4,7 +4,11 @@ param(
     [ValidateSet('SystemStatus','Discover','OneDriveRoots','Validate','Apply','Status','SyncNow')]
     [string]$Operation,
     [Parameter(Mandatory)][string]$RequestPath,
-    [Parameter(Mandatory)][string]$RuntimeRoot
+    [Parameter(Mandatory)][string]$RuntimeRoot,
+    [string]$ConfigPath,
+    [string]$TerminalDataRoot,
+    [switch]$SkipTaskRegistration,
+    [switch]$AsLibrary
 )
 
 Set-StrictMode -Version Latest
@@ -75,7 +79,7 @@ function Get-DesktopSystemStatus {
 function Test-DesktopSelection {
     param([Parameter(Mandatory)][psobject]$Request)
 
-    Assert-RequestProperties -Request $Request -Allowed @('vpsName','oneDriveRoot','accounts') -Required @('vpsName','oneDriveRoot','accounts')
+    Assert-RequestProperties -Request $Request -Allowed @('vpsName','oneDriveRoot','destinationFolder','accounts') -Required @('vpsName','oneDriveRoot','accounts')
     $vpsName = ([string]$Request.vpsName).Trim()
     if([string]::IsNullOrWhiteSpace($vpsName) -or $vpsName.Length -gt 100) { throw 'The VPS name is invalid.' }
     $requestedAccounts = @($Request.accounts)
@@ -91,7 +95,8 @@ function Test-DesktopSelection {
         $discoveryId = ([string]$account.discoveryId).Trim()
         if($accountNumber -notmatch '^\d{4,20}$' -or $discoveryId -cnotmatch '^[A-F0-9]{64}$') { throw 'The selected account identity is invalid.' }
         if(-not $seenAccounts.Add($accountNumber) -or -not $seenDiscoveries.Add($discoveryId)) { throw 'The selection contains duplicate accounts.' }
-        $validated = Test-MoneyMachineSetupRequest -VpsName $vpsName -ExpectedMT4Login $accountNumber -SourceCsv ([string]$account.sourceCsv) -OneDriveRoot ([string]$Request.oneDriveRoot)
+        $destinationFolder = if($Request.PSObject.Properties['destinationFolder']) { [string]$Request.destinationFolder } else { '' }
+        $validated = Test-MoneyMachineSetupRequest -VpsName $vpsName -ExpectedMT4Login $accountNumber -SourceCsv ([string]$account.sourceCsv) -OneDriveRoot ([string]$Request.oneDriveRoot) -DestinationFolder $destinationFolder
         if(-not $seenSources.Add([string]$validated.SourceCsv)) { throw 'The selection contains duplicate source files.' }
         $sources.Add([string]$validated.SourceCsv)
     }
@@ -141,7 +146,7 @@ try {
 
     $setupModule = Join-Path $PSScriptRoot 'MoneyMachineSyncSetup.psm1'
     Import-Module -Name $setupModule -Force -ErrorAction Stop | Out-Null
-    $configPath = Join-Path $canonicalRuntimeRoot 'accounts.csv'
+    $configPath = if([string]::IsNullOrWhiteSpace($ConfigPath)) { Join-Path $canonicalRuntimeRoot 'accounts.csv' } else { [IO.Path]::GetFullPath([Environment]::ExpandEnvironmentVariables($ConfigPath.Trim())) }
     [void](Restore-AmmarTradingSetupTransaction -RuntimeRoot $canonicalRuntimeRoot -ConfigPath $configPath)
 
     $result = switch($Operation) {
@@ -153,7 +158,7 @@ try {
         'Discover' {
             Assert-RequestProperties -Request $request -Allowed @('manualCsv')
             $manualCsv = if($null -eq $request.PSObject.Properties['manualCsv']) { @() } else { @($request.manualCsv | ForEach-Object { [string]$_ }) }
-            [pscustomobject]@{ Accounts=@(Get-AmmarTradingMt4Accounts -ManualCsv $manualCsv) }
+            [pscustomobject]@{ Accounts=@(Get-AmmarTradingMt4Accounts -TerminalDataRoot $TerminalDataRoot -ManualCsv $manualCsv) }
             break
         }
         'OneDriveRoots' {
@@ -166,8 +171,8 @@ try {
             break
         }
         'Apply' {
-            Assert-RequestProperties -Request $request -Allowed @('vpsName','oneDriveRoot','accounts') -Required @('vpsName','oneDriveRoot','accounts')
-            Invoke-AmmarTradingBatchSetup -Request $request -ConfigPath $configPath -RuntimeRoot $canonicalRuntimeRoot
+            Assert-RequestProperties -Request $request -Allowed @('vpsName','oneDriveRoot','destinationFolder','accounts') -Required @('vpsName','oneDriveRoot','accounts')
+            Invoke-AmmarTradingBatchSetup -Request $request -ConfigPath $configPath -RuntimeRoot $canonicalRuntimeRoot -SkipTaskRegistration:$SkipTaskRegistration
             break
         }
         'Status' {
@@ -197,13 +202,22 @@ try {
         }
     }
 
+    if($AsLibrary) { return $result }
     Write-DesktopJson -Value $result
     exit 0
 } catch {
-    Write-DesktopJson -Value ([pscustomobject]@{
+    $rawMessage = [string]$_.Exception.Message
+    $safeMessage = if($AsLibrary -or ($rawMessage.Length -ge 1 -and $rawMessage.Length -le 200 -and $rawMessage -notmatch '[\\/:]')) {
+        $rawMessage
+    } else {
+        'The desktop operation could not be completed.'
+    }
+    $failure = [pscustomobject]@{
         Ok = $false
         Code = 'OperationFailed'
-        Message = 'The desktop operation could not be completed.'
-    })
+        Message = $safeMessage
+    }
+    if($AsLibrary) { return $failure }
+    Write-DesktopJson -Value $failure
     exit 1
 }

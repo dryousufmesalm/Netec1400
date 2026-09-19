@@ -95,7 +95,7 @@ function New-BatchRequest {
 try {
     New-Item -ItemType Directory -Path $tempRoot -Force | Out-Null
     $setupSource = Get-Content -LiteralPath $ModulePath -Raw
-    Assert-True -Condition ($setupSource -match '&\s*\$script:AmmarTradingTaskInstallerInvoker\s+\$installer\s+\$fullConfigPath\s+\*>\s*\$null') -Message 'Production scheduled-task registration must suppress every non-error PowerShell stream before returning desktop JSON.'
+    Assert-True -Condition ($setupSource -match '&\s*\$script:AmmarTradingTaskInstallerInvoker\s+\$installer\s+\$fullConfigPath\s+\$RuntimeRoot\s+\*>\s*\$null') -Message 'Production scheduled-task registration must pass the canonical runtime and suppress every non-error PowerShell stream.'
     Import-Module -Name $ModulePath -Force -ErrorAction Stop
     $setupModule = Get-Module -Name MoneyMachineSyncSetup
     function Set-TestOneDriveRegistration {
@@ -106,6 +106,16 @@ try {
             $script:AmmarTradingOneDriveRegistrationResolver = { @($script:AmmarTradingBatchTestRegisteredOneDriveRoot) }
         } $Root
     }
+
+    $malformedIdentityRuntime = Join-Path $tempRoot 'malformed-vps-identity\runtime'
+    $malformedIdentityPath = Join-Path $malformedIdentityRuntime 'state\vps-identity.json'
+    New-Item -ItemType Directory -Path (Split-Path -Parent $malformedIdentityPath) -Force | Out-Null
+    [IO.File]::WriteAllText($malformedIdentityPath, '{"LegacyIdentity":"missing-vps-id"}', (New-Object Text.UTF8Encoding($false)))
+    $malformedIdentityHash = (Get-FileHash -LiteralPath $malformedIdentityPath -Algorithm SHA256).Hash
+    Assert-ThrowsLike -Expected 'does not contain VpsId' -Action {
+        Get-AmmarTradingVpsIdentity -RuntimeRoot $malformedIdentityRuntime | Out-Null
+    }
+    Assert-Equal -Actual (Get-FileHash -LiteralPath $malformedIdentityPath -Algorithm SHA256).Hash -Expected $malformedIdentityHash -Message 'Malformed saved VPS identity must not be replaced during recovery guidance.'
 
     # A missing batch entry point is the intentional RED failure before Task 3 implementation.
     $successRoot = Join-Path $tempRoot 'success'

@@ -7,6 +7,8 @@ public interface IAmmarTradingOperations
     Task<object> GetSystemStatusAsync(CancellationToken token);
     Task<object> DiscoverMt4AccountsAsync(CancellationToken token);
     Task<object> BrowseForCsvAsync(CancellationToken token);
+    Task<object> BrowseForOneDriveFolderAsync(JsonElement payload, CancellationToken token) =>
+        Task.FromException<object>(new NotSupportedException("OneDrive folder browsing is unavailable."));
     Task<object> GetOneDriveRootsAsync(CancellationToken token);
     Task<object> GetConfiguredAccountsAsync(CancellationToken token);
     Task<object> ValidateSelectionAsync(JsonElement payload, CancellationToken token);

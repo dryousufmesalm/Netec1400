@@ -1,0 +1,20 @@
+# MQL4/MQL5 compiled and cache
+*.ex4
+*.ex5
+*.log
+*.tlc
+
+# Local Git worktrees used for isolated development
+.worktrees/
+
+# MetaEditor / IDE
+*.ini
+*.bak
+*.tmp
+
+# Machine-local Windows acceptance evidence
+audit/windows-production-acceptance.json
+
+# Optional: uncomment to ignore PDF/zips if you prefer repo without binaries
+# *.pdf
+# *.zip

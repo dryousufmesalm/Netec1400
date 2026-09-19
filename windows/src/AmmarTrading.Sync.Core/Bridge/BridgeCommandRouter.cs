@@ -121,6 +121,10 @@ public sealed class BridgeCommandRouter
         {
             return Failure(request.Id, "RequestCancelled", "The request was cancelled.");
         }
+        catch (SafeOperationException error)
+        {
+            return Failure(request.Id, error.Code, error.Message);
+        }
         catch
         {
             return Failure(request.Id, "OperationFailed", "The requested operation could not be completed.");
@@ -153,6 +157,7 @@ public sealed class BridgeCommandRouter
         "getSystemStatus" or
         "discoverMt4Accounts" or
         "browseForCsv" or
+        "browseForOneDriveFolder" or
         "getOneDriveRoots" or
         "getConfiguredAccounts" or
         "validateSelection" or
@@ -217,6 +222,7 @@ public sealed class BridgeCommandRouter
             "getSystemStatus" => _operations.GetSystemStatusAsync(token),
             "discoverMt4Accounts" => _operations.DiscoverMt4AccountsAsync(token),
             "browseForCsv" => _operations.BrowseForCsvAsync(token),
+            "browseForOneDriveFolder" => _operations.BrowseForOneDriveFolderAsync(payload, token),
             "getOneDriveRoots" => _operations.GetOneDriveRootsAsync(token),
             "getConfiguredAccounts" => _operations.GetConfiguredAccountsAsync(token),
             "validateSelection" => _operations.ValidateSelectionAsync(payload, token),

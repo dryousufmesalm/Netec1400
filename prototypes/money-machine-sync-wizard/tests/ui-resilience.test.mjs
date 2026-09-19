@@ -45,7 +45,7 @@ async function openInjectedApp(t, apiModule, testName) {
 
 test("missing native host remains a blocking startup error", async (t) => {
   const page = await openInjectedApp(t, `
-    const missing = Object.assign(new Error("AmmarTrading Sync must be opened from the installed Windows app because the WebView2 host is unavailable."), { code: "MissingHost" });
+    const missing = Object.assign(new Error("AmarTrading Sync must be opened from the installed Windows app because the WebView2 host is unavailable."), { code: "MissingHost" });
     export const wizardApi = {
       getSystemStatus: async () => { throw missing; },
       getConfiguredAccounts: async () => ({ Accounts: [] }),
@@ -64,7 +64,7 @@ test("monitor renders publication, automation, freshness, status, and failure ev
     export const wizardApi = {
       getSystemStatus: async () => ({ Ready: true, ComputerName: "VPS Monitor", Checks: [{ Name: "Windows", Ready: true, Message: "Ready." }] }),
       getConfiguredAccounts: async () => ({ Accounts: [
-        { AccountNumber: "7788451", BrokerName: "Ammar Markets", Destination: "C:\\\\OneDrive\\\\AmmarTrading\\\\Account_7788451\\\\Baskets.csv", LocalPublished: true, TaskState: "Registered", Freshness: "Fresh", Status: "Success" },
+        { AccountNumber: "7788451", BrokerName: "Ammar Markets", Destination: "C:\\\\OneDrive\\\\AmarTrading\\\\Account_7788451\\\\Baskets.csv", LocalPublished: true, TaskState: "Registered", Freshness: "Fresh", Status: "Success" },
         { accountNumber: "9912044", localPublished: false, taskState: "Failed", freshness: "Stale", status: "Error", failureReason: "Scheduled task access was denied." },
         { AccountNumber: "1122334" },
       ] }),

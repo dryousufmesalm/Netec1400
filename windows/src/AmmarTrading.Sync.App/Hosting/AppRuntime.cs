@@ -27,7 +27,7 @@ internal sealed record AppRuntimePaths(
         ArgumentException.ThrowIfNullOrWhiteSpace(localApplicationData);
         var runtimeRoot = Path.Combine(
             Path.GetFullPath(localApplicationData),
-            "AmmarTrading",
+            "AmarTrading",
             "Sync");
         return new AppRuntimePaths(
             runtimeRoot,

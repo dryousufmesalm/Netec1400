@@ -3,6 +3,7 @@ using System.IO;
 using System.Text.Json;
 using System.Text.RegularExpressions;
 using Microsoft.Win32;
+using Forms = System.Windows.Forms;
 
 namespace AmmarTrading.Sync.App.Services;
 
@@ -15,6 +16,11 @@ public interface IFilePicker
     string? PickFile(string filter);
 }
 
+public interface IFolderPicker
+{
+    string? PickFolder(string? initialPath);
+}
+
 public interface INativeProcessLauncher
 {
     void Start(NativeProcessInvocation invocation);
@@ -23,6 +29,8 @@ public interface INativeProcessLauncher
 public interface INativeDialogService
 {
     string? BrowseForCsv();
+
+    string? BrowseForOneDriveFolder(string? initialPath) => throw new NotSupportedException("OneDrive folder browsing is unavailable.");
 
     object OpenConfiguredReportingFolder(JsonElement payload, JsonElement configuredStatus);
 }
@@ -37,16 +45,23 @@ public sealed class NativeDialogService : INativeDialogService
         RegexOptions.CultureInvariant | RegexOptions.NonBacktracking);
 
     private readonly IFilePicker _filePicker;
+    private readonly IFolderPicker _folderPicker;
     private readonly INativeProcessLauncher _processLauncher;
 
     public NativeDialogService()
-        : this(new WindowsFilePicker(), new SystemNativeProcessLauncher())
+        : this(new WindowsFilePicker(), new WindowsFolderPicker(), new SystemNativeProcessLauncher())
     {
     }
 
     public NativeDialogService(IFilePicker filePicker, INativeProcessLauncher processLauncher)
+        : this(filePicker, new WindowsFolderPicker(), processLauncher)
+    {
+    }
+
+    public NativeDialogService(IFilePicker filePicker, IFolderPicker folderPicker, INativeProcessLauncher processLauncher)
     {
         _filePicker = filePicker ?? throw new ArgumentNullException(nameof(filePicker));
+        _folderPicker = folderPicker ?? throw new ArgumentNullException(nameof(folderPicker));
         _processLauncher = processLauncher ?? throw new ArgumentNullException(nameof(processLauncher));
     }
 
@@ -69,6 +84,18 @@ public sealed class NativeDialogService : INativeDialogService
                 "A selected source must be a local CSV file.");
         }
 
+        return fullPath;
+    }
+
+    public string? BrowseForOneDriveFolder(string? initialPath)
+    {
+        var selected = _folderPicker.PickFolder(initialPath);
+        if (string.IsNullOrWhiteSpace(selected)) return null;
+        var fullPath = Path.GetFullPath(selected);
+        if (!Directory.Exists(fullPath) || !IsLocalFileSystemPath(fullPath) || HasReparsePointInExistingPath(fullPath))
+        {
+            throw new PowerShellOperationException("InvalidPath", "A selected OneDrive destination must be a safe local folder.");
+        }
         return fullPath;
     }
 
@@ -96,7 +123,8 @@ public sealed class NativeDialogService : INativeDialogService
             }
 
             var destination = GetString(configuredAccount, "Destination", "destination");
-            var accountDirectory = VerifyConfiguredAccountDirectory(destination, accountNumber);
+            var destinationFolder = GetString(configuredAccount, "DestinationFolder", "destinationFolder");
+            var accountDirectory = VerifyConfiguredAccountDirectory(destination, destinationFolder, accountNumber);
             _processLauncher.Start(new NativeProcessInvocation(
                 "explorer.exe",
                 new[] { accountDirectory }));
@@ -134,7 +162,7 @@ public sealed class NativeDialogService : INativeDialogService
         return result;
     }
 
-    private static string VerifyConfiguredAccountDirectory(string destination, string accountNumber)
+    private static string VerifyConfiguredAccountDirectory(string destination, string destinationFolder, string accountNumber)
     {
         if (string.IsNullOrWhiteSpace(destination))
         {
@@ -143,16 +171,24 @@ public sealed class NativeDialogService : INativeDialogService
 
         var canonicalDestination = Path.GetFullPath(destination);
         var accountDirectory = Path.GetDirectoryName(canonicalDestination);
-        var productDirectory = accountDirectory is null ? null : Path.GetDirectoryName(accountDirectory);
+        var vpsDirectory = accountDirectory is null ? null : Path.GetDirectoryName(accountDirectory);
+        var destinationRoot = string.IsNullOrWhiteSpace(destinationFolder) ? null : Path.GetFullPath(destinationFolder);
+        var destinationPrefix = destinationRoot is null
+            ? null
+            : destinationRoot.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar) + Path.DirectorySeparatorChar;
+        var isUnderSelectedFolder = destinationPrefix is not null && canonicalDestination.StartsWith(destinationPrefix, StringComparison.OrdinalIgnoreCase);
+        var isLegacyLayout = vpsDirectory is not null && (string.Equals(Path.GetFileName(vpsDirectory), "AmarTrading", StringComparison.OrdinalIgnoreCase) || string.Equals(Path.GetFileName(vpsDirectory), "AmmarTrading", StringComparison.OrdinalIgnoreCase));
+        var isVpsLayout = vpsDirectory is not null && Path.GetFileName(vpsDirectory).StartsWith("VPS_", StringComparison.OrdinalIgnoreCase) && isUnderSelectedFolder;
+        var isKnownLayout = string.IsNullOrWhiteSpace(destinationFolder) ? isLegacyLayout || isVpsLayout : isUnderSelectedFolder;
         if (!Path.GetFileName(canonicalDestination).Equals("Baskets.csv", StringComparison.OrdinalIgnoreCase) ||
             !IsLocalFileSystemPath(canonicalDestination) ||
             accountDirectory is null ||
-            productDirectory is null ||
             !Path.GetFileName(accountDirectory).Equals($"Account_{accountNumber}", StringComparison.Ordinal) ||
-            !Path.GetFileName(productDirectory).Equals("AmmarTrading", StringComparison.Ordinal) ||
+            !isKnownLayout ||
             !Directory.Exists(accountDirectory) ||
             HasReparsePointInExistingPath(accountDirectory) ||
-            !IsLocalFileSystemPath(accountDirectory))
+            !IsLocalFileSystemPath(accountDirectory) ||
+            (destinationRoot is not null && (!IsLocalFileSystemPath(destinationRoot) || HasReparsePointInExistingPath(destinationRoot))))
         {
             throw InvalidConfiguredFolder();
         }
@@ -243,7 +279,7 @@ public sealed class WindowsFilePicker : IFilePicker
 {
     public string? PickFile(string filter)
     {
-        var dialog = new OpenFileDialog
+        var dialog = new Microsoft.Win32.OpenFileDialog
         {
             AddExtension = true,
             CheckFileExists = true,
@@ -255,6 +291,21 @@ public sealed class WindowsFilePicker : IFilePicker
             ValidateNames = true,
         };
         return dialog.ShowDialog() == true ? dialog.FileName : null;
+    }
+}
+
+public sealed class WindowsFolderPicker : IFolderPicker
+{
+    public string? PickFolder(string? initialPath)
+    {
+        using var dialog = new Forms.FolderBrowserDialog
+        {
+            Description = "Select the AmarTrading reporting folder inside OneDrive",
+            UseDescriptionForTitle = true,
+            ShowNewFolderButton = true,
+        };
+        if (!string.IsNullOrWhiteSpace(initialPath) && Directory.Exists(initialPath)) dialog.SelectedPath = initialPath;
+        return dialog.ShowDialog() == Forms.DialogResult.OK ? dialog.SelectedPath : null;
     }
 }
 

@@ -14,19 +14,27 @@ let
     },
     GetFolderFiles = (FolderPath as text, Priority as number) as table =>
         let
-            Loaded = try Folder.Files(FolderPath) otherwise #table(type table [Content = binary, Name = text, #"Folder Path" = text], {}),
+            Loaded = try Table.Buffer(Folder.Files(FolderPath)) otherwise #table(type table [Content = binary, Name = text, #"Folder Path" = text], {}),
             WithPriority = Table.AddColumn(Loaded, "FolderPriority", each Priority, Int64.Type)
         in
             WithPriority,
     CanonicalFiles = GetFolderFiles(OneDriveRoot & "\amartrading", 0),
     LegacyFiles = GetFolderFiles(OneDriveRoot & "\AmmarTrading", 1),
     Files = Table.Combine({CanonicalFiles, LegacyFiles}),
-    BasketFiles = Table.SelectRows(Files, each [Name] = "Baskets.csv" and Text.StartsWith(List.Last(Text.Split(Text.TrimEnd([Folder Path], "\"), "\")), "Account_")),
-    WithFolderLogin = Table.AddColumn(BasketFiles, "FolderAccountNumber", each Text.AfterDelimiter(List.Last(Text.Split(Text.TrimEnd([Folder Path], "\"), "\")), "Account_"), type text),
+    BasketFiles = Table.SelectRows(Files, each [Name] = "Baskets.csv"),
+    WithFolderParts = Table.AddColumn(BasketFiles, "FolderParts", each Text.Split(Text.TrimEnd([Folder Path], "\"), "\")),
+    WithFolderLogin = Table.AddColumn(WithFolderParts, "FolderAccountNumber", each let parts = [FolderParts], folder = List.Last(parts) in if Text.StartsWith(folder, "Account_") then Text.AfterDelimiter(folder, "Account_") else null, type text),
+    WithFolderVps = Table.AddColumn(WithFolderLogin, "VpsId", each let parts = [FolderParts], parent = if List.Count(parts) >= 2 then parts{List.Count(parts)-2} else "" in if Text.StartsWith(parent, "VPS_") then Text.AfterDelimiter(parent, "VPS_") else "legacy-unassigned", type text),
     CanonicalAccounts = List.Buffer(Table.SelectRows(WithFolderLogin, each [FolderPriority] = 0)[FolderAccountNumber]),
-    PreferredFiles = Table.SelectRows(WithFolderLogin, each [FolderPriority] = 0 or not List.Contains(CanonicalAccounts, [FolderAccountNumber])),
-    WithCsv = Table.AddColumn(PreferredFiles, "Data", each Table.SelectColumns(Table.PromoteHeaders(Csv.Document([Content], [Delimiter=",", Encoding=65001, QuoteStyle=QuoteStyle.Csv]), [PromoteAllScalars=true]), ExpectedColumns, MissingField.UseNull)),
-    Keep = Table.SelectColumns(WithCsv, {"FolderAccountNumber","Data"}),
+    PreferredFiles = Table.SelectRows(WithFolderVps, each [FolderAccountNumber] <> null and ([VpsId] <> "legacy-unassigned" or [FolderPriority] = 0 or not List.Contains(CanonicalAccounts, [FolderAccountNumber]))),
+    ManifestFiles = Table.SelectRows(Files, each [Name] = "Vps.json"),
+    ManifestRows = Table.AddColumn(ManifestFiles, "Manifest", each try Json.Document([Content]) otherwise [VpsName=""]),
+    ManifestVps = Table.AddColumn(ManifestRows, "ManifestVpsId", each let parts = Text.Split(Text.TrimEnd([Folder Path], "\\"), "\\"), parent = if List.Count(parts) >= 1 then List.Last(parts) else "" in if Text.StartsWith(parent, "VPS_") then Text.AfterDelimiter(parent, "VPS_") else null, type text),
+    ManifestNames = Table.Distinct(Table.SelectColumns(Table.AddColumn(ManifestVps, "ManifestVpsName", each Record.FieldOrDefault([Manifest], "VpsName", ""), type text), {"ManifestVpsId","ManifestVpsName"}), {"ManifestVpsId"}),
+    WithManifest = Table.NestedJoin(PreferredFiles, {"VpsId"}, ManifestNames, {"ManifestVpsId"}, "ManifestMatch", JoinKind.LeftOuter),
+    WithVpsName = Table.ExpandTableColumn(WithManifest, "ManifestMatch", {"ManifestVpsName"}, {"VpsName"}),
+    WithCsv = Table.AddColumn(WithVpsName, "Data", each Table.SelectColumns(Table.PromoteHeaders(Csv.Document([Content], [Delimiter=",", Encoding=65001, QuoteStyle=QuoteStyle.Csv]), [PromoteAllScalars=true]), ExpectedColumns, MissingField.UseNull)),
+    Keep = Table.SelectColumns(WithCsv, {"FolderAccountNumber","VpsId","VpsName","Data"}),
     Expanded = Table.ExpandTableColumn(Keep, "Data", ExpectedColumns, ExpectedColumns),
     Typed = Table.TransformColumnTypes(Expanded, {
         {"FolderAccountNumber", type text},{"AccountNumber", type text},{"BasketID", Int64.Type},{"Timeframe", Int64.Type},
@@ -47,10 +55,11 @@ let
         {"RecoveryWaitMinutes", Int64.Type},{"RecoveryMaxTotalLotsInBasket", type number},{"CsvSchemaVersion", Int64.Type}
     }, "en-US"),
     WithLegacyRunID = Table.ReplaceValue(Typed, null, "Legacy-v2", Replacer.ReplaceValue, {"RunID"}),
-    WithRunKey = Table.AddColumn(WithLegacyRunID, "RunKey", each [AccountNumber] & "|" & [RunID], type text),
+    WithRunKey = Table.AddColumn(WithLegacyRunID, "RunKey", each [VpsId] & "|" & [AccountNumber] & "|" & [RunID], type text),
     WithMismatch = Table.AddColumn(WithRunKey, "FolderAccountMismatch", each [FolderAccountNumber] <> [AccountNumber], type logical),
     WithConfigFingerprint = Table.AddColumn(WithMismatch, "ConfigFingerprint", (row) => Text.Combine(List.Transform(FingerprintFields, (field) => let value = Record.Field(row, field) in if value = null then "" else Text.From(value, "en-US")), "|"), type text),
-    FinalColumns = List.Combine({ExpectedColumns, {"FolderAccountNumber","RunKey","FolderAccountMismatch","ConfigFingerprint"}}),
-    Final = Table.ReorderColumns(WithConfigFingerprint, FinalColumns, MissingField.UseNull)
+    WithAccountKey = Table.AddColumn(WithConfigFingerprint, "AccountKey", each [VpsId] & "|" & [AccountNumber], type text),
+    FinalColumns = List.Combine({ExpectedColumns, {"VpsId","VpsName","FolderAccountNumber","AccountKey","RunKey","FolderAccountMismatch","ConfigFingerprint"}}),
+    Final = Table.ReorderColumns(WithAccountKey, FinalColumns, MissingField.UseNull)
 in
     Final

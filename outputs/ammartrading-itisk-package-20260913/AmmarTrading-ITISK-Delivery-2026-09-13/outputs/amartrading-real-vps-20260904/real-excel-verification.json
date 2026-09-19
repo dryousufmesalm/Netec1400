@@ -1,0 +1,55 @@
+﻿{
+    "Passed":  true,
+    "Error":  null,
+    "Snapshots":  [
+                      "01-root-setup.png",
+                      "02-real-baskets.png",
+                      "03-real-sync-status.png",
+                      "04-verification-results.png"
+                  ],
+    "Accounts":  [
+                     {
+                         "ExcelRows":  323,
+                         "CsvRows":  323,
+                         "Login":  "892525830",
+                         "Match":  true,
+                         "ExcelClosePL":  -2127.49,
+                         "CsvClosePL":  -2127.49
+                     },
+                     {
+                         "ExcelRows":  327,
+                         "CsvRows":  327,
+                         "Login":  "892525831",
+                         "Match":  true,
+                         "ExcelClosePL":  794.31,
+                         "CsvClosePL":  794.31
+                     },
+                     {
+                         "ExcelRows":  261,
+                         "CsvRows":  261,
+                         "Login":  "892525833",
+                         "Match":  true,
+                         "ExcelClosePL":  -3328.87,
+                         "CsvClosePL":  -3328.87
+                     },
+                     {
+                         "ExcelRows":  151,
+                         "CsvRows":  151,
+                         "Login":  "892525834",
+                         "Match":  true,
+                         "ExcelClosePL":  223.81,
+                         "CsvClosePL":  223.81
+                     }
+                 ],
+    "ExcelVersion":  "16.0",
+    "ExcelBuild":  20326,
+    "SourceHost":  "fxut8768197",
+    "SourceSnapshotUtc":  "2026-09-04T21:47:16.2806658Z",
+    "Root":  "C:\\Users\\Dryou\\OneDrive",
+    "Workbook":  "C:\\CodexWorker\\amartrading-real-vps-20260904\\AmarTrading_REAL_VPS.xlsx",
+    "BasketRows":  1062,
+    "StatusRows":  4,
+    "FilesVerified":  8,
+    "RepeatedRefreshPassed":  true,
+    "VerifiedUtc":  "2026-09-04T21:56:14.6682327Z"
+}

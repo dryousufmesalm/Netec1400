@@ -1,0 +1,47 @@
+﻿{
+    "Passed":  true,
+    "Workbook":  "C:/CodexWorker/amartrading-excel-20260904/AmarTrading_Excel_Master_2026-09-04.xlsx",
+    "Queries":  [
+                    "AmarTrading_Baskets",
+                    "AmarTrading_SyncStatus"
+                ],
+    "Tables":  [
+                   {
+                       "Sheet":  "Sync Status",
+                       "Name":  "SyncStatusTable",
+                       "Columns":  12,
+                       "Rows":  4,
+                       "SourceType":  3,
+                       "Command":  "SELECT * FROM [AmarTrading_SyncStatus]",
+                       "Connection":  "OLEDB;Provider=Microsoft.Mashup.OleDb.1;Data Source=$Workbook$;Location=AmarTrading_SyncStatus;Extended Properties=\"\""
+                   },
+                   {
+                       "Sheet":  "Manual Fields",
+                       "Name":  "ManualFieldsTable",
+                       "Columns":  8,
+                       "Rows":  100,
+                       "SourceType":  1
+                   },
+                   {
+                       "Sheet":  "Basket Data",
+                       "Name":  "BasketDataTable",
+                       "Columns":  75,
+                       "Rows":  4,
+                       "SourceType":  3,
+                       "Command":  "SELECT * FROM [AmarTrading_Baskets]",
+                       "Connection":  "OLEDB;Provider=Microsoft.Mashup.OleDb.1;Data Source=$Workbook$;Location=AmarTrading_Baskets;Extended Properties=\"\""
+                   }
+               ],
+    "Error":  null,
+    "ExcelVersion":  "16.0",
+    "ExcelBuild":  20326,
+    "ConnectionCount":  2,
+    "InitialRows":  {
+                        "Baskets":  4,
+                        "Status":  4
+                    },
+    "RefreshAllRows":  {
+                           "Baskets":  8,
+                           "Status":  4
+                       }
+}

@@ -74,6 +74,7 @@ try {
     Assert-True -Condition ($setupModuleText -notmatch '\[IO\.File\]::Move\(\$temporary,\$canonicalDestination\)') -Message 'Cloud Files compatibility must not fall back to an unheld pathname move.'
     Assert-True -Condition ($setupModuleText -match 'Invoke-AmmarTradingCanonicalPublicationOperation') -Message 'Publication must keep the immediate destination-directory identity held without locking Cloud Files ancestors.'
     Assert-True -Condition ($setupModuleText -match '(?s)Assert-AmmarTradingHeldPathLocksUnchanged.+Invoke-AmmarTradingHeldFileRenameWithRetry') -Message 'Publication must revalidate the held destination directory immediately before its atomic rename.'
+    Assert-True -Condition ($setupModuleText -notmatch 'The selected OneDrive root is not a safe local folder') -Message 'Destination-folder resolution must not reject a Cloud Files OneDrive root solely because Get-Item reports ReparsePoint.'
     $renameRetryAttempts = & $setupModule {
         $script:AmmarTradingCloudFilesRenameRetryAttempts = 0
         $script:AmmarTradingHeldFileRenameHook = {
@@ -530,6 +531,8 @@ try {
     }
 
     & $setCloudFilesTag $trustedRoot ([Convert]::ToUInt32('9000701A',16))
+    $resolvedDestination = Resolve-AmmarTradingDestinationFolder -OneDriveRoot $trustedRoot -DestinationFolder (Join-Path $trustedRoot 'AmmarTrading')
+    Assert-True -Condition ($resolvedDestination -ceq [IO.Path]::GetFullPath((Join-Path $trustedRoot 'AmmarTrading'))) -Message 'A Cloud Files OneDrive root must still accept a destination folder beneath that root.'
     & $setCloudFilesTag $containedDirectory ([Convert]::ToUInt32('9000701A',16))
     $containedPath = Assert-AmmarTradingTrustedDestinationPath -OneDriveRoot $trustedRoot -Path (Join-Path $containedDirectory 'Baskets.csv') -Description 'Contained Cloud Files destination'
     Assert-True -Condition ($containedPath -ceq [IO.Path]::GetFullPath((Join-Path $containedDirectory 'Baskets.csv'))) -Message 'A contained Cloud Files descendant must be accepted.'

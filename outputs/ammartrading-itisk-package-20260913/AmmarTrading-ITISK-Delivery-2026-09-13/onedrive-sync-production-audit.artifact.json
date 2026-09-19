@@ -1,0 +1,284 @@
+{
+  "surface": "report",
+  "manifest": {
+    "version": 1,
+    "surface": "report",
+    "title": "OneDrive CSV Sync Production Readiness Audit",
+    "description": "Static production-readiness, data-quality, and security review of the MT4 to OneDrive to Excel telemetry pipeline.",
+    "generatedAt": "2026-08-20T14:05:07Z",
+    "blocks": [
+      {
+        "id": "report-title",
+        "type": "markdown",
+        "body": "# OneDrive CSV Sync Production Readiness Audit",
+        "layout": "full"
+      },
+      {
+        "id": "technical-summary",
+        "type": "markdown",
+        "body": "## Verdict: not ready for unattended production\n\nThe 71-column schema is internally aligned across the MQL4 writer, supplied fixture, and Power Query projection, and the sample basket passes the available cross-field checks. However, three blocking behaviors can produce a failed or stale production feed without an actionable task failure: a header-only reset cannot replace old dashboard data, the documented relative config path is stored unchanged in the scheduled task, and per-account errors still end with a successful process status.\n\nFour additional high-priority gaps weaken file consistency, validation, concurrency safety, and analytical grouping. The scoped security review found no validated attacker-to-sensitive-sink vulnerability under the documented trusted-operator and limited-user assumptions; the go/no-go decision is driven by reliability and data integrity, not a confirmed security exploit.",
+        "layout": "full"
+      },
+      {
+        "id": "finding-distribution-intro",
+        "type": "markdown",
+        "body": "## Three blockers must be closed before go-live\n\nThe review identified 11 production gaps: 3 blockers, 4 high-priority integrity risks, and 4 medium-priority operational gaps. The chart is a triage summary; the source-backed finding sections that follow form the release checklist.",
+        "layout": "full"
+      },
+      {
+        "id": "finding-distribution-chart",
+        "type": "chart",
+        "chartId": "severity-counts",
+        "layout": "full"
+      },
+      {
+        "id": "findings-table-intro",
+        "type": "markdown",
+        "body": "## Blockers can leave the feed stale while the task appears healthy\n\n1. **Header-only reset leaves stale production data.** `Sync-BasketsToOneDrive.ps1:39-46` requires a first basket row even though a new EA run initially contains only the header. The old OneDrive file therefore remains visible until another basket closes. Accept an exact schema-v3 header-only file using the configured expected login and atomically publish it as an empty current snapshot.\n\n2. **The scheduled task can store an unusable relative config path.** `Install-BasketsSyncTask.ps1:11-18` preserves `ConfigPath`, while the setup guide installs with `.\\accounts.csv`. Resolve and validate absolute script/config paths and remove task-time working-directory dependence.\n\n3. **Enabled-account failures still report process success.** `Sync-BasketsToOneDrive.ps1:141-165` converts failures to result rows and never returns a nonzero process status. Aggregate outcomes, emit a machine-readable summary, and fail the task whenever an enabled account is not synchronized.",
+        "layout": "full"
+      },
+      {
+        "id": "high-priority-findings",
+        "type": "markdown",
+        "body": "## Four high-priority gaps threaten integrity and analytical identity\n\n4. **Copy consistency and final publication are not atomic.** The post-copy check at `Sync-BasketsToOneDrive.ps1:116-135` takes a new zero-second snapshot instead of comparing pre-copy and post-copy state; the live destination is overwritten with `File.Copy`. Compare source metadata or a digest across the copy, validate the temporary file, then atomically replace the destination.\n\n5. **CSV validation covers only four header names and the first row.** The validator at lines 29-46 accepts malformed trailing content; the test at `Test-MoneyMachineCsvSync.ps1:33-36` explicitly appends a non-CSV comment and expects success. Validate every row, schema/order, version, field count, account, candidate key, types, enums, and duplicates.\n\n6. **Daily and logon tasks can overlap.** The installer creates two independent tasks, while one non-atomic state file and destination are shared. Add a cross-process mutex and atomically replace success state.\n\n7. **`ConfigFingerprint` omits 12 of 37 inputs.** The Power Query fingerprint excludes `FixedLots`, five detailed regime settings, the trading-days enable flag, and Monday-Friday flags. Include all 37 fields in a documented order with culture-invariant formatting.",
+        "layout": "full"
+      },
+      {
+        "id": "medium-priority-findings",
+        "type": "markdown",
+        "body": "## Operational hardening and deployment ownership are still missing\n\n8. **Success confirms only a local copy.** OneDrive upload and Excel freshness are not verified; logging has no rotation, heartbeat, or alert. Define a freshness SLO and monitor per-account timestamps, row counts, and end-to-end delivery.\n\n9. **Excel setup and refresh are manual.** The workbook contains no embedded external connection; the guide requires pasting M code and using Refresh All. Accept this as a documented manual control or ship a prewired query and refresh procedure.\n\n10. **The installer assumes `$PSHOME\\powershell.exe`.** It does not verify that executable or the ScheduledTasks cmdlets. Declare the supported runtime, resolve the executable, and fail installation when prerequisites are absent.\n\n11. **Upstream text fields are not CSV-escaped.** `AmmarTradingGoldEA V3.mq4:1620-1681` concatenates broker and symbol text directly. Escape commas, quotes, and newlines and add adversarial fixtures.",
+        "layout": "full"
+      },
+      {
+        "id": "scope-definitions",
+        "type": "markdown",
+        "body": "## Scope and quality definitions\n\n**Pipeline reviewed:** MT4 schema-v3 writer → `Sync-BasketsToOneDrive.ps1` → local OneDrive folder → `MoneyMachine_Baskets.m` → supplied Excel workbook.\n\n**Intended grain:** one row per closed basket. The candidate analytical key is `AccountNumber + RunID + BasketID`.\n\n**Production-ready:** an unattended run must publish a coherent current snapshot, make failures observable through a nonzero task result and durable diagnostics, prevent overlapping writers, preserve analytical identity, and pass a Windows/OneDrive/Excel acceptance matrix.\n\n**Evidence baseline:** current repository state on 20 August 2026, one 71-column schema-v3 fixture row, all four files in the automation folder, the MQL4 telemetry writer, its setup guide, sync tests, and workbook package structure.",
+        "layout": "full"
+      },
+      {
+        "id": "methodology",
+        "type": "markdown",
+        "body": "## Static and reproducible checks agree on the core schema\n\nThe audit fully reviewed the four automation files and traced the data path into the MQL4 writer, tests, setup documentation, and workbook. Reproducible checks compared column names and order, required-value completeness, schema version, candidate key, timestamps versus duration, trade date, and controlled enum values. The fixture, writer, and Power Query projection each contain the same 71 columns in the same order; the single sample row passed every available cross-field check.\n\nThe production findings came from control-flow and failure-path inspection: configuration resolution, task arguments and principal, source stability snapshots, temporary/final copy behavior, CSV parse coverage, state persistence, cross-task concurrency, logging, and Power Query transformations.",
+        "layout": "full"
+      },
+      {
+        "id": "limitations",
+        "type": "markdown",
+        "body": "## Runtime confidence is intentionally bounded\n\nPowerShell is unavailable in this Linux audit environment, so the existing PowerShell tests and Windows Task Scheduler behavior could not be executed here. Jupyter is also unavailable; the companion notebook is structurally valid and every code cell executed successfully in order through standard Python 3, but outputs are not embedded. Only one fixture row is present, and no real sync log, success-state history, live OneDrive account, or Excel refresh history was supplied.\n\nThese gaps do not weaken the three blocking static findings, but they prevent certification of file locking, task identity, OneDrive upload, locale-specific Power Query typing, legacy-v2 compatibility, and recovery after reboot or network interruption. The workbook archive is structurally valid but contains no embedded external connection; the documented Power Query setup and refresh remain manual.",
+        "layout": "full"
+      },
+      {
+        "id": "recommendations",
+        "type": "markdown",
+        "body": "## Required release work\n\n1. Resolve and persist absolute script/config paths during installation; validate the PowerShell executable, source file, OneDrive root, task principal, and working directory.\n2. Treat a valid header-only schema-v3 file as a current empty run and atomically replace the destination so old baskets disappear.\n3. Aggregate per-account outcomes and exit nonzero whenever an enabled account is not synchronized; emit a bounded per-run summary suitable for Task Scheduler monitoring.\n4. Compare source metadata or a digest captured before and after the temporary copy, validate the copied snapshot fully, and publish with an atomic same-volume replace.\n5. Parse every row and enforce exact/approved schema, field count, schema version, non-empty candidate key, allowed values, uniform account number, and duplicate-key rules.\n6. Add a cross-process lock and atomically replace success state; ensure the daily and logon tasks cannot overlap.\n7. Build `ConfigFingerprint` from all 37 configuration fields using deterministic formatting.\n8. Add log rotation, freshness/heartbeat monitoring, and an operator alert for local copy failures or delayed OneDrive delivery.\n9. Escape CSV text fields in the MQL4 writer and add tests for commas, quotes, and newlines.\n10. Pass the target-VPS acceptance matrix before enabling unattended runs.",
+        "layout": "full"
+      },
+      {
+        "id": "further-questions",
+        "type": "markdown",
+        "body": "## Acceptance questions before production\n\n- Must the dashboard show zero baskets immediately after a run reset, before the first basket closes? The current behavior leaves the previous run visible.\n- Is PowerShell 5.1 the required runtime, or must PowerShell 7 also be supported?\n- What maximum freshness lag is acceptable from MT4 close to OneDrive upload and Excel visibility?\n- Is legacy schema-v2 compatibility still a production requirement, and on which Excel locales must the query run?\n- Who receives an alert when a scheduled copy or cloud upload fails?",
+        "layout": "full"
+      }
+    ],
+    "charts": [
+      {
+        "id": "severity-counts",
+        "title": "Production findings by priority",
+        "subtitle": "11 source-backed gaps; all three blockers are release gates",
+        "intent": "comparison",
+        "question": "How many findings fall into each remediation priority?",
+        "rationale": "A categorical bar chart makes the release-gate concentration immediately visible while the following finding sections preserve exact evidence.",
+        "type": "bar",
+        "dataset": "severity_counts",
+        "sourceId": "severity-query",
+        "encodings": {
+          "x": {
+            "field": "priority",
+            "type": "ordinal",
+            "label": "Priority"
+          },
+          "y": {
+            "field": "finding_count",
+            "type": "quantitative",
+            "aggregate": "none",
+            "format": "number",
+            "label": "Findings"
+          },
+          "tooltip": [
+            {
+              "field": "release_meaning",
+              "type": "text",
+              "label": "Release meaning"
+            }
+          ]
+        },
+        "valueFormat": "number",
+        "layout": "full",
+        "labels": {
+          "values": "auto"
+        },
+        "palette": {
+          "kind": "sequential",
+          "name": "orange"
+        },
+        "settings": {
+          "orientation": "vertical",
+          "sort": "custom",
+          "showValues": true
+        },
+        "surface": {
+          "surface": "card",
+          "showControls": false,
+          "viewMode": "visualization"
+        }
+      }
+    ],
+    "tables": [],
+    "sources": [
+      {
+        "id": "severity-query",
+        "label": "Production findings grouped by remediation priority",
+        "path": "audit/onedrive-sync-production-findings.csv",
+        "query": {
+          "sql": "SELECT\n  priority,\n  COUNT(*) AS finding_count,\n  CASE priority\n    WHEN 'Blocker' THEN 'Must fix before unattended production'\n    WHEN 'High' THEN 'Material integrity or analytical risk'\n    ELSE 'Operational hardening or acceptance gap'\n  END AS release_meaning\nFROM read_csv_auto(\n  'audit/onedrive-sync-production-findings.csv',\n  header = true\n)\nGROUP BY priority\nORDER BY CASE priority\n  WHEN 'Blocker' THEN 1\n  WHEN 'High' THEN 2\n  ELSE 3\nEND;",
+          "description": "Count distinct reviewed findings by production remediation priority.",
+          "engine": "DuckDB",
+          "executed_at": "2026-08-20T14:05:07Z",
+          "language": "sql",
+          "filters": ["All 11 source-backed production findings"],
+          "metric_definitions": ["finding_count is the number of distinct reviewed gaps after grouping observations with the same root control and remediation."],
+          "tables_used": ["audit/onedrive-sync-production-findings.csv"]
+        }
+      }
+    ]
+  },
+  "snapshot": {
+    "version": 1,
+    "generatedAt": "2026-08-20T14:05:07Z",
+    "status": "ready",
+    "datasets": {
+      "severity_counts": [
+        {"priority": "Blocker", "finding_count": 3, "release_meaning": "Must fix before unattended production"},
+        {"priority": "High", "finding_count": 4, "release_meaning": "Material integrity or analytical risk"},
+        {"priority": "Medium", "finding_count": 4, "release_meaning": "Operational hardening or acceptance gap"}
+      ],
+      "production_findings": [
+        {
+          "rank": 1,
+          "priority": "Blocker",
+          "finding": "Header-only reset leaves stale production data",
+          "evidence": "Sync-BasketsToOneDrive.ps1:39-46 requires a first data row even though the EA creates a header immediately on a new run.",
+          "impact": "The old OneDrive Baskets.csv remains visible until the first new basket closes, so Excel can report a prior run as current.",
+          "required_fix": "Accept an exact schema-v3 header-only file using the configured expected login and atomically publish it as an empty current snapshot.",
+          "confidence": "High"
+        },
+        {
+          "rank": 2,
+          "priority": "Blocker",
+          "finding": "Scheduled tasks can store an unusable relative config path",
+          "evidence": "Install-BasketsSyncTask.ps1:11-18 quotes ConfigPath without resolving it; the setup guide installs with .\\accounts.csv.",
+          "impact": "The manual copy can pass during installation while the later scheduled task starts in another working directory and cannot find its configuration.",
+          "required_fix": "Resolve script and config to validated absolute paths and set or avoid reliance on the task working directory.",
+          "confidence": "High"
+        },
+        {
+          "rank": 3,
+          "priority": "Blocker",
+          "finding": "Enabled-account failures still report process success",
+          "evidence": "Sync-BasketsToOneDrive.ps1:141-165 converts failures into result rows and formats them; it does not throw or exit nonzero after an account error.",
+          "impact": "Task Scheduler can show a successful run when no current CSV was delivered, preventing reliable alerting and retry policy.",
+          "required_fix": "Return a nonzero exit code when any enabled account is Error or an integrity-related Skip, while preserving a machine-readable run summary.",
+          "confidence": "High"
+        },
+        {
+          "rank": 4,
+          "priority": "High",
+          "finding": "Copy consistency and final publication are not atomic",
+          "evidence": "Sync-BasketsToOneDrive.ps1:116-135 takes a fresh zero-second stability snapshot after copying instead of comparing pre-copy and post-copy metadata, then uses File.Copy to overwrite the live destination.",
+          "impact": "An MT4 append during the copy can produce an inconsistent snapshot, and OneDrive or Excel can observe a partially overwritten destination.",
+          "required_fix": "Capture and compare source metadata or digest across the copy, validate the temporary file, then use an atomic same-volume replace/move.",
+          "confidence": "High"
+        },
+        {
+          "rank": 5,
+          "priority": "High",
+          "finding": "CSV validation covers only four header names and the first row",
+          "evidence": "Sync-BasketsToOneDrive.ps1:29-46 does not validate all rows; Test-MoneyMachineCsvSync.ps1:33-36 appends a non-CSV comment line and still expects a successful copy.",
+          "impact": "Malformed rows, mixed accounts, wrong schema values, missing keys, or duplicate basket keys can enter the dashboard unnoticed.",
+          "required_fix": "Parse the complete copied file and enforce schema/order, field count, version, account consistency, key completeness/uniqueness, types, and controlled values.",
+          "confidence": "High"
+        },
+        {
+          "rank": 6,
+          "priority": "High",
+          "finding": "Daily and logon tasks can overlap and race on shared state",
+          "evidence": "Install-BasketsSyncTask.ps1:24-28 creates two independent tasks; Sync-BasketsToOneDrive.ps1:49-68 and 158 directly read/write one shared success-state file without a cross-process lock or atomic replace.",
+          "impact": "Concurrent runs can lose success markers, interleave logs, or race while publishing the same account destination.",
+          "required_fix": "Use a named mutex or lock file across both tasks and atomically replace state after a complete run.",
+          "confidence": "High"
+        },
+        {
+          "rank": 7,
+          "priority": "High",
+          "finding": "Configuration fingerprint omits 12 of 37 configuration inputs",
+          "evidence": "MoneyMachine_Baskets.m:20 includes 25 fields but omits FixedLots, five detailed regime settings, the trading-days enable flag, and Monday-Friday flags.",
+          "impact": "Runs with materially different trading configurations can receive the same fingerprint and be compared as if their setup were identical.",
+          "required_fix": "Build the fingerprint from all 37 configuration fields in a stable documented order with culture-invariant formatting.",
+          "confidence": "High"
+        },
+        {
+          "rank": 8,
+          "priority": "Medium",
+          "finding": "Success confirms only a local copy, not cloud delivery or report freshness",
+          "evidence": "Sync-BasketsToOneDrive.ps1:147-150 marks success immediately after the local overwrite; logging at lines 13-19 has no rotation, heartbeat, cloud-state check, or alert output.",
+          "impact": "Paused, signed-out, quota-full, or offline OneDrive can leave the cloud and Excel stale while local runs continue to say Success; sync.log grows without bound.",
+          "required_fix": "Define a freshness SLO, emit per-account source/destination timestamps and row counts, rotate logs, and monitor an end-to-end heartbeat or OneDrive sync state.",
+          "confidence": "High"
+        },
+        {
+          "rank": 9,
+          "priority": "Medium",
+          "finding": "Excel delivery is a manual setup and refresh step",
+          "evidence": "The workbook package contains no external connection; CSV_ONEDRIVE_EXCEL_SETUP.md:49-57 instructs the operator to paste M code and use Refresh All.",
+          "impact": "The current deliverable is not an end-to-end automated reporting pipeline and can remain stale even when OneDrive is current.",
+          "required_fix": "Either document this explicitly as an accepted manual control or ship a prewired, tested query plus a defined refresh/ownership procedure.",
+          "confidence": "High"
+        },
+        {
+          "rank": 10,
+          "priority": "Medium",
+          "finding": "Installer assumes a Windows PowerShell executable without a runtime preflight",
+          "evidence": "Install-BasketsSyncTask.ps1:13 constructs $PSHOME\\powershell.exe and lines 17-18 register it without checking that the executable exists or the required ScheduledTasks cmdlets are available.",
+          "impact": "Installation from PowerShell 7 or an unexpected host can register a task whose executable path is invalid or unsupported.",
+          "required_fix": "Declare the supported runtime, resolve the executable with Get-Command or the current process path, and fail installation if prerequisites are missing.",
+          "confidence": "High"
+        },
+        {
+          "rank": 11,
+          "priority": "Medium",
+          "finding": "Upstream CSV text fields are not escaped",
+          "evidence": "AmmarTradingGoldEA V3.mq4:1620-1681 concatenates BrokerName, Symbol, and other text directly into a comma-separated line.",
+          "impact": "A comma, quote, or newline in a broker-provided text field can shift columns or corrupt a row before the sync validator sees it.",
+          "required_fix": "Use a tested CSV-escaping helper for every text field and add fixtures containing commas, quotes, and line breaks.",
+          "confidence": "Medium"
+        }
+      ]
+    }
+  },
+  "sources": [
+    {
+      "id": "severity-query",
+      "label": "Production findings grouped by remediation priority",
+      "path": "audit/onedrive-sync-production-findings.csv",
+      "query": {
+        "sql": "SELECT\n  priority,\n  COUNT(*) AS finding_count,\n  CASE priority\n    WHEN 'Blocker' THEN 'Must fix before unattended production'\n    WHEN 'High' THEN 'Material integrity or analytical risk'\n    ELSE 'Operational hardening or acceptance gap'\n  END AS release_meaning\nFROM read_csv_auto(\n  'audit/onedrive-sync-production-findings.csv',\n  header = true\n)\nGROUP BY priority\nORDER BY CASE priority\n  WHEN 'Blocker' THEN 1\n  WHEN 'High' THEN 2\n  ELSE 3\nEND;",
+        "description": "Count distinct reviewed findings by production remediation priority.",
+        "engine": "DuckDB",
+        "executed_at": "2026-08-20T14:05:07Z",
+        "language": "sql",
+        "filters": ["All 11 source-backed production findings"],
+        "tables_used": ["audit/onedrive-sync-production-findings.csv"]
+      }
+    }
+  ]
+}

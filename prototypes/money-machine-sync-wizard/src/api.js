@@ -3,6 +3,7 @@ const NATIVE_COMMAND_TIMEOUT_MS = Object.freeze({
   getSystemStatus: 60_000,
   discoverMt4Accounts: 60_000,
   browseForCsv: null,
+  browseForOneDriveFolder: null,
   getOneDriveRoots: 60_000,
   getConfiguredAccounts: 60_000,
   validateSelection: 150_000,
@@ -11,12 +12,13 @@ const NATIVE_COMMAND_TIMEOUT_MS = Object.freeze({
   openReportingFolder: 60_000,
   exportSupportReport: 180_000,
 });
-const HOST_UNAVAILABLE_MESSAGE = "The Windows host is unavailable. Close and reopen AmmarTrading Sync, then try again.";
-const MISSING_HOST_MESSAGE = "AmmarTrading Sync must be opened from the installed Windows app because the WebView2 host is unavailable.";
+const HOST_UNAVAILABLE_MESSAGE = "The Windows host is unavailable. Close and reopen AmarTrading Sync, then try again.";
+const MISSING_HOST_MESSAGE = "AmarTrading Sync must be opened from the installed Windows app because the WebView2 host is unavailable.";
 const nativeCommands = Object.freeze([
   "getSystemStatus",
   "discoverMt4Accounts",
   "browseForCsv",
+  "browseForOneDriveFolder",
   "getOneDriveRoots",
   "getConfiguredAccounts",
   "validateSelection",
@@ -121,6 +123,7 @@ export function createNativeWizardApi(webview, { timeoutMs, idFactory = createDe
     getSystemStatus: () => request("getSystemStatus", {}),
     discoverMt4Accounts: () => request("discoverMt4Accounts", {}),
     browseForCsv: () => request("browseForCsv", {}),
+    browseForOneDriveFolder: (payload) => request("browseForOneDriveFolder", payload),
     getOneDriveRoots: () => request("getOneDriveRoots", {}),
     getConfiguredAccounts: () => request("getConfiguredAccounts", {}),
     validateSelection: (payload) => request("validateSelection", payload),
@@ -131,39 +134,75 @@ export function createNativeWizardApi(webview, { timeoutMs, idFactory = createDe
   };
 }
 
-// This adapter is intentionally opt-in. It supports legacy browser tests only;
-// installed AmmarTrading Sync uses the WebView2 transport above.
-export function createWizardApi(fetchImpl) {
+export function createBrowserWizardApi(fetchImpl, { idFactory = createDefaultId } = {}) {
   if (typeof fetchImpl !== "function") throw new TypeError("A fetch implementation is required");
+  if (typeof idFactory !== "function") throw new TypeError("idFactory must be a function");
 
-  async function request(path, options = {}) {
-    const response = await fetchImpl(path, {
-      method: options.method ?? "GET",
-      credentials: "same-origin",
-      ...(options.body === undefined ? {} : {
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(options.body),
-      }),
-    });
-    let payload;
-    try {
-      payload = await response.json();
-    } catch {
-      payload = { ok: false, code: "InvalidResponse", message: "The setup service returned an unreadable response." };
+  async function request(command, payload = {}) {
+    const id = idFactory();
+    if (typeof id !== "string" || id.length === 0) {
+      throw new WizardApiError("The browser request ID is invalid.", { code: "InvalidRequestId" });
     }
-    if (!response.ok || payload?.ok === false) {
-      throw new WizardApiError(payload?.message ?? "Could not connect to the setup service.", {
+
+    const controller = typeof AbortController === "function" ? new AbortController() : null;
+    const commandTimeoutMs = NATIVE_COMMAND_TIMEOUT_MS[command];
+    const timeout = controller && commandTimeoutMs !== null && commandTimeoutMs !== undefined
+      ? setTimeout(() => controller.abort(), commandTimeoutMs)
+      : null;
+    let response;
+    try {
+      response = await fetchImpl("/api/command", {
+        method: "POST",
+        credentials: "same-origin",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ version: BRIDGE_VERSION, id, command, payload }),
+        ...(controller ? { signal: controller.signal } : {}),
+      });
+    } catch (error) {
+      if (error?.name === "AbortError") {
+        throw new WizardApiError("The local setup service did not respond in time.", { code: "RequestTimedOut" });
+      }
+      throw new WizardApiError("The local Windows setup service is unavailable.", { code: "HostUnavailable" });
+    } finally {
+      if (timeout !== null) clearTimeout(timeout);
+    }
+    let reply;
+    try {
+      reply = await response.json();
+    } catch {
+      throw new WizardApiError("The local setup service returned an unreadable response.", {
         status: response.status,
-        code: payload?.code ?? "RequestFailed",
+        code: "InvalidResponse",
       });
     }
-    return payload;
+
+    if (reply?.version !== BRIDGE_VERSION || reply?.id !== id || typeof reply?.ok !== "boolean" || typeof reply?.code !== "string" || reply.code.length === 0 || !Object.prototype.hasOwnProperty.call(reply, "data")) {
+      throw new WizardApiError("The local setup service returned an invalid response.", {
+        status: response.status,
+        code: "InvalidResponse",
+      });
+    }
+    if (!response.ok || !reply.ok) {
+      throw new WizardApiError(reply.message ?? "The local setup service could not complete that action.", {
+        status: response.status,
+        code: reply.code,
+      });
+    }
+    return reply.data;
   }
 
   return {
-    getDiscovery: () => request("/api/discovery"),
-    getAccounts: () => request("/api/accounts"),
-    runSetup: (setupRequest) => request("/api/setup", { method: "POST", body: setupRequest }),
+    getSystemStatus: () => request("getSystemStatus"),
+    discoverMt4Accounts: () => request("discoverMt4Accounts"),
+    browseForCsv: () => request("browseForCsv"),
+    browseForOneDriveFolder: (payload) => request("browseForOneDriveFolder", payload),
+    getOneDriveRoots: () => request("getOneDriveRoots"),
+    getConfiguredAccounts: () => request("getConfiguredAccounts"),
+    validateSelection: (payload) => request("validateSelection", payload),
+    applySetup: (payload) => request("applySetup", payload),
+    runSyncNow: (payload) => request("runSyncNow", payload),
+    openReportingFolder: (payload) => request("openReportingFolder", payload),
+    exportSupportReport: () => request("exportSupportReport"),
   };
 }
 
@@ -178,8 +217,17 @@ function getBrowserWebView() {
   return webview && typeof webview.postMessage === "function" && typeof webview.addEventListener === "function" ? webview : null;
 }
 
+function isLocalBrowserHost() {
+  const location = globalThis.window?.location;
+  return location && ["127.0.0.1", "localhost", "[::1]"].includes(location.hostname);
+}
+
 export function createProductionWizardApi(webview = getBrowserWebView()) {
-  return webview ? createNativeWizardApi(webview) : createMissingHostApi();
+  if (webview) return createNativeWizardApi(webview);
+  if (isLocalBrowserHost() && typeof globalThis.window?.fetch === "function") {
+    return createBrowserWizardApi(globalThis.window.fetch.bind(globalThis.window));
+  }
+  return createMissingHostApi();
 }
 
 export const wizardApi = createProductionWizardApi();

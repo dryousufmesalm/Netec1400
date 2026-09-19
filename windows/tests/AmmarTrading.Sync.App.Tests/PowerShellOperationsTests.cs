@@ -360,6 +360,42 @@ public sealed class PowerShellOperationsTests : IDisposable
     }
 
     [Fact]
+    public async Task ValidateSelection_WhenChildReturnsSafeFailureJson_SurfacesThatMessage()
+    {
+        var runner = FakeProcessRunner.Returns(new ProcessResult(
+            1,
+            """{"Ok":false,"Code":"OperationFailed","Message":"The selected OneDrive root is not a safe local folder."}""",
+            string.Empty));
+        var operations = CreateOperations(runner);
+        using var payload = JsonDocument.Parse("{\"accounts\":[]}");
+
+        var error = await Assert.ThrowsAsync<PowerShellOperationException>(
+            () => operations.ValidateSelectionAsync(payload.RootElement, default));
+
+        Assert.Equal("OperationFailed", error.Code);
+        Assert.Equal("The selected OneDrive root is not a safe local folder.", error.Message);
+    }
+
+    [Fact]
+    public async Task ValidateSelection_WhenFailureJsonContainsAPath_ReturnsStableSafeError()
+    {
+        const string secretPath = @"C:\Users\someone\secret.csv";
+        var runner = FakeProcessRunner.Returns(new ProcessResult(
+            1,
+            $"{{\"Ok\":false,\"Code\":\"OperationFailed\",\"Message\":\"Missing file {secretPath}\"}}",
+            string.Empty));
+        var operations = CreateOperations(runner);
+        using var payload = JsonDocument.Parse("{\"accounts\":[]}");
+
+        var error = await Assert.ThrowsAsync<PowerShellOperationException>(
+            () => operations.ValidateSelectionAsync(payload.RootElement, default));
+
+        Assert.Equal("PowerShellFailed", error.Code);
+        Assert.Equal("The operation could not be completed.", error.Message);
+        Assert.DoesNotContain(secretPath, error.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public async Task GetSystemStatus_WhenProcessCaptureFails_TerminatesAndReturnsStableSafeError()
     {
         const string secret = "credential=stream-capture-secret";

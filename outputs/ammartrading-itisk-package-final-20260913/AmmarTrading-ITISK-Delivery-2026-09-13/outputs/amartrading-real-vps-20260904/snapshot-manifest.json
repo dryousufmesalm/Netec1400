@@ -1,0 +1,77 @@
+﻿{
+    "SourceRoot":  "C:\\Users\\Administrator\\OneDrive\\amartrading",
+    "SnapshotUtc":  "2026-09-04T21:47:16.2806658Z",
+    "Host":  "fxut8768197",
+    "Files":  [
+                  {
+                      "SHA256":  "94C4355FA98F292185ECD6242B7D3C9691774C4B0105F0EBCE72E888BEEB6A7E",
+                      "Bytes":  136872,
+                      "RelativePath":  "amartrading\\Account_892525830\\Baskets.csv"
+                  },
+                  {
+                      "SHA256":  "D276DB4C0CD955676F61D56E31948D9085BF25919D72790C805C4133FD4227FC",
+                      "Bytes":  422,
+                      "RelativePath":  "amartrading\\Account_892525830\\SyncStatus.json"
+                  },
+                  {
+                      "SHA256":  "D4F799412F711558597F0AAC65E95C475A5D950EC5B0C57D997DFC21DFAA23C7",
+                      "Bytes":  137824,
+                      "RelativePath":  "amartrading\\Account_892525831\\Baskets.csv"
+                  },
+                  {
+                      "SHA256":  "20B1B0D1C8919DE85570436B784A4DE5BCD0FEB9C679B99C47B262A97865658B",
+                      "Bytes":  422,
+                      "RelativePath":  "amartrading\\Account_892525831\\SyncStatus.json"
+                  },
+                  {
+                      "SHA256":  "31FB85E6FF35772E2C1C9FAAB1A1ADC41D6C67745775248D167EBB4BA4C244A4",
+                      "Bytes":  110273,
+                      "RelativePath":  "amartrading\\Account_892525833\\Baskets.csv"
+                  },
+                  {
+                      "SHA256":  "B3E6B05A2412681109562ECCD25817D1204246BB9DBBDD95346C55886DE0B33B",
+                      "Bytes":  422,
+                      "RelativePath":  "amartrading\\Account_892525833\\SyncStatus.json"
+                  },
+                  {
+                      "SHA256":  "EF891AC770EEC41F1FF80E6AD96E203DF58A8FD0C160B7CCACF373C0D4851D9D",
+                      "Bytes":  64329,
+                      "RelativePath":  "amartrading\\Account_892525834\\Baskets.csv"
+                  },
+                  {
+                      "SHA256":  "922157399937133371C8553868BD600F6B3A5C0E6AAFDD83F30BC2057CB1DE78",
+                      "Bytes":  422,
+                      "RelativePath":  "amartrading\\Account_892525834\\SyncStatus.json"
+                  }
+              ],
+    "Accounts":  [
+                     {
+                         "Status":  "Success",
+                         "PublishedUtc":  "2026-09-04T21:43:07.4866953Z",
+                         "Rows":  323,
+                         "Login":  "892525830",
+                         "ClosePLSum":  -2127.4899999999989
+                     },
+                     {
+                         "Status":  "Success",
+                         "PublishedUtc":  "2026-09-04T21:43:22.9864967Z",
+                         "Rows":  327,
+                         "Login":  "892525831",
+                         "ClosePLSum":  794.3099999999996
+                     },
+                     {
+                         "Status":  "Success",
+                         "PublishedUtc":  "2026-09-04T21:43:12.8147539Z",
+                         "Rows":  261,
+                         "Login":  "892525833",
+                         "ClosePLSum":  -3328.87
+                     },
+                     {
+                         "Status":  "Success",
+                         "PublishedUtc":  "2026-09-04T21:43:17.1896982Z",
+                         "Rows":  151,
+                         "Login":  "892525834",
+                         "ClosePLSum":  223.81
+                     }
+                 ]
+}

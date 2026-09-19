@@ -10,7 +10,7 @@ const projectRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "
 const appSource = await readFile(path.join(projectRoot, "src", "App.jsx"), "utf8");
 const deployedAppRoot = path.resolve(projectRoot, "..", "..", "automation", "MoneyMachineCsvSync", "WizardApp");
 const deployedIndex = await readFile(path.join(deployedAppRoot, "index.html"), "utf8");
-const deployedBundleName = deployedIndex.match(/src="\/assets\/([^"?]+\.js)"/)?.[1];
+const deployedBundleName = deployedIndex.match(/src="(?:\.\/)?assets\/([^"?]+\.js)"/)?.[1];
 if (!deployedBundleName) throw new Error("Deployed WizardApp index does not reference a JavaScript bundle.");
 const deployedBundle = await readFile(path.join(deployedAppRoot, "assets", deployedBundleName), "utf8");
 const deployedLauncher = await readFile(path.join(path.dirname(deployedAppRoot), "Start-MoneyMachineSyncWizard.cmd"), "utf8");
@@ -56,9 +56,10 @@ export const wizardApi = {
     configuredAccounts = payload.accounts.map((account) => ({
       AccountNumber: account.expectedMT4Login,
       BrokerName: discoveredAccounts.find((item) => item.DiscoveryId === account.discoveryId).BrokerName,
-      Destination: payload.oneDriveRoot + "\\\\AmmarTrading\\\\Account_" + account.expectedMT4Login + "\\\\Baskets.csv",
+      Destination: payload.oneDriveRoot + "\\\\AmarTrading\\\\Account_" + account.expectedMT4Login + "\\\\Baskets.csv",
       LocalPublished: true,
       TaskState: "Registered",
+      Status: "Success",
     }));
     return {
       Status: "Success", Accounts: configuredAccounts, CloudDeliveryVerified: false,
@@ -75,24 +76,24 @@ export const wizardApi = {
 };
 `;
 
-test("the UI source uses the canonical AmmarTrading product and destination names", () => {
-  assert.match(appSource, /AmmarTrading Sync/);
-  assert.doesNotMatch(appSource, /Money Machine|OneDrive \/ AmarTrading/);
-  assert.match(appSource, /OneDrive \/ AmmarTrading/);
+test("the UI source uses the canonical AmarTrading product and destination names", () => {
+  assert.match(appSource, /AmarTrading Sync/);
+  assert.doesNotMatch(appSource, /Money Machine|OneDrive \/ AmmarTrading/);
+  assert.match(appSource, /default is amartrading/);
   assert.doesNotMatch(appSource, /Start-MoneyMachineSyncWizard\.cmd/);
   assert.match(appSource, /className="setup-live-region" aria-live="polite" aria-atomic="true"/);
 });
 
 test("the deployed WizardApp contains only canonical product-facing naming", () => {
-  assert.match(deployedIndex, /AmmarTrading Sync/);
-  assert.match(deployedBundle, /AmmarTrading Sync/);
-  assert.match(deployedBundle, /OneDrive \/ AmmarTrading/);
-  assert.doesNotMatch(`${deployedIndex}\n${deployedBundle}`, /Money Machine|AmarTrading|Start-MoneyMachineSyncWizard\.cmd/);
-  assert.match(deployedLauncher, /AmmarTrading Sync/);
-  assert.doesNotMatch(deployedLauncher, /Money Machine|AmarTrading/);
+  assert.match(deployedIndex, /AmarTrading Sync/);
+  assert.match(deployedBundle, /AmarTrading Sync/);
+  assert.match(deployedBundle, /OneDrive/);
+  assert.doesNotMatch(`${deployedIndex}\n${deployedBundle}`, /Money Machine|AmmarTrading|Start-MoneyMachineSyncWizard\.cmd/);
+  assert.match(deployedLauncher, /AmarTrading Sync/);
+  assert.doesNotMatch(deployedLauncher, /Money Machine|AmmarTrading/);
 });
 
-test("the complete wizard renders in English from left to right", async (t) => {
+test("first launch automatically configures ready accounts in English", async (t) => {
   const server = await createServer({
     root: projectRoot,
     logLevel: "silent",
@@ -104,9 +105,8 @@ test("the complete wizard renders in English from left to right", async (t) => {
         if (id.endsWith("/src/App.jsx")) return code.replace('from "./api.js"', 'from "virtual:english-localization-api"');
         return null;
       },
-      resolveId(source, importer) {
-        if (source === "virtual:english-localization-api") return testApiModuleId;
-        return null;
+      resolveId(source) {
+        return source === "virtual:english-localization-api" ? testApiModuleId : null;
       },
       load(id) {
         return id === testApiModuleId ? testApiModule : null;
@@ -126,45 +126,11 @@ test("the complete wizard renders in English from left to right", async (t) => {
   const page = await browser.newPage();
   const address = server.httpServer.address();
   await page.goto(`http://127.0.0.1:${address.port}/`, { waitUntil: "networkidle" });
-
-  const assertEnglishScreen = async () => {
-    const bodyText = await page.locator("body").innerText();
-    assert.doesNotMatch(bodyText, arabicText);
-  };
-
   assert.equal(await page.locator("html").getAttribute("lang"), "en");
   assert.equal(await page.locator("html").getAttribute("dir"), "ltr");
   assert.equal(await page.locator(".app-shell").getAttribute("dir"), "ltr");
-  assert.equal(await page.title(), "AmmarTrading Sync — Report Sync Setup");
-  await page.getByRole("heading", { name: "Check this VPS" }).waitFor();
-  await assertEnglishScreen();
-
-  await page.getByRole("button", { name: "Find MT4 accounts" }).click();
-  await page.getByRole("heading", { name: "Select MT4 accounts" }).waitFor();
-  await page.locator(".account-card").filter({ hasText: "7788451" }).click();
-  await page.locator(".account-card").filter({ hasText: "9912044" }).click();
-  assert.equal(await page.locator(".account-card.disabled input").isDisabled(), true);
-  await assertEnglishScreen();
-
-  await page.getByRole("button", { name: "Choose OneDrive" }).click();
-  await page.getByRole("heading", { name: "Choose the OneDrive folder" }).waitFor();
-  await page.getByText("OneDrive / AmmarTrading / Account_7788451 / Baskets.csv", { exact: true }).waitFor();
-  await assertEnglishScreen();
-
-  await page.getByRole("button", { name: "Test selected accounts" }).click();
-  await page.getByRole("heading", { name: "Selections are ready" }).waitFor();
-  await assertEnglishScreen();
-
-  await page.getByRole("button", { name: "Apply setup and run test sync" }).click();
-  const setupLiveRegion = page.locator(".setup-live-region");
-  await setupLiveRegion.getByText("Applying setup and publishing local CSV files…", { exact: true }).waitFor();
-  assert.match(await setupLiveRegion.innerText(), /Running/);
-  await page.getByRole("heading", { name: "Local synchronization is ready" }).waitFor();
-  assert.equal(await page.getByText("Published locally", { exact: true }).count(), 2);
-  await page.getByText("Publication is local only.", { exact: true }).waitFor();
-  await assertEnglishScreen();
-
-  await page.getByRole("button", { name: "View Status", exact: true }).click();
+  assert.equal(await page.title(), "AmarTrading Sync — Report Sync Setup");
   await page.getByRole("heading", { name: "MT4 account monitoring" }).waitFor();
-  await assertEnglishScreen();
+  assert.equal(await page.getByText("Published locally", { exact: true }).count(), 2);
+  assert.doesNotMatch(await page.locator("body").innerText(), arabicText);
 });

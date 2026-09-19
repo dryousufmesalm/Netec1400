@@ -1,0 +1,125 @@
+GOLD XAUUSD GRID / RECOVERY EA
+FULL FUNCTIONAL REQUIREMENTS SPECIFICATION
+
+PRIORITY:
+Survivability > Control > Stability > Profit
+
+
+1. PROJECT GOAL
+Develop a NEW Expert Advisor from scratch for MetaTrader 4 (MT4), trading XAUUSD only.
+The EA must behave as close as possible to an existing commercial gold grid / recovery EA that the client is currently using, based on functional behavior only, with additional stability and risk-control improvements.
+
+The goal is NOT profit optimization.
+The goal is long-term survivability, controlled drawdown, and predictable behavior.
+
+
+2. CORE PRINCIPLES (NON-NEGOTIABLE)
+- MT4 platform only
+- XAUUSD instrument only
+- Grid + recovery logic (not classic scalping)
+- Fixed lot sizing (no aggressive martingale)
+- Single-direction basket at a time
+- Basket-level management (not individual trade logic)
+- One active basket at a time
+- All behavior must be configurable via EA inputs
+- Full MQ4 source code + EX4 must be delivered
+- No access to existing EA source code is available
+
+
+3. GENERAL EA BEHAVIOR
+- EA opens an initial trade based on developer-designed logic
+- Once a basket is opened, all management is basket-based
+- Additional grid trades are opened when price moves against the basket
+- Grid trades are added according to configurable distance rules
+- The basket is closed as a whole when exit conditions are met
+- EA must behave defensively during abnormal market conditions
+
+
+4. GRID & RECOVERY LOGIC
+- Configurable grid distance (points / pips)
+- Support for fixed or dynamic grid spacing
+- Dynamic grid expansion allowed during stress conditions
+- Maximum grid depth must be enforced
+- Trade density must be controlled
+- Recovery logic must aim to close the entire basket at net profit
+- No uncontrolled martingale multiplication
+- Lot progression must be controlled and limited
+
+
+5. RISK & DRAWDOWN CONTROL (CRITICAL)
+- Maximum drawdown limits at:
+  - Basket level
+  - Account equity level
+- When limits are approached, EA must be able to:
+  - Pause opening new trades
+  - Slow down grid expansion
+  - Increase grid distances
+- Emergency exit mechanism must exist
+- Emergency exit must be controlled (not blind liquidation)
+- Margin protection is mandatory
+- EA must prevent margin call scenarios
+
+
+6. VOLATILITY & MARKET PROTECTION
+- Spread filter (block trading during abnormal spreads)
+- Volatility detection (ATR or equivalent)
+- Ability to:
+  - Block new basket creation
+  - Pause grid expansion during extreme volatility
+- Optional news/session filters (if implemented)
+
+
+7. EXIT LOGIC
+- Basket-level Take Profit
+- Optional trailing basket TP
+- Emergency close conditions
+- EA must recover cleanly after manual or emergency closure
+
+
+8. CONFIGURATION (INPUTS)
+All major logic must be configurable via inputs, including but not limited to:
+- Lot size
+- Grid distance
+- Maximum grid levels
+- Basket Take Profit
+- Drawdown limits
+- Spread filter parameters
+- Volatility filter parameters
+- Trading hours
+- Emergency exit parameters
+
+No hard-coded values.
+
+
+9. DEVELOPMENT PROCESS
+- EA design based strictly on this specification
+- EA implementation from scratch
+- Strategy Tester validation
+- Demo live testing
+- Iterative fixes
+- Final approval before any live usage
+
+
+10. DELIVERABLES
+- Full MQ4 source code
+- Compiled EX4 file
+- Clean, readable, commented code
+- Short explanation of implemented logic
+
+
+11. RESPONSIBILITY SPLIT
+Developer responsibilities:
+- Translate this functional specification into trading logic
+- Design the full strategy logic
+- Implement and deliver the EA
+- Ensure stability and risk control
+
+Client responsibilities:
+- Provide functional feedback
+- Validate EA behavior during demo testing
+- Approve or reject changes
+
+
+FINAL STATEMENT:
+This specification defines WHAT the EA must do and what it must avoid.
+The developer is responsible for designing HOW it is implemented.

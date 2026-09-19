@@ -131,6 +131,7 @@ test("builds the exact multi-account setup payload from selected discovery recor
   assert.deepEqual(buildSetupPayload(state), {
     vpsName: "VPS Dubai 02",
     oneDriveRoot: "C:\\OneDrive - AmmarTrading",
+    destinationFolder: "C:\\OneDrive - AmmarTrading\\amartrading",
     accounts: [
       {
         discoveryId: "ready-1",
@@ -144,6 +145,17 @@ test("builds the exact multi-account setup payload from selected discovery recor
       },
     ],
   });
+});
+
+test("keeps a selected OneDrive destination folder in the setup payload", () => {
+  let state = reduceWizard(initialWizardState, {
+    type: "DISCOVERY_LOADED",
+    accounts: [readyOne],
+  });
+  state = reduceWizard(state, { type: "ACCOUNT_TOGGLED", discoveryId: "ready-1" });
+  state = reduceWizard(state, { type: "ROOTS_LOADED", roots: [{ Path: "C:\\OneDrive" }] });
+  state = reduceWizard(state, { type: "DESTINATION_FOLDER_SELECTED", destinationFolder: "C:\\OneDrive\\Reports" });
+  assert.equal(buildSetupPayload(state).destinationFolder, "C:\\OneDrive\\Reports");
 });
 
 test("uses stable screen enum values for the five setup screens and monitor", () => {
@@ -160,11 +172,11 @@ test("uses stable screen enum values for the five setup screens and monitor", ()
 test("configured account loading does not clear a fatal startup error", () => {
   const failed = reduceWizard(initialWizardState, {
     type: "ERROR_SET",
-    error: "AmmarTrading Sync must be opened from the installed Windows app.",
+    error: "AmarTrading Sync must be opened from the installed Windows app.",
   });
   const loaded = reduceWizard(failed, { type: "CONFIGURED_LOADED", accounts: [] });
 
-  assert.equal(loaded.error, "AmmarTrading Sync must be opened from the installed Windows app.");
+  assert.equal(loaded.error, "AmarTrading Sync must be opened from the installed Windows app.");
   assert.equal(loaded.systemStatus, null);
 });
 
@@ -172,7 +184,7 @@ test("normalizes configured account evidence without inventing success", () => {
   assert.deepEqual(configuredAccountView({
     AccountNumber: "7788451",
     BrokerName: "Ammar Markets",
-    Destination: "C:\\OneDrive\\AmmarTrading\\Account_7788451\\Baskets.csv",
+    Destination: "C:\\OneDrive\\AmarTrading\\Account_7788451\\Baskets.csv",
     LocalPublished: true,
     TaskState: "Registered",
     Freshness: "Fresh",
@@ -180,7 +192,7 @@ test("normalizes configured account evidence without inventing success", () => {
   }), {
     accountNumber: "7788451",
     brokerName: "Ammar Markets",
-    destination: "C:\\OneDrive\\AmmarTrading\\Account_7788451\\Baskets.csv",
+    destination: "C:\\OneDrive\\AmarTrading\\Account_7788451\\Baskets.csv",
     publication: { tone: "success", label: "Published locally" },
     automation: { tone: "success", label: "Automation Registered" },
     freshness: "Fresh",

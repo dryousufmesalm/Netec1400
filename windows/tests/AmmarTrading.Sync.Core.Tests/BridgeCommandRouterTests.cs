@@ -331,6 +331,27 @@ public sealed class BridgeCommandRouterTests
         Assert.Null(response.Data);
     }
 
+    [Fact]
+    public async Task RouteAsync_SurfacesSafeOperationExceptions()
+    {
+        var operations = new FakeOperations
+        {
+            ExceptionToThrow = new SafeOperationException(
+                "OperationFailed",
+                "The selected OneDrive root is not a safe local folder."),
+        };
+        var router = new BridgeCommandRouter(operations);
+
+        var response = await router.RouteAsync(
+            """{"version":1,"id":"r1","command":"validateSelection","payload":{}}""",
+            default);
+
+        Assert.False(response.Ok);
+        Assert.Equal("OperationFailed", response.Code);
+        Assert.Equal("The selected OneDrive root is not a safe local folder.", response.Message);
+        Assert.Null(response.Data);
+    }
+
     private sealed record OperationResult(string Operation);
 
     private sealed class FakeOperations : IAmmarTradingOperations

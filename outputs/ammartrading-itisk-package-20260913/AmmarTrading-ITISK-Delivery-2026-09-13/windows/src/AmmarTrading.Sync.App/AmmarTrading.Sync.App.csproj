@@ -1,0 +1,35 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <EnableWindowsTargeting>true</EnableWindowsTargeting>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+    <UseWPF>true</UseWPF>
+    <RuntimeIdentifier>win-x64</RuntimeIdentifier>
+    <AssemblyName>AmmarTrading.Sync</AssemblyName>
+    <RootNamespace>AmmarTrading.Sync.App</RootNamespace>
+    <ApplicationManifest>app.manifest</ApplicationManifest>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.Web.WebView2" Version="1.0.4129.50" />
+    <ProjectReference Include="../AmmarTrading.Sync.Core/AmmarTrading.Sync.Core.csproj" />
+    <InternalsVisibleTo Include="AmmarTrading.Sync.App.Tests" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <None Remove="Assets/Web/**/*" />
+    <Content Include="Assets/Web/**/*" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Content Include="../../../automation/MoneyMachineCsvSync/Install-BasketsSyncTask.ps1" Link="Scripts/Install-BasketsSyncTask.ps1" CopyToOutputDirectory="PreserveNewest" />
+    <Content Include="../../../automation/MoneyMachineCsvSync/Invoke-AmmarTradingDesktopOperation.ps1" Link="Scripts/Invoke-AmmarTradingDesktopOperation.ps1" CopyToOutputDirectory="PreserveNewest" />
+    <Content Include="../../../automation/MoneyMachineCsvSync/MoneyMachineCsvSchemaV3.psm1" Link="Scripts/MoneyMachineCsvSchemaV3.psm1" CopyToOutputDirectory="PreserveNewest" />
+    <Content Include="../../../automation/MoneyMachineCsvSync/MoneyMachineSyncSetup.psm1" Link="Scripts/MoneyMachineSyncSetup.psm1" CopyToOutputDirectory="PreserveNewest" />
+    <Content Include="../../../automation/MoneyMachineCsvSync/Sync-BasketsToOneDrive.ps1" Link="Scripts/Sync-BasketsToOneDrive.ps1" CopyToOutputDirectory="PreserveNewest" />
+    <Content Include="../../../automation/MoneyMachineCsvSync/Test-MoneyMachineSyncStatus.ps1" Link="Scripts/Test-MoneyMachineSyncStatus.ps1" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+</Project>

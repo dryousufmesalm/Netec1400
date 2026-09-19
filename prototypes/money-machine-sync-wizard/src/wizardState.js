@@ -13,6 +13,7 @@ export const initialWizardState = Object.freeze({
   selectedDiscoveryIds: [],
   roots: [],
   oneDriveRoot: "",
+  destinationFolder: "",
   vpsName: "",
   systemStatus: null,
   configuredAccounts: [],
@@ -49,6 +50,11 @@ export function isAccountEligible(account) {
 
 export function rootPath(root) {
   return String(value(root, "path", "Path") ?? root ?? "");
+}
+
+export function defaultDestinationFolder(oneDriveRoot) {
+  const root = String(oneDriveRoot ?? "").trim().replace(/[\\/]+$/, "");
+  return root ? `${root}\\amartrading` : "";
 }
 
 function normalizedEvidence(valueToNormalize, successValues, errorValues) {
@@ -108,6 +114,7 @@ export function buildSetupPayload(state) {
   return {
     vpsName: state.vpsName.trim(),
     oneDriveRoot: state.oneDriveRoot,
+    destinationFolder: state.destinationFolder || defaultDestinationFolder(state.oneDriveRoot),
     accounts: state.accounts
       .filter((account) => selectedIds.has(discoveryId(account)))
       .map((account) => ({
@@ -172,6 +179,11 @@ export function reduceWizard(state, action) {
         error: null,
       };
     }
+    case "AUTO_SELECT_ELIGIBLE": {
+      const requestedIds = new Set(Array.isArray(action.discoveryIds) ? action.discoveryIds : []);
+      const eligibleIds = state.accounts.filter((account) => requestedIds.has(discoveryId(account)) && isAccountEligible(account)).map(discoveryId);
+      return { ...state, selectedDiscoveryIds: eligibleIds, error: null };
+    }
     case "ACCOUNT_TOGGLED": {
       const account = state.accounts.find((candidate) => discoveryId(candidate) === action.discoveryId);
       if (!account) throw new Error(`Unknown MT4 discovery: ${action.discoveryId}`);
@@ -197,6 +209,9 @@ export function reduceWizard(state, action) {
         ...state,
         roots,
         oneDriveRoot: currentStillExists ? state.oneDriveRoot : rootPath(recommended),
+        destinationFolder: currentStillExists && state.destinationFolder
+          ? state.destinationFolder
+          : defaultDestinationFolder(rootPath(recommended)),
         error: null,
       };
     }
@@ -205,7 +220,12 @@ export function reduceWizard(state, action) {
       if (!state.roots.some((root) => rootPath(root) === oneDriveRoot)) {
         throw new Error("Select an available OneDrive folder.");
       }
-      return { ...state, oneDriveRoot, error: null };
+      return { ...state, oneDriveRoot, destinationFolder: defaultDestinationFolder(oneDriveRoot), error: null };
+    }
+    case "DESTINATION_FOLDER_SELECTED": {
+      const destinationFolder = String(action.destinationFolder ?? "").trim();
+      if (!destinationFolder) throw new Error("Choose a destination folder inside OneDrive.");
+      return { ...state, destinationFolder, error: null };
     }
     case "STAGES_LOADED":
       return { ...state, stages: Array.isArray(action.stages) ? action.stages : [] };

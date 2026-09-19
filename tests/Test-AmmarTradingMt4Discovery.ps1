@@ -160,10 +160,13 @@ try {
     $fresh = @($accounts | Where-Object AccountNumber -eq '10000001')[0]
     $stale = @($accounts | Where-Object AccountNumber -eq '20000002')[0]
     $freshFile = Get-Item -LiteralPath $fresh.SourceCsv
-    $expectedFingerprint = '{0}|{1}|{2}|{3}' -f $freshFile.FullName,'10000001',$freshFile.Length,$freshFile.LastWriteTimeUtc.Ticks
+    $expectedFingerprint = Get-AmmarTradingDiscoveryFingerprint -SourceCsv $freshFile.FullName -AccountNumber '10000001'
     $fingerprintFile = Join-Path $TestDrive 'expected-fingerprint.txt'
     [IO.File]::WriteAllText($fingerprintFile, $expectedFingerprint, (New-Object Text.UTF8Encoding($false)))
-    Assert-Equal -Actual $fresh.DiscoveryId -Expected (Get-FileHash -LiteralPath $fingerprintFile -Algorithm SHA256).Hash -Message 'DiscoveryId must hash the canonical path, account, length, and UTC write ticks in order.'
+    Assert-Equal -Actual $fresh.DiscoveryId -Expected (Get-FileHash -LiteralPath $fingerprintFile -Algorithm SHA256).Hash -Message 'DiscoveryId must hash the canonical path, account, volume serial, and file index.'
+    $freshFile.LastWriteTimeUtc = $freshFile.LastWriteTimeUtc.AddMinutes(1)
+    $refreshed = @(Get-AmmarTradingMt4Accounts -TerminalDataRoot $terminalRoot | Where-Object AccountNumber -eq '10000001')[0]
+    Assert-Equal -Actual $refreshed.DiscoveryId -Expected $fresh.DiscoveryId -Message 'DiscoveryId must remain stable when MT4 rewrites the same source file.'
     Assert-Equal -Actual $fresh.TerminalName -Expected 'C:\Terminals\Alpha' -Message 'origin.txt must supply the terminal name when present.'
     Assert-Equal -Actual $fresh.Freshness -Expected 'Fresh' -Message 'A file no more than 15 minutes old must be fresh.'
     Assert-Equal -Actual $stale.Freshness -Expected 'Stale' -Message 'A file over 15 minutes old must be stale.'

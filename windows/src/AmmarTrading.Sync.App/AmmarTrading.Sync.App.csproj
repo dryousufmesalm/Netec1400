@@ -7,8 +7,9 @@
     <Nullable>enable</Nullable>
     <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
     <UseWPF>true</UseWPF>
+    <UseWindowsForms>true</UseWindowsForms>
     <RuntimeIdentifier>win-x64</RuntimeIdentifier>
-    <AssemblyName>AmmarTrading.Sync</AssemblyName>
+    <AssemblyName>amarTrading.Sync</AssemblyName>
     <RootNamespace>AmmarTrading.Sync.App</RootNamespace>
     <ApplicationManifest>app.manifest</ApplicationManifest>
   </PropertyGroup>

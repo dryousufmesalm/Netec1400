@@ -1,0 +1,59 @@
+﻿{
+    "Passed":  true,
+    "Workbook":  "D:\\CodexWorker\\ammar-excel2019-repair-20260909\\output\\RefreshTest.xlsx",
+    "ExcelVersion":  "16.0",
+    "ExcelBuild":  "20326",
+    "Refreshed":  true,
+    "Errors":  [
+
+               ],
+    "ModernFormulaHits":  [
+
+                          ],
+    "Accounts":  [
+                     {
+                         "TradingDays":  6,
+                         "RunStartBalance":  "$6,066.68",
+                         "ClosePL":  -2127.4899999999989,
+                         "Login":  "892525830",
+                         "KeyType":  "String",
+                         "Status":  "OK",
+                         "Rows":  323
+                     },
+                     {
+                         "TradingDays":  5,
+                         "RunStartBalance":  "$6,763.31",
+                         "ClosePL":  794.3099999999996,
+                         "Login":  "892525831",
+                         "KeyType":  "String",
+                         "Status":  "OK",
+                         "Rows":  327
+                     },
+                     {
+                         "TradingDays":  5,
+                         "RunStartBalance":  "$7,052.98",
+                         "ClosePL":  -3328.87,
+                         "Login":  "892525833",
+                         "KeyType":  "String",
+                         "Status":  "OK",
+                         "Rows":  261
+                     },
+                     {
+                         "TradingDays":  5,
+                         "RunStartBalance":  "$5,509.79",
+                         "ClosePL":  223.81,
+                         "Login":  "892525834",
+                         "KeyType":  "String",
+                         "Status":  "OK",
+                         "Rows":  151
+                     }
+                 ],
+    "Queries":  [
+                    "AmarTrading_Baskets",
+                    "AmarTrading_SyncStatus"
+                ],
+    "Connections":  2,
+    "RowsBefore":  1062,
+    "RowsAfter":  1062,
+    "Error":  null
+}

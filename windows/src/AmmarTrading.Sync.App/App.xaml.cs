@@ -5,7 +5,7 @@ using AmmarTrading.Sync.Core.Bridge;
 
 namespace AmmarTrading.Sync.App;
 
-public partial class App : Application
+public partial class App : System.Windows.Application
 {
     private IAppMetadataLogger? _logger;
     private MainWindow? _window;
@@ -41,9 +41,9 @@ public partial class App : Application
         }
         catch
         {
-            MessageBox.Show(
-                "AmmarTrading Sync could not start. Reinstall the application, then try again.",
-                "AmmarTrading Sync",
+            System.Windows.MessageBox.Show(
+                "AmarTrading Sync could not start. Reinstall the application, then try again.",
+                "AmarTrading Sync",
                 MessageBoxButton.OK,
                 MessageBoxImage.Error);
             Shutdown(1);

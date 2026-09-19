@@ -18,11 +18,15 @@ foreach($query in @(
     @{ Name='Basket'; Source=$basketSource },
     @{ Name='Sync-status'; Source=$statusSource }
 )) {
-    if($query.Source -notmatch [regex]::Escape('\AmmarTrading')) { throw "$($query.Name) query must read the canonical AmmarTrading folder." }
-    if($query.Source -notmatch [regex]::Escape('\AmarTrading')) { throw "$($query.Name) query must retain the legacy AmarTrading folder as a migration source." }
+    if($query.Source -notmatch [regex]::Escape('\amartrading')) { throw "$($query.Name) query must read the canonical amartrading folder." }
+    if($query.Source -notmatch [regex]::Escape('\AmmarTrading')) { throw "$($query.Name) query must retain the legacy AmmarTrading folder as a migration source." }
     if($query.Source -notmatch 'FolderPriority') { throw "$($query.Name) query must mark canonical and legacy folders for precedence." }
     if($query.Source -notmatch 'CanonicalAccounts\s*=\s*List\.Buffer') { throw "$($query.Name) query must identify canonical account folders before selecting migration files." }
     if($query.Source -notmatch 'List\.Contains\(CanonicalAccounts') { throw "$($query.Name) query must exclude a legacy copy when a canonical account folder exists." }
+    # Folder.Files can throw for an unavailable OneDrive folder. Buffer must
+    # be inside the try expression so the fallback table is actually reached;
+    # `try Folder.Files(...)` followed by Table.Buffer is a subtle regression.
+    if($query.Source -notmatch 'try\s+Table\.Buffer\s*\(\s*Folder\.Files') { throw "$($query.Name) query must buffer Folder.Files inside its try/fallback guard." }
 }
 
 $expectedFingerprintFields = @(
@@ -39,8 +43,8 @@ if(-not $fingerprintBlock.Success) { throw 'Basket query does not declare Finger
 $actualFingerprintFields = @([regex]::Matches($fingerprintBlock.Groups['Fields'].Value, '"(?<Field>[A-Za-z0-9]+)"') | ForEach-Object { $_.Groups['Field'].Value })
 if(($actualFingerprintFields -join '|') -cne ($expectedFingerprintFields -join '|')) { throw 'ConfigFingerprint fields are not the exact documented 37-field sequence.' }
 if($basketSource -notmatch 'Text\.From\s*\(\s*value\s*,\s*"en-US"\s*\)') { throw 'ConfigFingerprint conversion must use the en-US invariant culture.' }
-if($basketSource -notmatch 'FinalColumns\s*=\s*List\.Combine\s*\(\s*\{\s*ExpectedColumns\s*,\s*\{"FolderAccountNumber","RunKey","FolderAccountMismatch","ConfigFingerprint"\}\s*\}\s*\)') {
-    throw 'Basket query final columns must be the 71 source fields followed by the four reporting fields.'
+if($basketSource -notmatch 'FinalColumns\s*=\s*List\.Combine\s*\(\s*\{\s*ExpectedColumns\s*,\s*\{"VpsId","VpsName","FolderAccountNumber","AccountKey","RunKey","FolderAccountMismatch","ConfigFingerprint"\}\s*\}\s*\)') {
+    throw 'Basket query final columns must include VPS identity and reporting keys after the source fields.'
 }
 foreach($token in @('SyncStatus.json','PublishedUtc','HeartbeatAgeHours','Duration.TotalHours','FreshnessHours = 26','IsFresh','CloudDeliveryVerified')) {
     if($statusSource -notmatch [regex]::Escape($token)) { throw "Sync-status query is missing contract token: $token" }
@@ -74,7 +78,7 @@ public static class MoneyMachineTestNativeWindow {
         $excel.DisplayAlerts = $false
         [void][MoneyMachineTestNativeWindow]::GetWindowThreadProcessId([IntPtr]$excel.Hwnd, [ref]$excelProcessId)
         $workbook = $excel.Workbooks.Open((Resolve-Path -LiteralPath $WorkbookPath).Path, 0, $true)
-        foreach($queryName in @('MoneyMachine_Baskets','MoneyMachine_SyncStatus')) {
+        foreach($queryName in @('AmarTrading_Baskets','AmarTrading_SyncStatus')) {
             try { $null = $workbook.Queries.Item($queryName) } catch { throw "Workbook query is missing: $queryName" }
         }
         $basketTable = $workbook.Worksheets.Item('Basket Data').ListObjects.Item('BasketDataTable')
@@ -88,7 +92,7 @@ public static class MoneyMachineTestNativeWindow {
         if($freshColumn -lt 1 -or -not [bool]$statusTable.DataBodyRange.Value2[1,$freshColumn]) { throw 'Staging sync-status row must report IsFresh=true.' }
         foreach($table in @($basketTable,$statusTable)) {
             if($table.QueryTable.BackgroundQuery) { throw "Workbook table '$($table.Name)' must disable background refresh." }
-            if(-not $table.QueryTable.RefreshOnFileOpen) { throw "Workbook table '$($table.Name)' must refresh on open." }
+            if($table.QueryTable.RefreshOnFileOpen) { throw "Workbook table '$($table.Name)' must not refresh on open before the reporting-PC root is reviewed." }
         }
         $name = $workbook.Names.Item('OneDriveRoot')
         if(-not $name) { throw 'Workbook is missing the OneDriveRoot named cell.' }

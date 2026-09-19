@@ -5,6 +5,7 @@ using System.Security.Principal;
 using System.Runtime.InteropServices;
 using System.Text;
 using System.Text.Json;
+using System.Text.RegularExpressions;
 using AmmarTrading.Sync.Core.Services;
 using Microsoft.Win32.SafeHandles;
 
@@ -46,20 +47,23 @@ public interface IProcessRunner
     IRunningProcess Start(ProcessInvocation invocation);
 }
 
-public sealed class PowerShellOperationException : Exception
+public sealed class PowerShellOperationException : SafeOperationException
 {
     public PowerShellOperationException(string code, string message)
-        : base(message)
+        : base(code, message)
     {
-        Code = code;
     }
-
-    public string Code { get; }
 }
 
 public sealed class PowerShellOperations : IAmmarTradingOperations
 {
     private const int MaximumResponseBytes = 1024 * 1024;
+    private static readonly Regex SafeDesktopFailureCode = new(
+        "^[A-Za-z][A-Za-z0-9]{0,63}$",
+        RegexOptions.CultureInvariant | RegexOptions.NonBacktracking);
+    private static readonly Regex SafeDesktopFailureMessage = new(
+        "^[A-Za-z0-9 .,'()-]{1,200}$",
+        RegexOptions.CultureInvariant | RegexOptions.NonBacktracking);
 
     private static readonly TimeSpan DefaultShortTimeout = TimeSpan.FromSeconds(30);
     private static readonly TimeSpan DefaultSetupTimeout = TimeSpan.FromSeconds(120);
@@ -135,6 +139,17 @@ public sealed class PowerShellOperations : IAmmarTradingOperations
         return await InvokeObjectAsync(DesktopOperation.Discover, payload, _shortTimeout, token).ConfigureAwait(false);
     }
 
+    public Task<object> BrowseForOneDriveFolderAsync(JsonElement payload, CancellationToken token)
+    {
+        token.ThrowIfCancellationRequested();
+        var initialPath = payload.ValueKind == JsonValueKind.Object && payload.TryGetProperty("initialPath", out var property) && property.ValueKind == JsonValueKind.String
+            ? property.GetString()
+            : null;
+        var selectedPath = _nativeDialogService.BrowseForOneDriveFolder(initialPath);
+        if (selectedPath is null) throw new PowerShellOperationException("Cancelled", "No OneDrive folder was selected.");
+        return Task.FromResult<object>(new { path = selectedPath });
+    }
+
     public Task<object> GetOneDriveRootsAsync(CancellationToken token) =>
         InvokeObjectAsync(DesktopOperation.OneDriveRoots, EmptyPayload, _shortTimeout, token);
 
@@ -190,7 +205,7 @@ public sealed class PowerShellOperations : IAmmarTradingOperations
             throw new InvalidOperationException("The local application data folder is unavailable.");
         }
 
-        return Path.Combine(localApplicationData, "AmmarTrading", "Sync");
+        return Path.Combine(localApplicationData, "AmarTrading", "Sync");
     }
 
     private async Task<object> InvokeObjectAsync(
@@ -212,7 +227,7 @@ public sealed class PowerShellOperations : IAmmarTradingOperations
             WriteDiagnostic(operation, "ApplicationFilesMissing", null, 0, 0);
             throw new PowerShellOperationException(
                 "ApplicationFilesMissing",
-                "A required application file is missing. Reinstall AmmarTrading Sync.");
+                "A required application file is missing. Reinstall AmarTrading Sync.");
         }
 
         SecureRequestFile? requestFile = null;
@@ -315,6 +330,13 @@ public sealed class PowerShellOperations : IAmmarTradingOperations
                     result.ExitCode,
                     result.StandardOutput.Length,
                     result.StandardError.Length);
+                if (result.ExitCode != 0 &&
+                    result.StandardError.Length == 0 &&
+                    TryReadSafeDesktopFailure(result.StandardOutput, out var failureCode, out var failureMessage))
+                {
+                    throw new PowerShellOperationException(failureCode, failureMessage);
+                }
+
                 throw new PowerShellOperationException(
                     "PowerShellFailed",
                     "The operation could not be completed.");
@@ -428,6 +450,85 @@ public sealed class PowerShellOperations : IAmmarTradingOperations
                 "TerminationUnconfirmed",
                 "The operation process could not be stopped safely.");
         }
+    }
+
+    private static bool TryReadSafeDesktopFailure(string stdout, out string code, out string message)
+    {
+        code = string.Empty;
+        message = string.Empty;
+        if (string.IsNullOrWhiteSpace(stdout) || Encoding.UTF8.GetByteCount(stdout) > 4096)
+        {
+            return false;
+        }
+
+        try
+        {
+            using var document = JsonDocument.Parse(stdout, new JsonDocumentOptions
+            {
+                AllowTrailingCommas = false,
+                CommentHandling = JsonCommentHandling.Disallow,
+                MaxDepth = 8,
+            });
+            if (document.RootElement.ValueKind != JsonValueKind.Object)
+            {
+                return false;
+            }
+
+            if (!document.RootElement.TryGetProperty("Ok", out var okElement) &&
+                !document.RootElement.TryGetProperty("ok", out okElement))
+            {
+                return false;
+            }
+
+            if (okElement.ValueKind != JsonValueKind.False)
+            {
+                return false;
+            }
+
+            if (!TryReadJsonString(document.RootElement, "Code", "code", out var parsedCode) ||
+                !TryReadJsonString(document.RootElement, "Message", "message", out var parsedMessage))
+            {
+                return false;
+            }
+
+            if (!SafeDesktopFailureCode.IsMatch(parsedCode) ||
+                !SafeDesktopFailureMessage.IsMatch(parsedMessage))
+            {
+                return false;
+            }
+
+            code = parsedCode;
+            message = parsedMessage;
+            return true;
+        }
+        catch (JsonException)
+        {
+            return false;
+        }
+    }
+
+    private static bool TryReadJsonString(JsonElement root, string pascalName, string camelName, out string value)
+    {
+        value = string.Empty;
+        if (!root.TryGetProperty(pascalName, out var property) &&
+            !root.TryGetProperty(camelName, out property))
+        {
+            return false;
+        }
+
+        if (property.ValueKind != JsonValueKind.String)
+        {
+            return false;
+        }
+
+        var parsed = property.GetString();
+        if (string.IsNullOrWhiteSpace(parsed))
+        {
+            return false;
+        }
+
+        value = parsed;
+        return true;
     }
 
     private static TimeSpan ValidateTimeout(TimeSpan timeout, string parameterName)

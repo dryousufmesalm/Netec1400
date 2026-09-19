@@ -15,7 +15,6 @@ const forbiddenLegacyAdapterMarkers = [
   "/api/discovery",
   "/api/accounts",
   "/api/setup",
-  "A fetch implementation is required",
 ];
 
 async function listFiles(root, relativeRoot = "") {

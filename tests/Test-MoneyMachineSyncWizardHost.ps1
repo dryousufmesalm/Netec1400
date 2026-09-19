@@ -72,10 +72,11 @@ try {
     Set-Content -LiteralPath (Join-Path $appRoot 'index.html') -Value '<!doctype html><html><body>Wizard host test</body></html>' -Encoding utf8
     Copy-Item -LiteralPath (Join-Path (Split-Path -Parent $MyInvocation.MyCommand.Path) 'fixtures\AGOLD___Baskets_v3.csv') -Destination (Join-Path $sourceDir 'AGOLD___Baskets.csv')
 
-    $canonicalAccountDir = Join-Path $oneDriveRoot 'AmmarTrading\Account_892522910'
+    $testVpsId = '0123456789abcdef0123456789abcdef'
+    $canonicalAccountDir = Join-Path $oneDriveRoot (Join-Path 'amartrading' (Join-Path ("VPS_{0}" -f $testVpsId) 'Account_892522910'))
     New-Item -ItemType Directory -Path $canonicalAccountDir -Force | Out-Null
     Copy-Item -LiteralPath (Join-Path $sourceDir 'AGOLD___Baskets.csv') -Destination (Join-Path $canonicalAccountDir 'Baskets.csv')
-    @([pscustomobject]@{ Enabled='true'; VpsName='Canonical Account'; ExpectedMT4Login='892522910'; SourceCsv=(Join-Path $sourceDir 'AGOLD___Baskets.csv'); OneDriveRoot=$oneDriveRoot }) |
+    @([pscustomobject]@{ Enabled='true'; VpsName='Canonical Account'; VpsId=$testVpsId; ExpectedMT4Login='892522910'; SourceCsv=(Join-Path $sourceDir 'AGOLD___Baskets.csv'); OneDriveRoot=$oneDriveRoot }) |
         Export-Csv -LiteralPath $configPath -NoTypeInformation -Encoding utf8
     $canonicalAccount = @(Get-MoneyMachineWizardAccounts -ConfigPath $configPath)
     if($canonicalAccount.Count -ne 1 -or $canonicalAccount[0].files -ne 1 -or -not $canonicalAccount[0].localPublished) { throw 'Accounts API lookup must recognize a canonical AmmarTrading publication.' }
@@ -108,6 +109,10 @@ try {
 
     $discovery = Invoke-RestMethod -Uri ($baseUrl + 'api/discovery') -WebSession $wizardSession -TimeoutSec 5
     if(-not $discovery.ok -or @($discovery.oneDriveRoots).Count -ne 1 -or @($discovery.sources).Count -ne 1) { throw 'Authenticated discovery must return the injected OneDrive and MT4 source.' }
+
+    $browserDiscoveryCommand = @{ version=1; id='host-test-discover'; command='discoverMt4Accounts'; payload=@{} } | ConvertTo-Json -Compress
+    $browserDiscovery = Invoke-RestMethod -Method Post -Uri ($baseUrl + 'api/command') -WebSession $wizardSession -Headers @{ Origin=$baseUrl.TrimEnd('/') } -ContentType 'application/json' -Body $browserDiscoveryCommand -TimeoutSec 5
+    if(-not $browserDiscovery.ok -or @($browserDiscovery.data.accounts).Count -ne 1 -or $browserDiscovery.data.accounts[0].AccountNumber -cne '892522910') { throw 'Browser MT4 discovery must return the injected terminal account.' }
 
     $payload = @{
         vpsName = 'Host Test VPS'

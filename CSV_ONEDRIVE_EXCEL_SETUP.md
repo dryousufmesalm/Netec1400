@@ -11,15 +11,15 @@ This package is reporting-only. It changes no entry, grid, basket-management, tr
 
 The CSV stays in that terminal's `MQL4\Files` sandbox. It is appended only at basket close and closed immediately, which is why the sync script can copy it safely.
 
-## 2. Install and configure AmmarTrading Sync on a VPS
+## 2. Install and configure amarTrading Sync on a VPS
 
-Use the signed or internally approved `AmmarTrading Sync Setup.exe`. The installed application is an English Windows desktop app; it does not open a browser, expose a local web server, or request Microsoft, RDP, broker, or MT4 passwords.
+Use the packaged `amarTrading Sync.exe`. The self-contained application is an English Windows desktop app; it does not open a browser, expose a local web server, or request Microsoft, RDP, broker, or MT4 passwords.
 
-1. Sign in to the Windows OneDrive desktop client before opening AmmarTrading Sync. Use the dedicated uploader identity approved for this project, and do not enable OneDrive backup for the VPS Desktop, Documents, or Pictures folders.
-2. Run `AmmarTrading Sync Setup.exe`, accept the Windows elevation prompt, and keep the default Program Files location. The desktop shortcut is optional; a Start Menu shortcut is always installed.
-3. Open **AmmarTrading Sync** from the Start Menu. The System Check must show a writable signed-in OneDrive root and accessible MT4 data folders.
+1. Sign in to the Windows OneDrive desktop client before opening amarTrading Sync. Use the dedicated uploader identity approved for this project, and do not enable OneDrive backup for the VPS Desktop, Documents, or Pictures folders.
+2. Run `amarTrading Sync.exe`.
+3. Open **amarTrading Sync**. The System Check must show a writable signed-in OneDrive root and accessible MT4 data folders.
 4. On **Select MT4 Accounts**, select one or more cards marked **Ready**. Account number and broker are read from each validated schema-v3 `AGOLD___Baskets.csv`; the operator does not type them.
-5. Select the intended local OneDrive root and review every destination preview. Each account is published to `OneDrive\AmmarTrading\Account_<MT4Login>\Baskets.csv`.
+5. Select the intended local OneDrive root. In **Reporting folder**, keep the default `amartrading` or choose another folder inside that OneDrive root. Review every destination preview. Each account is published below the selected folder.
 6. Run the setup test. The app validates all selected accounts before changing configuration, writes the mappings atomically, publishes each local CSV, verifies its hash and account identity, then registers or updates the recurring tasks.
 7. Keep the finish summary. `Local publication verified` means the file exists and was verified inside the VPS OneDrive folder. It does not prove OneDrive cloud upload or receipt on the reporting PC.
 
@@ -30,20 +30,21 @@ Discovery states are intentionally strict:
 - **Duplicate account**: two MT4 terminals expose the same account. Keep both blocked until the operator identifies the current terminal/source; never guess based only on a path.
 - **Malformed CSV**: preserve the file for diagnosis and correct the producing EA. Do not edit the reporting CSV by hand to bypass validation.
 
-Existing unselected account mappings remain configured. Legacy `Money Machine` or `AmarTrading` OneDrive history is copied into the canonical `AmmarTrading` structure only after hash verification; the legacy folder is not deleted. Configuration, logs, backups, and state are stored under `%LOCALAPPDATA%\AmmarTrading\Sync`, outside Program Files.
+Existing unselected account mappings remain configured. Legacy `Money Machine` or `AmarTrading` OneDrive history is copied into the selected reporting folder only after hash verification; the legacy folder is not deleted. Configuration, logs, backups, and state are stored under `%LOCALAPPDATA%\amarTrading\Sync`, outside the executable folder.
 
 ### Manual fallback
 
 Copy the complete `automation\MoneyMachineCsvSync` folder to a durable local directory on the VPS. Edit `accounts.csv`:
 
 ```csv
-Enabled,VpsName,ExpectedMT4Login,SourceCsv,OneDriveRoot
-true,VPS London 01,892522910,C:\\Path\\To\\MT4\\MQL4\\Files\\AGOLD___Baskets.csv,C:\\Users\\YourWindowsUser\\OneDrive
+Enabled,VpsName,VpsId,ExpectedMT4Login,SourceCsv,OneDriveRoot,DestinationFolder
+true,VPS London 01,,892522910,C:\\Path\\To\\MT4\\MQL4\\Files\\AGOLD___Baskets.csv,C:\\Users\\YourWindowsUser\\OneDrive,C:\\Users\\YourWindowsUser\\OneDrive\\amartrading
 ```
 
 - `ExpectedMT4Login` must equal the `AccountNumber` inside the CSV. The script treats the CSV value as authoritative and refuses a mismatch.
 - `OneDriveRoot` is the local folder already synchronized by the Windows user running the task.
-- The destination is `OneDriveRoot\AmmarTrading\Account_<MT4Login>\Baskets.csv`.
+- `DestinationFolder` is optional for older configurations; when omitted, the default is `OneDriveRoot\amartrading`.
+- The destination is below the selected folder, with a per-VPS and per-account path ending in `Account_<MT4Login>\Baskets.csv`.
 
 Run a manual first copy:
 
@@ -65,14 +66,14 @@ This idempotently creates two tasks: a daily copy at 23:59 VPS local time and a 
 
 ## 4. Add future VPSs/accounts
 
-No development or command-line work is needed. On each new VPS, sign in to the approved OneDrive uploader identity, install `AmmarTrading Sync Setup.exe`, open **AmmarTrading Sync**, select the Ready MT4 account cards, choose the OneDrive root, and run the built-in test. Reusing the same central OneDrive root is safe because every login gets its own `AmmarTrading\Account_<MT4Login>` folder.
+No development or command-line work is needed. On each new VPS, sign in to the approved OneDrive uploader identity, run `amarTrading Sync.exe`, select the Ready MT4 account cards, choose the OneDrive root, keep or select the reporting folder, and run the built-in test.
 
-To add another account on an already configured VPS, reopen AmmarTrading Sync, choose **Add Another MT4 Account**, and complete the same selection and test. The app updates selected accounts without deleting unselected mappings.
+To add another account on an already configured VPS, reopen amarTrading Sync, choose **Add Another MT4 Account**, and complete the same selection and test. The app updates selected accounts without deleting unselected mappings.
 
 ### Upgrade and uninstall
 
-- To upgrade, run the newer `AmmarTrading Sync Setup.exe` over the existing installation. Use the same default installation location. Account mappings, logs, backups, task state, and OneDrive history are outside the binary installation and remain in place.
-- Uninstall from **Settings → Apps → Installed apps → AmmarTrading Sync**. Uninstall removes the executable and shortcuts only. It deliberately preserves `%LOCALAPPDATA%\AmmarTrading`, scheduled sync tasks, OneDrive folders, CSV history, and backups.
+- To upgrade, replace the existing `amarTrading Sync.exe`. Account mappings, logs, backups, task state, and OneDrive history are outside the executable and remain in place.
+- Delete the executable when removing the app. It deliberately preserves `%LOCALAPPDATA%\amarTrading`, scheduled sync tasks, the `OneDrive\amar` folder, CSV history, and backups.
 - Do not manually delete preserved data during a normal upgrade or uninstall. Data cleanup is a separate, explicitly approved operation.
 
 ## 5. Use the Excel workbook

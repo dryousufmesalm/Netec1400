@@ -1,0 +1,21 @@
+Excel/AmarTrading_Excel2019_Compatible.xlsx
+Excel/CLIENT_CSV_SCHEMA.md
+Excel/CSV_ONEDRIVE_EXCEL_SETUP.md
+Excel/VPS_SETUP_PACKAGE_GUIDE.md
+MT4/AmmarTradingGoldEA - ref reset every bar - V3.ex4
+PACKAGE_MANIFEST.txt
+Sync/Install-BasketsSyncTask.ps1
+Sync/Install-MoneyMachineWorkbookQueries.ps1
+Sync/Invoke-AmmarTradingDesktopOperation.ps1
+Sync/MoneyMachineCsvSchemaV3.psm1
+Sync/MoneyMachineSyncSetup.psm1
+Sync/PowerQuery/MoneyMachine_Baskets.m
+Sync/PowerQuery/MoneyMachine_SyncStatus.m
+Sync/Start-MoneyMachineSyncWizard.cmd
+Sync/Start-MoneyMachineSyncWizard.ps1
+Sync/Sync-BasketsToOneDrive.ps1
+Sync/Test-MoneyMachineSyncStatus.ps1
+Sync/WizardApp/assets/index-CmoNwfNm.js
+Sync/WizardApp/assets/index-tRwpSG3w.css
+Sync/WizardApp/index.html
+Sync/accounts.csv

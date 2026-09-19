@@ -58,10 +58,10 @@ public sealed class WebViewHostTests : IDisposable
         var paths = AppRuntimePaths.FromLocalApplicationData(Path.Combine(_testRoot, "LocalAppData"));
 
         Assert.Equal(
-            Path.Combine(_testRoot, "LocalAppData", "AmmarTrading", "Sync", "Logs"),
+            Path.Combine(_testRoot, "LocalAppData", "AmarTrading", "Sync", "Logs"),
             paths.LogDirectory);
         Assert.Equal(
-            Path.Combine(_testRoot, "LocalAppData", "AmmarTrading", "Sync", "WebView2"),
+            Path.Combine(_testRoot, "LocalAppData", "AmarTrading", "Sync", "WebView2"),
             paths.WebViewUserDataDirectory);
     }
 
@@ -75,7 +75,7 @@ public sealed class WebViewHostTests : IDisposable
 
         var logPath = Path.Combine(
             localAppData,
-            "AmmarTrading",
+            "AmarTrading",
             "Sync",
             "Logs",
             "application.jsonl");
@@ -94,7 +94,7 @@ public sealed class WebViewHostTests : IDisposable
         var content = HostFatalPage.ForWebViewInitializationFailure(
             new InvalidOperationException(sensitiveDetail));
 
-        Assert.Equal("AmmarTrading Sync couldn't start", content.Title);
+        Assert.Equal("AmarTrading Sync couldn't start", content.Title);
         Assert.Contains("Microsoft Edge WebView2 Runtime", content.Message, StringComparison.Ordinal);
         Assert.DoesNotContain(sensitiveDetail, $"{content.Title}\n{content.Message}", StringComparison.Ordinal);
     }

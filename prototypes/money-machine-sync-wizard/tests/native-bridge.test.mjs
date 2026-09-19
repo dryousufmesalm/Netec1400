@@ -223,7 +223,7 @@ test("uses a fixed safe host error when postMessage throws and clears the pendin
   await assert.rejects(api.getSystemStatus(), (error) => {
     assert.ok(error instanceof WizardApiError);
     assert.equal(error.code, "HostUnavailable");
-    assert.equal(error.message, "The Windows host is unavailable. Close and reopen AmmarTrading Sync, then try again.");
+    assert.equal(error.message, "The Windows host is unavailable. Close and reopen AmarTrading Sync, then try again.");
     assert.doesNotMatch(error.message, /secret-path/);
     return true;
   });

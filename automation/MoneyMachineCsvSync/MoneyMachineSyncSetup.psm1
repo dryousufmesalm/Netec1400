@@ -36,9 +36,10 @@ $script:AmmarTradingRunningTerminalPathResolver = {
 $script:AmmarTradingTaskInstallerInvoker = {
     param(
         [Parameter(Mandatory)][string]$Installer,
-        [Parameter(Mandatory)][string]$ConfigPath
+        [Parameter(Mandatory)][string]$ConfigPath,
+        [Parameter(Mandatory)][string]$RuntimeRoot
     )
-    & $Installer -ConfigPath $ConfigPath
+    & $Installer -ConfigPath $ConfigPath -RuntimeRoot $RuntimeRoot
 }
 $script:AmmarTradingHeldPathMetadataResolver = $null
 $script:AmmarTradingTrustedPathOperationHook = $null
@@ -787,10 +788,23 @@ function Publish-AmmarTradingCanonicalTrustedFile {
     $canonicalDestination = Assert-AmmarTradingCanonicalDestinationPath -CanonicalOneDriveRoot $canonicalRoot -Path $Destination -Description "$Description destination"
     $destinationDirectory = Split-Path -Parent $canonicalDestination
     if(-not (Test-Path -LiteralPath $destinationDirectory -PathType Container)) { throw "$Description destination directory was not found." }
-    $stagingCandidate = Join-Path ([IO.Path]::GetTempPath()) 'AmmarTrading\Publication'
+    $destinationVolume = [IO.Path]::GetPathRoot($canonicalDestination)
+    $localAppStaging = if(-not [string]::IsNullOrWhiteSpace($env:LOCALAPPDATA)) {
+        Join-Path $env:LOCALAPPDATA 'AmarTrading\Sync\publication-staging'
+    } else {
+        ''
+    }
+    $tempStaging = Join-Path ([IO.Path]::GetTempPath()) 'AmmarTrading\Publication'
+    $stagingCandidate = if(-not [string]::IsNullOrWhiteSpace($localAppStaging) -and [IO.Path]::GetPathRoot([IO.Path]::GetFullPath($localAppStaging)) -ieq $destinationVolume) {
+        $localAppStaging
+    } elseif([IO.Path]::GetPathRoot([IO.Path]::GetFullPath($tempStaging)) -ieq $destinationVolume) {
+        $tempStaging
+    } else {
+        throw "$Description staging directory must use the same local volume as its destination."
+    }
     [void][IO.Directory]::CreateDirectory($stagingCandidate)
     $stagingDirectory = Resolve-AmmarTradingLocalPath -Path $stagingCandidate -PathType Container -Description "$Description staging directory"
-    if([IO.Path]::GetPathRoot($stagingDirectory) -ine [IO.Path]::GetPathRoot($canonicalDestination)) {
+    if([IO.Path]::GetPathRoot($stagingDirectory) -ine $destinationVolume) {
         throw "$Description staging directory must use the same local volume as its destination."
     }
 
@@ -1084,10 +1098,70 @@ function New-AmmarTradingTrustedDirectory {
 function Get-AmmarTradingDestinationPath {
     param(
         [Parameter(Mandatory)][string]$OneDriveRoot,
-        [Parameter(Mandatory)][string]$AccountNumber
+        [Parameter(Mandatory)][string]$AccountNumber,
+        [string]$VpsId,
+        [string]$DestinationFolder
     )
 
-    Join-Path $OneDriveRoot (Join-Path 'amartrading' (Join-Path ("Account_{0}" -f $AccountNumber) 'Baskets.csv'))
+    $resolvedRoot = Resolve-AmmarTradingOneDriveRoot -Path $OneDriveRoot
+    $folder = if([string]::IsNullOrWhiteSpace($DestinationFolder)) { Join-Path $resolvedRoot 'amartrading' } else { [IO.Path]::GetFullPath([Environment]::ExpandEnvironmentVariables($DestinationFolder.Trim())) }
+    $rootPrefix = $resolvedRoot.TrimEnd([IO.Path]::DirectorySeparatorChar,[IO.Path]::AltDirectorySeparatorChar) + [IO.Path]::DirectorySeparatorChar
+    if(-not $folder.StartsWith($rootPrefix, [StringComparison]::OrdinalIgnoreCase)) { throw 'The destination folder must be inside the selected OneDrive root.' }
+    $accountPath = Join-Path ("Account_{0}" -f $AccountNumber) 'Baskets.csv'
+    $relative = if([string]::IsNullOrWhiteSpace($VpsId)) { $accountPath } else { Join-Path ("VPS_{0}" -f $VpsId) $accountPath }
+    Join-Path $folder $relative
+}
+
+function Resolve-AmmarTradingDestinationFolder {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$OneDriveRoot,
+        [AllowEmptyString()][string]$DestinationFolder = ''
+    )
+
+    $resolvedRoot = Resolve-AmmarTradingOneDriveRoot -Path $OneDriveRoot -RequireWritable
+    $requested = $DestinationFolder.Trim()
+    $folder = if([string]::IsNullOrWhiteSpace($requested)) {
+        Join-Path $resolvedRoot 'amartrading'
+    } elseif([IO.Path]::IsPathRooted($requested)) {
+        [IO.Path]::GetFullPath([Environment]::ExpandEnvironmentVariables($requested))
+    } else {
+        [IO.Path]::GetFullPath((Join-Path $resolvedRoot $requested))
+    }
+    $rootPrefix = $resolvedRoot.TrimEnd([IO.Path]::DirectorySeparatorChar,[IO.Path]::AltDirectorySeparatorChar) + [IO.Path]::DirectorySeparatorChar
+    if(-not $folder.StartsWith($rootPrefix, [StringComparison]::OrdinalIgnoreCase)) { throw 'The destination folder must be inside the selected OneDrive root.' }
+    # Signed-in OneDrive roots commonly carry Cloud Files reparse metadata.
+    # Reject name-surrogate and unknown tags via the trusted-root ancestor walk.
+    Assert-AmmarTradingNoReparseAncestors -Path $folder -Description 'OneDrive destination folder' -TrustedCloudFilesRoot $resolvedRoot
+    if(Test-Path -LiteralPath $folder) {
+        if(-not (Test-Path -LiteralPath $folder -PathType Container)) { throw 'The selected destination is not a folder.' }
+        Assert-AmmarTradingMigrationPath -Path $folder -Description 'OneDrive destination folder' -TrustedCloudFilesRoot $resolvedRoot
+    }
+    return $folder
+}
+
+function Get-AmmarTradingVpsIdentity {
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][string]$RuntimeRoot, [string]$VpsName = '')
+    $stateRoot = Join-Path $RuntimeRoot 'state'
+    if(-not (Test-Path -LiteralPath $stateRoot -PathType Container)) { New-Item -ItemType Directory -Path $stateRoot -Force | Out-Null }
+    $identityPath = Join-Path $stateRoot 'vps-identity.json'
+    if(Test-Path -LiteralPath $identityPath -PathType Leaf) {
+        $existing = Get-Content -LiteralPath $identityPath -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
+        if($null -eq $existing -or -not $existing.PSObject.Properties['VpsId']) { throw 'The saved VPS identity does not contain VpsId; recovery is required.' }
+        if([string]$existing.VpsId -notmatch '^[a-f0-9]{32}$') { throw 'The saved VPS identity is invalid; recovery is required.' }
+        return [pscustomobject][ordered]@{ IdentitySchemaVersion = 1; VpsId = [string]$existing.VpsId; VpsName = [string]$existing.VpsName; CreatedUtc = [string]$existing.CreatedUtc; Path = $identityPath }
+    }
+    $configPath = Join-Path $RuntimeRoot 'accounts.csv'
+    if(Test-Path -LiteralPath $configPath -PathType Leaf) {
+        $hasIdentity = @(Import-Csv -LiteralPath $configPath -ErrorAction Stop | Where-Object { $_.PSObject.Properties['VpsId'] -and -not [string]::IsNullOrWhiteSpace([string]$_.VpsId) }).Count -gt 0
+        if($hasIdentity) { throw 'The VPS identity file is missing while configured VPS identity exists; recovery is required.' }
+    }
+    $identity = [pscustomobject][ordered]@{ IdentitySchemaVersion = 1; VpsId = ([guid]::NewGuid().ToString('N')).ToLowerInvariant(); VpsName = if([string]::IsNullOrWhiteSpace($VpsName)) { $env:COMPUTERNAME } else { $VpsName.Trim() }; CreatedUtc = [DateTime]::UtcNow.ToString('o') }
+    $temporary = "$identityPath.$([guid]::NewGuid().ToString('N')).tmp"
+    try { [IO.File]::WriteAllText($temporary, ($identity | ConvertTo-Json -Depth 4), (New-Object Text.UTF8Encoding($false))); [IO.File]::Move($temporary, $identityPath) } finally { if(Test-Path -LiteralPath $temporary) { Remove-Item -LiteralPath $temporary -Force -ErrorAction SilentlyContinue } }
+    $identity | Add-Member -NotePropertyName Path -NotePropertyValue $identityPath
+    return $identity
 }
 
 function Get-AmmarTradingDiscoveryHash {
@@ -1100,6 +1174,22 @@ function Get-AmmarTradingDiscoveryHash {
         return [BitConverter]::ToString($hash).Replace('-', '')
     } finally {
         $sha256.Dispose()
+    }
+}
+
+function Get-AmmarTradingDiscoveryFingerprint {
+    param(
+        [Parameter(Mandatory)][string]$SourceCsv,
+        [Parameter(Mandatory)][AllowEmptyString()][string]$AccountNumber
+    )
+
+    $fullPath = [IO.Path]::GetFullPath($SourceCsv)
+    $handle = Open-AmmarTradingPathHandle -Path $fullPath
+    try {
+        $metadata = Get-AmmarTradingHeldPathMetadata -Handle $handle -Path $fullPath
+        return '{0}|{1}|{2:X8}|{3}' -f $fullPath,$AccountNumber,([uint32]$metadata.VolumeSerialNumber),([uint64]$metadata.FileIndex)
+    } finally {
+        $handle.Dispose()
     }
 }
 
@@ -1183,7 +1273,7 @@ function Get-AmmarTradingMt4Accounts {
     foreach($candidate in @($candidates | Sort-Object SourceCsv)) {
         $file = Get-Item -LiteralPath $candidate.SourceCsv -ErrorAction Stop
         $identity = Get-AmmarTradingCsvIdentity -Path $file.FullName
-        $fingerprint = '{0}|{1}|{2}|{3}' -f $file.FullName,$identity.AccountNumber,$file.Length,$file.LastWriteTimeUtc.Ticks
+        $fingerprint = Get-AmmarTradingDiscoveryFingerprint -SourceCsv $file.FullName -AccountNumber $identity.AccountNumber
         $discoveryId = Get-AmmarTradingDiscoveryHash -Fingerprint $fingerprint
 
         $freshness = 'Unknown'
@@ -1264,7 +1354,8 @@ function Test-MoneyMachineSetupRequest {
         [Parameter(Mandatory)][AllowEmptyString()][string]$VpsName,
         [Parameter(Mandatory)][AllowEmptyString()][string]$ExpectedMT4Login,
         [Parameter(Mandatory)][AllowEmptyString()][string]$SourceCsv,
-        [Parameter(Mandatory)][AllowEmptyString()][string]$OneDriveRoot
+        [Parameter(Mandatory)][AllowEmptyString()][string]$OneDriveRoot,
+        [AllowEmptyString()][string]$DestinationFolder = ''
     )
 
     $normalizedName = $VpsName.Trim()
@@ -1279,6 +1370,7 @@ function Test-MoneyMachineSetupRequest {
     $resolvedSource = Resolve-AmmarTradingLocalPath -Path $expandedSource -PathType Leaf -Description 'Source CSV'
 
     $resolvedOneDrive = Resolve-AmmarTradingOneDriveRoot -Path $OneDriveRoot -RequireWritable
+    $resolvedDestination = Resolve-AmmarTradingDestinationFolder -OneDriveRoot $resolvedOneDrive -DestinationFolder $DestinationFolder
 
     $schemaModule = Join-Path $PSScriptRoot 'MoneyMachineCsvSchemaV3.psm1'
     if(-not (Test-Path -LiteralPath $schemaModule -PathType Leaf)) { throw "Schema validator was not found: $schemaModule" }
@@ -1290,6 +1382,7 @@ function Test-MoneyMachineSetupRequest {
         ExpectedMT4Login = $normalizedLogin
         SourceCsv = $resolvedSource
         OneDriveRoot = $resolvedOneDrive
+        DestinationFolder = $resolvedDestination
         RowCount = [int]$validation.RowCount
     }
 }
@@ -1312,10 +1405,12 @@ function Save-AmmarTradingAccountBatch {
         if($selectedByLogin.ContainsKey($newLogin)) { throw "Account configuration contains duplicate MT4 account '$newLogin'." }
         $selectedByLogin[$newLogin] = [pscustomobject][ordered]@{
             Enabled = 'true'
-            VpsName = ([string]$account.VpsName).Trim()
+            VpsName = if($account.PSObject.Properties['VpsName']) { ([string]$account.VpsName).Trim() } else { '' }
+            VpsId = if($account.PSObject.Properties['VpsId']) { ([string]$account.VpsId).Trim() } else { '' }
             ExpectedMT4Login = $newLogin
             SourceCsv = [string]$account.SourceCsv
             OneDriveRoot = [string]$account.OneDriveRoot
+            DestinationFolder = if($account.PSObject.Properties['DestinationFolder']) { [string]$account.DestinationFolder } else { '' }
         }
         $selectedOrder.Add($newLogin)
     }
@@ -1332,9 +1427,11 @@ function Save-AmmarTradingAccountBatch {
                 $rows.Add([pscustomobject][ordered]@{
                     Enabled = [string]$existing.Enabled
                     VpsName = $existingName
+                    VpsId = if($existing.PSObject.Properties['VpsId']) { [string]$existing.VpsId } else { '' }
                     ExpectedMT4Login = $existingLogin
                     SourceCsv = [string]$existing.SourceCsv
                     OneDriveRoot = [string]$existing.OneDriveRoot
+                    DestinationFolder = if($existing.PSObject.Properties['DestinationFolder']) { [string]$existing.DestinationFolder } else { '' }
                 })
             }
         }
@@ -1537,7 +1634,8 @@ function Copy-AmmarTradingLegacyData {
     [CmdletBinding()]
     param(
         [Parameter(Mandatory)][string]$OneDriveRoot,
-        [Parameter(Mandatory)][string[]]$AccountNumbers
+        [Parameter(Mandatory)][string[]]$AccountNumbers,
+        [string]$DestinationFolder
     )
 
     $resolvedRoot = Resolve-AmmarTradingOneDriveRoot -Path $OneDriveRoot -RequireWritable
@@ -1551,7 +1649,7 @@ function Copy-AmmarTradingLegacyData {
         if($seenAccounts.Add($accountNumber)) { $accounts.Add($accountNumber) }
     }
 
-    $canonicalRoot = Join-Path $resolvedRoot 'amartrading'
+    $canonicalRoot = Resolve-AmmarTradingDestinationFolder -OneDriveRoot $resolvedRoot -DestinationFolder $DestinationFolder
     if(Test-Path -LiteralPath $canonicalRoot) { Assert-AmmarTradingMigrationPath -Path $canonicalRoot -Description 'Canonical migration root' -TrustedCloudFilesRoot $resolvedRoot }
 
     $candidates = [System.Collections.Generic.List[object]]::new()
@@ -1687,7 +1785,10 @@ function Invoke-AmmarTradingBatchSetup {
     $vpsName = ([string]$Request.VpsName).Trim()
     if([string]::IsNullOrWhiteSpace($vpsName)) { throw 'VPS name is required.' }
     if($vpsName.Length -gt 100) { throw 'VPS name must be 100 characters or fewer.' }
+    $vpsIdentity = Get-AmmarTradingVpsIdentity -RuntimeRoot $RuntimeRoot -VpsName $vpsName
     $oneDriveRoot = Resolve-AmmarTradingOneDriveRoot -Path ([string]$Request.OneDriveRoot) -RequireWritable
+    $requestedDestinationFolder = if($Request.PSObject.Properties['DestinationFolder']) { [string]$Request.DestinationFolder } else { '' }
+    $destinationFolder = Resolve-AmmarTradingDestinationFolder -OneDriveRoot $oneDriveRoot -DestinationFolder $requestedDestinationFolder
     $requestedAccounts = @($Request.Accounts)
     if($requestedAccounts.Count -eq 0) { throw 'At least one MT4 account must be selected.' }
 
@@ -1713,30 +1814,36 @@ function Invoke-AmmarTradingBatchSetup {
         if(-not $seenSources.Add($sourceCsv)) { throw "The batch request contains duplicate source CSV '$sourceCsv'." }
 
         $validation = Read-MoneyMachineBasketsCsv -Path $sourceCsv -ExpectedLogin $expectedLogin
-        $identity = Get-AmmarTradingCsvIdentity -Path $sourceCsv
-        if($identity.Status -cne 'Ready' -or $identity.AccountNumber -cne $expectedLogin) { throw "Account '$expectedLogin' source is not a ready schema-v3 CSV." }
+        $csvIdentity = Get-AmmarTradingCsvIdentity -Path $sourceCsv
+        if($csvIdentity.Status -cne 'Ready' -or $csvIdentity.AccountNumber -cne $expectedLogin) { throw "Account '$expectedLogin' source is not a ready schema-v3 CSV." }
         $file = Get-Item -LiteralPath $sourceCsv -Force -ErrorAction Stop
-        $fingerprint = '{0}|{1}|{2}|{3}' -f $file.FullName,$expectedLogin,$file.Length,$file.LastWriteTimeUtc.Ticks
+        $fingerprint = Get-AmmarTradingDiscoveryFingerprint -SourceCsv $file.FullName -AccountNumber $expectedLogin
         $currentDiscoveryId = Get-AmmarTradingDiscoveryHash -Fingerprint $fingerprint
         if($currentDiscoveryId -cne $discoveryId) { throw "Account '$expectedLogin' discovery identity is stale; refresh account discovery before setup." }
 
         $normalizedAccounts.Add([pscustomobject]@{
             VpsName = $vpsName
+            VpsId = $vpsIdentity.VpsId
             ExpectedMT4Login = $expectedLogin
             SourceCsv = $file.FullName
             OneDriveRoot = $oneDriveRoot
+            DestinationFolder = $destinationFolder
             RowCount = [int]$validation.RowCount
-            BrokerName = [string]$identity.BrokerName
+            BrokerName = [string]$csvIdentity.BrokerName
             DiscoveryId = $discoveryId
         })
     }
     $stages.Add([pscustomobject]@{ Code='Validated'; Status='Success'; Message="Validated $($normalizedAccounts.Count) selected MT4 account source(s) before writing setup data." })
 
-    $migration = Copy-AmmarTradingLegacyData -OneDriveRoot $oneDriveRoot -AccountNumbers @($normalizedAccounts | ForEach-Object ExpectedMT4Login)
+    $migration = Copy-AmmarTradingLegacyData -OneDriveRoot $oneDriveRoot -AccountNumbers @($normalizedAccounts | ForEach-Object ExpectedMT4Login) -DestinationFolder $destinationFolder
     if($migration.Conflict -gt 0) { throw "Legacy data migration found $($migration.Conflict) conflicting destination file(s); no configuration was changed." }
     $stages.Add([pscustomobject]@{ Code='LegacyMigrated'; Status='Success'; Message="Legacy migration copied $($migration.Copied) file(s); $($migration.AlreadyPresent) were already present." })
 
     $fullConfigPath = [IO.Path]::GetFullPath([Environment]::ExpandEnvironmentVariables($ConfigPath))
+    if(Test-Path -LiteralPath $fullConfigPath -PathType Leaf) {
+        $foreign = @(Import-Csv -LiteralPath $fullConfigPath -ErrorAction Stop | Where-Object { $_.PSObject.Properties['VpsId'] -and -not [string]::IsNullOrWhiteSpace([string]$_.VpsId) -and [string]$_.VpsId -cne [string]$vpsIdentity.VpsId }).Count
+        if($foreign -gt 0) { throw 'Configured accounts belong to a different VPS identity; recovery is required.' }
+    }
     $transactionStarted = $false
     try {
         Start-AmmarTradingSetupTransaction -RuntimeRoot $RuntimeRoot -ConfigPath $fullConfigPath
@@ -1767,7 +1874,7 @@ function Invoke-AmmarTradingBatchSetup {
         } else {
             $installer = Join-Path $PSScriptRoot 'Install-BasketsSyncTask.ps1'
             if(-not (Test-Path -LiteralPath $installer -PathType Leaf)) { throw "Scheduled-task installer was not found: $installer" }
-            & $script:AmmarTradingTaskInstallerInvoker $installer $fullConfigPath *> $null
+            & $script:AmmarTradingTaskInstallerInvoker $installer $fullConfigPath $RuntimeRoot *> $null
             $stages.Add([pscustomobject]@{ Code='Automated'; Status='Success'; Message='Daily and logon catch-up synchronization tasks are active.' })
             $taskState = 'Registered'
         }
@@ -1777,7 +1884,10 @@ function Invoke-AmmarTradingBatchSetup {
             $accountResults.Add([pscustomobject][ordered]@{
                 AccountNumber = $account.ExpectedMT4Login
                 BrokerName = $account.BrokerName
-                Destination = Get-AmmarTradingDestinationPath -OneDriveRoot $account.OneDriveRoot -AccountNumber $account.ExpectedMT4Login
+                Destination = Get-AmmarTradingDestinationPath -OneDriveRoot $account.OneDriveRoot -AccountNumber $account.ExpectedMT4Login -VpsId $vpsIdentity.VpsId -DestinationFolder $account.DestinationFolder
+                DestinationFolder = $account.DestinationFolder
+                VpsId = $vpsIdentity.VpsId
+                VpsName = $vpsName
                 LocalPublished = $true
                 TaskState = $taskState
             })
@@ -1788,6 +1898,8 @@ function Invoke-AmmarTradingBatchSetup {
             Status = 'Success'
             Accounts = @($accountResults)
             Stages = @($stages)
+            VpsId = $vpsIdentity.VpsId
+            VpsName = $vpsName
             CloudDeliveryVerified = $false
         }
     } catch {
@@ -1809,12 +1921,14 @@ function Invoke-MoneyMachineSetup {
         [int]$MutexWaitMilliseconds = 30000
     )
 
-    $normalized = Test-MoneyMachineSetupRequest -VpsName ([string]$Request.VpsName) -ExpectedMT4Login ([string]$Request.ExpectedMT4Login) -SourceCsv ([string]$Request.SourceCsv) -OneDriveRoot ([string]$Request.OneDriveRoot)
+    $requestedDestinationFolder = if($Request.PSObject.Properties['DestinationFolder']) { [string]$Request.DestinationFolder } else { '' }
+    $normalized = Test-MoneyMachineSetupRequest -VpsName ([string]$Request.VpsName) -ExpectedMT4Login ([string]$Request.ExpectedMT4Login) -SourceCsv ([string]$Request.SourceCsv) -OneDriveRoot ([string]$Request.OneDriveRoot) -DestinationFolder $requestedDestinationFolder
     $file = Get-Item -LiteralPath $normalized.SourceCsv -Force -ErrorAction Stop
-    $fingerprint = '{0}|{1}|{2}|{3}' -f $file.FullName,$normalized.ExpectedMT4Login,$file.Length,$file.LastWriteTimeUtc.Ticks
+    $fingerprint = Get-AmmarTradingDiscoveryFingerprint -SourceCsv $file.FullName -AccountNumber $normalized.ExpectedMT4Login
     $batchRequest = [pscustomobject]@{
         VpsName = $normalized.VpsName
         OneDriveRoot = $normalized.OneDriveRoot
+        DestinationFolder = $normalized.DestinationFolder
         Accounts = @([pscustomobject]@{
             DiscoveryId = Get-AmmarTradingDiscoveryHash -Fingerprint $fingerprint
             ExpectedMT4Login = $normalized.ExpectedMT4Login
@@ -1831,4 +1945,4 @@ function Invoke-MoneyMachineSetup {
     }
 }
 
-Export-ModuleMember -Function Resolve-AmmarTradingLocalPath,Get-AmmarTradingWritableOneDriveRoots,Resolve-AmmarTradingOneDriveRoot,Assert-AmmarTradingTrustedDestinationPath,New-AmmarTradingTrustedDirectory,Invoke-AmmarTradingTrustedPathOperation,Move-AmmarTradingTrustedFileByHandle,Publish-AmmarTradingTrustedFile,Start-AmmarTradingSetupTransaction,Restore-AmmarTradingSetupTransaction,Get-AmmarTradingMt4Accounts,Get-MoneyMachineSetupDiscovery,Test-MoneyMachineSetupRequest,Save-MoneyMachineAccountConfig,Save-AmmarTradingAccountBatch,Copy-AmmarTradingLegacyData,Invoke-AmmarTradingBatchSetup,Invoke-MoneyMachineSetup
+Export-ModuleMember -Function Resolve-AmmarTradingLocalPath,Get-AmmarTradingWritableOneDriveRoots,Resolve-AmmarTradingOneDriveRoot,Assert-AmmarTradingTrustedDestinationPath,New-AmmarTradingTrustedDirectory,Invoke-AmmarTradingTrustedPathOperation,Move-AmmarTradingTrustedFileByHandle,Publish-AmmarTradingTrustedFile,Start-AmmarTradingSetupTransaction,Restore-AmmarTradingSetupTransaction,Get-AmmarTradingMt4Accounts,Get-MoneyMachineSetupDiscovery,Test-MoneyMachineSetupRequest,Save-MoneyMachineAccountConfig,Save-AmmarTradingAccountBatch,Copy-AmmarTradingLegacyData,Get-AmmarTradingDestinationPath,Get-AmmarTradingVpsIdentity,Invoke-AmmarTradingBatchSetup,Invoke-MoneyMachineSetup,Get-AmmarTradingDiscoveryFingerprint,Get-AmmarTradingDiscoveryHash

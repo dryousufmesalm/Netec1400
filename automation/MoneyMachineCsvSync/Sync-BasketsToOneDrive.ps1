@@ -194,10 +194,17 @@ function Publish-AtomicFile {
 function Get-AmmarTradingDestinationPath {
     param(
         [Parameter(Mandatory)][string]$OneDriveRoot,
-        [Parameter(Mandatory)][string]$AccountNumber
+        [Parameter(Mandatory)][string]$AccountNumber,
+        [string]$VpsId,
+        [string]$DestinationFolder
     )
-
-    Join-Path $OneDriveRoot (Join-Path 'amartrading' (Join-Path ("Account_{0}" -f $AccountNumber) 'Baskets.csv'))
+    $resolvedRoot = Resolve-AmmarTradingOneDriveRoot -Path $OneDriveRoot
+    $folder = if([string]::IsNullOrWhiteSpace($DestinationFolder)) { Join-Path $resolvedRoot 'amartrading' } else { [IO.Path]::GetFullPath([Environment]::ExpandEnvironmentVariables($DestinationFolder.Trim())) }
+    $rootPrefix = $resolvedRoot.TrimEnd([IO.Path]::DirectorySeparatorChar,[IO.Path]::AltDirectorySeparatorChar) + [IO.Path]::DirectorySeparatorChar
+    if(-not $folder.StartsWith($rootPrefix, [StringComparison]::OrdinalIgnoreCase)) { throw 'The destination folder must be inside the selected OneDrive root.' }
+    $accountPath = Join-Path ("Account_{0}" -f $AccountNumber) 'Baskets.csv'
+    $relative = if([string]::IsNullOrWhiteSpace($VpsId)) { $accountPath } else { Join-Path ("VPS_{0}" -f $VpsId) $accountPath }
+    Join-Path $folder $relative
 }
 
 function Get-LastRunState {
@@ -275,6 +282,7 @@ function Invoke-MoneyMachineCsvSync {
         if(-not $hasLock) { throw 'Timed out waiting for the MoneyMachineCsvSync mutex.' }
 
         $today = (Get-Date).ToString('yyyy-MM-dd')
+        $identity = Get-AmmarTradingVpsIdentity -RuntimeRoot $RuntimeRoot
         $state = Get-LastRunState -RuntimeRoot $RuntimeRoot
         $results = [System.Collections.Generic.List[object]]::new()
         foreach($account in @(Import-Csv -LiteralPath $ConfigPath -ErrorAction Stop)) {
@@ -291,11 +299,17 @@ function Invoke-MoneyMachineCsvSync {
             }
             $sourceCsv = [Environment]::ExpandEnvironmentVariables(([string]$account.SourceCsv).Trim())
             $oneDriveRoot = [Environment]::ExpandEnvironmentVariables(([string]$account.OneDriveRoot).Trim())
+            $vpsId = if($account.PSObject.Properties['VpsId']) { ([string]$account.VpsId).Trim() } else { '' }
+            $vpsName = if($account.PSObject.Properties['VpsName']) { ([string]$account.VpsName).Trim() } else { '' }
+            $destinationFolder = if($account.PSObject.Properties['DestinationFolder']) { ([string]$account.DestinationFolder).Trim() } else { '' }
+            if($vpsId -and $vpsId -cne [string]$identity.VpsId) { throw 'The configured account belongs to a different VPS identity.' }
+            if([string]::IsNullOrWhiteSpace($vpsId)) { $vpsId = '' }
             if([string]::IsNullOrWhiteSpace($expectedLogin) -or [string]::IsNullOrWhiteSpace($sourceCsv) -or [string]::IsNullOrWhiteSpace($oneDriveRoot)) {
                 $results.Add([pscustomobject]@{ AccountNumber=$expectedLogin; Status='Error'; FailureCode='MissingConfiguration'; Message='The account configuration is incomplete.' })
                 continue
             }
-            if($StartupCatchup -and $state.ContainsKey($expectedLogin) -and [string]$state[$expectedLogin].Status -eq 'Success' -and [string]$state[$expectedLogin].SuccessDate -eq $today) {
+            $stateKey = '{0}|{1}' -f $(if($vpsId){$vpsId}else{'legacy-unassigned'}),$expectedLogin
+            if($StartupCatchup -and $state.ContainsKey($stateKey) -and [string]$state[$stateKey].Status -eq 'Success' -and [string]$state[$stateKey].SuccessDate -eq $today) {
                 $results.Add([pscustomobject]@{ AccountNumber=$expectedLogin; Status='Skipped'; FailureCode=''; Message='This account was already published today.' })
                 continue
             }
@@ -317,9 +331,17 @@ function Invoke-MoneyMachineCsvSync {
                     $failureCode = 'SchemaValidationFailed'
                     $validation = Read-MoneyMachineBasketsCsv -Path $sourceCsv -ExpectedLogin $expectedLogin
                     $failureCode = 'PublicationFailed'
-                    $destination = Get-AmmarTradingDestinationPath -OneDriveRoot $oneDriveRoot -AccountNumber $expectedLogin
+                    $destination = Get-AmmarTradingDestinationPath -OneDriveRoot $oneDriveRoot -AccountNumber $expectedLogin -VpsId $vpsId -DestinationFolder $destinationFolder
                     $destinationDir = Split-Path -Parent $destination
                     $destinationDir = New-AmmarTradingTrustedDirectory -OneDriveRoot $oneDriveRoot -Path $destinationDir -Description 'Account publication directory'
+                    if($vpsId) {
+                        $vpsDirectory = Split-Path -Parent $destinationDir
+                        [void](New-AmmarTradingTrustedDirectory -OneDriveRoot $oneDriveRoot -Path $vpsDirectory -Description 'VPS publication directory')
+                        $manifestPath = Assert-AmmarTradingTrustedDestinationPath -OneDriveRoot $oneDriveRoot -Path (Join-Path $vpsDirectory 'Vps.json') -Description 'VPS identity manifest'
+                        $manifest = [ordered]@{ IdentitySchemaVersion = 1; VpsId = $vpsId; VpsName = [string]$vpsName; Accounts = @(); UpdatedUtc = [DateTime]::UtcNow.ToString('o') }
+                        foreach($configured in @(Import-Csv -LiteralPath $ConfigPath -ErrorAction Stop)) { $configuredId = if($configured.PSObject.Properties['VpsId']) { ([string]$configured.VpsId).Trim() } else { '' }; if($configuredId -eq $vpsId) { $manifest.Accounts += ([string]$configured.ExpectedMT4Login).Trim() } }
+                        Write-AtomicText -Path $manifestPath -Content ($manifest | ConvertTo-Json -Depth 5) -TrustedOneDriveRoot $oneDriveRoot
+                    }
                     $destination = Assert-AmmarTradingTrustedDestinationPath -OneDriveRoot $oneDriveRoot -Path $destination -Description 'Basket destination file'
                     Publish-AtomicFile -Source $sourceCsv -Destination $destination -TrustedOneDriveRoot $oneDriveRoot -ExpectedLength $sourceBefore.Length -ExpectedSha256 $sourceBefore.Hash -ExpectedLastWriteUtc $sourceBefore.LastWriteUtc
                     $destinationIdentity = @(Invoke-AmmarTradingTrustedPathOperation -OneDriveRoot $oneDriveRoot -Path @($destination) -Description 'Published basket verification' -Action {
@@ -328,6 +350,8 @@ function Invoke-MoneyMachineCsvSync {
                     if($destinationIdentity.Hash -ne $sourceBefore.Hash) { throw 'Published destination hash does not match the source hash.' }
                     $publicationUtc = [DateTime]::UtcNow.ToString('o')
                     $heartbeat = [ordered]@{
+                        VpsId = if($vpsId) { $vpsId } else { 'legacy-unassigned' }
+                        VpsName = [string]$vpsName
                         AccountNumber = $expectedLogin
                         Status = 'Success'
                         RowCount = $validation.RowCount
@@ -342,16 +366,21 @@ function Invoke-MoneyMachineCsvSync {
                     $result = [pscustomobject]@{ AccountNumber=$expectedLogin; Status='Success'; FailureCode=''; Message='Published the latest cumulative Baskets.csv.'; RowCount=$validation.RowCount; SourceHash=$sourceBefore.Hash; DestinationHash=$destinationIdentity.Hash; PublishedUtc=$publicationUtc }
                     $published = $true
                 } catch {
+                    $failureDetail = [string]$_.Exception.Message
+                    if($failureDetail.Length -gt 0 -and $failureDetail.Length -le 300 -and $failureDetail -notmatch '[\\/]') {
+                        Write-SyncLog -Level 'ERROR' -Code $failureCode -AccountNumber $expectedLogin -RowCount -1 -Attempt $attempt -RuntimeRoot $RuntimeRoot
+                        Add-Content -LiteralPath (Join-Path $RuntimeRoot 'logs\sync.log') -Value ('{0:yyyy-MM-dd HH:mm:ss} [ERROR] Detail={1}' -f (Get-Date),$failureDetail) -Encoding utf8
+                    }
                     if($attempt -lt $MaxRetries) { Start-Sleep -Seconds 1 }
                 }
             }
             if($published) {
-                $state[$expectedLogin] = [ordered]@{ Status='Success'; SuccessDate=$today; RowCount=$result.RowCount; SourceHash=$result.SourceHash; DestinationHash=$result.DestinationHash; PublishedUtc=$result.PublishedUtc }
+                $state[('{0}|{1}' -f $(if($vpsId){$vpsId}else{'legacy-unassigned'}),$expectedLogin)] = [ordered]@{ Status='Success'; SuccessDate=$today; RowCount=$result.RowCount; SourceHash=$result.SourceHash; DestinationHash=$result.DestinationHash; PublishedUtc=$result.PublishedUtc }
                 $results.Add($result)
                 Write-SyncLog -Level 'INFO' -Code Published -AccountNumber $expectedLogin -RowCount $result.RowCount -Attempt $lastAttempt -RuntimeRoot $RuntimeRoot
             } else {
                 $result = [pscustomobject]@{ AccountNumber=$expectedLogin; Status='Error'; FailureCode=$failureCode; Message=(Get-SyncFailureMessage -Code $failureCode) }
-                $state[$expectedLogin] = [ordered]@{ Status='Error'; SuccessDate=$today; FailureCode=$failureCode }
+                $state[$stateKey] = [ordered]@{ Status='Error'; SuccessDate=$today; FailureCode=$failureCode }
                 $results.Add($result)
                 Write-SyncLog -Level 'ERROR' -Code $failureCode -AccountNumber $expectedLogin -RowCount -1 -Attempt $lastAttempt -RuntimeRoot $RuntimeRoot
             }

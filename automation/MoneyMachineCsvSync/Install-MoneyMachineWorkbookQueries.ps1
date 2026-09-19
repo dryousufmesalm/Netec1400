@@ -16,8 +16,10 @@ $resolvedQueryRoot = (Resolve-Path -LiteralPath $PowerQueryRoot).Path
 if(-not (Test-Path -LiteralPath $OneDriveRoot -PathType Container)) { throw "OneDrive root not found: $OneDriveRoot" }
 
 $queryFiles = [ordered]@{
-    MoneyMachine_Baskets = Join-Path $resolvedQueryRoot 'MoneyMachine_Baskets.m'
-    MoneyMachine_SyncStatus = Join-Path $resolvedQueryRoot 'MoneyMachine_SyncStatus.m'
+    # File names retain the product-family prefix. Workbook query names are
+    # canonical AmarTrading_* names and must match the OLE DB query targets.
+    AmarTrading_Baskets = Join-Path $resolvedQueryRoot 'MoneyMachine_Baskets.m'
+    AmarTrading_SyncStatus = Join-Path $resolvedQueryRoot 'MoneyMachine_SyncStatus.m'
 }
 foreach($path in $queryFiles.Values) {
     if(-not (Test-Path -LiteralPath $path -PathType Leaf)) { throw "Power Query source not found: $path" }
@@ -56,6 +58,28 @@ function Remove-WorkbookAbsolutePathMetadata {
     } finally { $archive.Dispose() }
 }
 
+function Remove-AmarTradingQueryConnections {
+    param([Parameter(Mandatory)]$Workbook)
+    # Connections survive ListObject deletion in some Excel builds.  Delete only
+    # the six possible legacy/canonical query targets before recreating the two
+    # required tables, leaving unrelated workbook connections untouched.
+    $queryNames = @(
+        'MoneyMachine_Baskets','MoneyMachine_SyncStatus',
+        'AmarTrading_Baskets','AmarTrading_SyncStatus',
+        'amartrading_baskets','amartrading_syncstatus'
+    )
+    for($index = $Workbook.Connections.Count; $index -ge 1; $index--) {
+        $connection = $Workbook.Connections.Item($index)
+        $connectionText = ''
+        $commandText = ''
+        try { $connectionText = [string]$connection.OLEDBConnection.Connection } catch { }
+        try { $commandText = [string]$connection.OLEDBConnection.CommandText } catch { }
+        if($queryNames | Where-Object { $connectionText -match [regex]::Escape("Location=$_") -or $commandText -match [regex]::Escape("[$_]") }) {
+            $connection.Delete()
+        }
+    }
+}
+
 $excel = New-Object -ComObject Excel.Application
 $workbook = $null
 $excelProcessId = [uint32]0
@@ -70,7 +94,7 @@ try {
     foreach($sheet in @($workbook.Worksheets)) {
         try {
             $formulaCells = $sheet.UsedRange.SpecialCells(-4123)
-            foreach($cell in @($formulaCells.Cells)) { $formulaSnapshot.Add([pscustomobject]@{ Sheet=$sheet.Name; Address=$cell.Address(); Formula=$cell.Formula }) }
+            foreach($cell in @($formulaCells.Cells)) { $formulaSnapshot.Add([pscustomobject]@{ Sheet=$sheet.Name; Address=$cell.Address(); Formula=$cell.Formula2 }) }
         } catch { }
     }
 
@@ -79,8 +103,15 @@ try {
     try { $workbook.Names.Item('OneDriveRoot').Delete() } catch { }
     [void]$workbook.Names.Add('OneDriveRoot', "='Power Query Setup'!`$B`$4")
 
+    # Remove both the canonical names and the retired aliases so a stale query
+    # cannot remain reachable from an old table connection.
+    for($index = $workbook.Queries.Count; $index -ge 1; $index--) {
+        $existingQuery = $workbook.Queries.Item($index)
+        if($existingQuery.Name -match '^(MoneyMachine|AmarTrading)_(Baskets|SyncStatus)$') {
+            $existingQuery.Delete()
+        }
+    }
     foreach($queryName in $queryFiles.Keys) {
-        try { $workbook.Queries.Item($queryName).Delete() } catch { }
         [void]$workbook.Queries.Add($queryName, (Get-Content -LiteralPath $queryFiles[$queryName] -Raw))
     }
 
@@ -90,9 +121,10 @@ try {
         $statusSheet.Name = 'Sync Status'
     }
     $targets = [ordered]@{
-        MoneyMachine_Baskets = [pscustomobject]@{ Sheet=$workbook.Worksheets.Item('Basket Data'); Table='BasketDataTable' }
-        MoneyMachine_SyncStatus = [pscustomobject]@{ Sheet=$statusSheet; Table='SyncStatusTable' }
+        AmarTrading_Baskets = [pscustomobject]@{ Sheet=$workbook.Worksheets.Item('Basket Data'); Table='BasketDataTable' }
+        AmarTrading_SyncStatus = [pscustomobject]@{ Sheet=$statusSheet; Table='SyncStatusTable' }
     }
+    Remove-AmarTradingQueryConnections -Workbook $workbook
     $connectionTemplate = 'OLEDB;Provider=Microsoft.Mashup.OleDb.1;Data Source=$Workbook$;Location={0};Extended Properties=""'
     foreach($queryName in $targets.Keys) {
         $target = $targets[$queryName]
@@ -103,11 +135,13 @@ try {
         $listObject.QueryTable.CommandType = 2
         $listObject.QueryTable.CommandText = "SELECT * FROM [$queryName]"
         $listObject.QueryTable.BackgroundQuery = $false
-        $listObject.QueryTable.RefreshOnFileOpen = $true
+        # The reporting PC has a different local OneDrive root.  Do not refresh
+        # merely by opening the delivered workbook before that root is reviewed.
+        $listObject.QueryTable.RefreshOnFileOpen = $false
         if(-not $listObject.QueryTable.Refresh($false)) { throw "Excel refresh failed for query '$queryName'." }
     }
 
-    foreach($saved in $formulaSnapshot) { $workbook.Worksheets.Item($saved.Sheet).Range($saved.Address).Formula = $saved.Formula }
+    foreach($saved in $formulaSnapshot) { $workbook.Worksheets.Item($saved.Sheet).Range($saved.Address).Formula2 = $saved.Formula }
     $restoredFormulaCount = 0
     foreach($sheet in @($workbook.Worksheets)) {
         try { $restoredFormulaCount += $sheet.UsedRange.SpecialCells(-4123).Count } catch { }

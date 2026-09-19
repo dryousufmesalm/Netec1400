@@ -4,6 +4,9 @@ param(
     [string]$Configuration = 'Release',
     [string]$WebView2BootstrapperPath,
     [string]$InnoCompilerPath,
+    [string]$CodeSigningPfxPath = $env:AMMARTRADING_CODESIGN_PFX,
+    [string]$CodeSigningPfxPassword = $env:AMMARTRADING_CODESIGN_PFX_PASSWORD,
+    [string]$TimestampUrl,
     [ValidateSet('None','Preflight','PostPromotionCleanup')]
     [string]$Task9TestLifecycleFault = 'None'
 )
@@ -11,6 +14,9 @@ param(
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version 3.0
 $ProgressPreference = 'SilentlyContinue'
+
+Import-Module (Join-Path $PSScriptRoot 'AmmarTradingCodeSigning.psm1') -Force
+if([string]::IsNullOrWhiteSpace($TimestampUrl)) { $TimestampUrl = Get-AmmarTradingDefaultTimestampUrl }
 
 function Invoke-NativeCommand {
     param(
@@ -102,11 +108,17 @@ function Assert-ReleasePayload {
 }
 
 function Remove-CanonicalReleaseArtifacts {
-    param([string]$InstallerPath,[string]$ManifestPath,[string]$FaultPath,[string]$FaultProbeHashPath)
+    param(
+        [string]$InstallerPath,[string]$ManifestPath,[string]$FaultPath,[string]$FaultProbeHashPath,
+        [AllowEmptyCollection()][string[]]$TrustBootstrapPath = @()
+    )
     Remove-Item -LiteralPath $InstallerPath -Force -ErrorAction SilentlyContinue
     Remove-Item -LiteralPath $ManifestPath -Force -ErrorAction SilentlyContinue
     Remove-Item -LiteralPath $FaultPath -Force -ErrorAction SilentlyContinue
     Remove-Item -LiteralPath $FaultProbeHashPath -Force -ErrorAction SilentlyContinue
+    foreach($path in $TrustBootstrapPath) {
+        Remove-Item -LiteralPath $path -Force -ErrorAction SilentlyContinue
+    }
     $faultDirectory = Split-Path -Parent $FaultPath
     if((Test-Path -LiteralPath $faultDirectory -PathType Container) -and @(Get-ChildItem -LiteralPath $faultDirectory -Force).Count -eq 0) {
         Remove-Item -LiteralPath $faultDirectory -Force
@@ -114,8 +126,11 @@ function Remove-CanonicalReleaseArtifacts {
 }
 
 function Assert-CanonicalReleaseArtifactsAbsent {
-    param([string]$InstallerPath,[string]$ManifestPath,[string]$FaultPath,[string]$FaultProbeHashPath)
-    foreach($path in @($InstallerPath,$ManifestPath,$FaultPath,$FaultProbeHashPath)) {
+    param(
+        [string]$InstallerPath,[string]$ManifestPath,[string]$FaultPath,[string]$FaultProbeHashPath,
+        [AllowEmptyCollection()][string[]]$TrustBootstrapPath = @()
+    )
+    foreach($path in (@($InstallerPath,$ManifestPath,$FaultPath,$FaultProbeHashPath) + $TrustBootstrapPath)) {
         if(Test-Path -LiteralPath $path) { throw "Canonical release artifact was not invalidated: $path" }
     }
 }
@@ -123,19 +138,57 @@ function Assert-CanonicalReleaseArtifactsAbsent {
 function Publish-ReleaseArtifacts {
     param(
         [string]$StagedInstaller,[string]$StagedManifest,[string]$StagedFaultInstaller,[string]$StagedFaultProbeHash,
-        [string]$InstallerPath,[string]$ManifestPath,[string]$FaultPath,[string]$FaultProbeHashPath
+        [string]$InstallerPath,[string]$ManifestPath,[string]$FaultPath,[string]$FaultProbeHashPath,
+        [AllowEmptyCollection()][string[]]$StagedTrustBootstrap = @(),
+        [AllowEmptyCollection()][string[]]$TrustBootstrapPath = @()
     )
-    Remove-CanonicalReleaseArtifacts -InstallerPath $InstallerPath -ManifestPath $ManifestPath -FaultPath $FaultPath -FaultProbeHashPath $FaultProbeHashPath
+    if($StagedTrustBootstrap.Count -ne $TrustBootstrapPath.Count) {
+        throw 'Every staged publisher-trust file must have exactly one canonical destination.'
+    }
+    Remove-CanonicalReleaseArtifacts -InstallerPath $InstallerPath -ManifestPath $ManifestPath -FaultPath $FaultPath -FaultProbeHashPath $FaultProbeHashPath -TrustBootstrapPath $TrustBootstrapPath
     try {
         New-Item -ItemType Directory -Path (Split-Path -Parent $FaultPath) -Force | Out-Null
         [IO.File]::Move($StagedFaultInstaller,$FaultPath)
         [IO.File]::Move($StagedFaultProbeHash,$FaultProbeHashPath)
+        for($index = 0; $index -lt $TrustBootstrapPath.Count; $index++) {
+            [IO.File]::Move($StagedTrustBootstrap[$index],$TrustBootstrapPath[$index])
+        }
         [IO.File]::Move($StagedManifest,$ManifestPath)
         [IO.File]::Move($StagedInstaller,$InstallerPath)
     } catch {
-        Remove-CanonicalReleaseArtifacts -InstallerPath $InstallerPath -ManifestPath $ManifestPath -FaultPath $FaultPath -FaultProbeHashPath $FaultProbeHashPath
+        Remove-CanonicalReleaseArtifacts -InstallerPath $InstallerPath -ManifestPath $ManifestPath -FaultPath $FaultPath -FaultProbeHashPath $FaultProbeHashPath -TrustBootstrapPath $TrustBootstrapPath
         throw
     }
+}
+
+function New-PublisherTrustBootstrap {
+    param(
+        [Parameter(Mandatory)][Security.Cryptography.X509Certificates.X509Certificate2]$Certificate,
+        [Parameter(Mandatory)][string]$StagingDirectory,
+        [Parameter(Mandatory)][string]$TrustInstallerSource
+    )
+
+    $utf8NoBom = New-Object Text.UTF8Encoding($false)
+    $stagedCertificate = Join-Path $StagingDirectory 'AmmarTrading-CodeSigning.cer'
+    $stagedThumbprint = Join-Path $StagingDirectory 'AmmarTrading-CodeSigning.thumbprint.txt'
+    $stagedTrustInstaller = Join-Path $StagingDirectory 'Install-AmmarTradingCertificate.cmd'
+
+    # Exported from the loaded identity rather than copied from disk so the shipped .cer can never
+    # be a stale or unrelated certificate, and never carries the private key.
+    [IO.File]::WriteAllBytes($stagedCertificate,$Certificate.Export([Security.Cryptography.X509Certificates.X509ContentType]::Cert))
+    [IO.File]::WriteAllText($stagedThumbprint,"$($Certificate.Thumbprint.ToUpperInvariant())`r`n",$utf8NoBom)
+    Copy-Item -LiteralPath $TrustInstallerSource -Destination $stagedTrustInstaller
+
+    $verification = New-Object Security.Cryptography.X509Certificates.X509Certificate2 -ArgumentList $stagedCertificate
+    try {
+        if($verification.HasPrivateKey -or
+           $verification.Thumbprint.ToUpperInvariant() -cne $Certificate.Thumbprint.ToUpperInvariant()) {
+            throw 'The staged publisher certificate does not match the signing identity.'
+        }
+    } finally {
+        $verification.Dispose()
+    }
+    return @($stagedCertificate,$stagedThumbprint,$stagedTrustInstaller)
 }
 
 $repoRoot = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..\..'))
@@ -143,6 +196,7 @@ $prototypeRoot = Join-Path $repoRoot 'prototypes\money-machine-sync-wizard'
 $solutionPath = Join-Path $repoRoot 'windows\AmmarTrading.Sync.sln'
 $appProject = Join-Path $repoRoot 'windows\src\AmmarTrading.Sync.App\AmmarTrading.Sync.App.csproj'
 $installerScript = Join-Path $repoRoot 'windows\installer\AmmarTradingSync.iss'
+$trustInstallerSource = Join-Path $repoRoot 'windows\installer\Install-AmmarTradingCertificate.cmd'
 $automationRoot = Join-Path $repoRoot 'automation\MoneyMachineCsvSync'
 $artifactRoot = Join-Path $repoRoot 'artifacts\windows'
 $buildRoot = Join-Path $artifactRoot ('.build-' + [Guid]::NewGuid().ToString('N'))
@@ -163,13 +217,34 @@ $stagedInstallerPath = Join-Path $productionOutputRoot 'AmmarTrading Sync Setup.
 $stagedManifestPath = Join-Path $buildRoot 'SHA256SUMS.txt'
 $stagedFaultInstallerPath = Join-Path $faultOutputRoot 'AmmarTrading Sync Upgrade Fault Test.exe'
 $stagedFaultProbeHashPath = Join-Path $buildRoot 'AmmarTrading Sync Upgrade Fault Probe.sha256'
+$trustBootstrapPath = @(
+    (Join-Path $artifactRoot 'AmmarTrading-CodeSigning.cer'),
+    (Join-Path $artifactRoot 'AmmarTrading-CodeSigning.thumbprint.txt'),
+    (Join-Path $artifactRoot 'Install-AmmarTradingCertificate.cmd')
+)
+$stagedTrustBootstrap = @()
+$signingCertificate = $null
 $releasePromoted = $false
 
 try {
-Remove-CanonicalReleaseArtifacts -InstallerPath $installerPath -ManifestPath $manifestPath -FaultPath $faultInstallerPath -FaultProbeHashPath $faultProbeHashPath
-Assert-CanonicalReleaseArtifactsAbsent -InstallerPath $installerPath -ManifestPath $manifestPath -FaultPath $faultInstallerPath -FaultProbeHashPath $faultProbeHashPath
+Remove-CanonicalReleaseArtifacts -InstallerPath $installerPath -ManifestPath $manifestPath -FaultPath $faultInstallerPath -FaultProbeHashPath $faultProbeHashPath -TrustBootstrapPath $trustBootstrapPath
+Assert-CanonicalReleaseArtifactsAbsent -InstallerPath $installerPath -ManifestPath $manifestPath -FaultPath $faultInstallerPath -FaultProbeHashPath $faultProbeHashPath -TrustBootstrapPath $trustBootstrapPath
 if($Task9TestLifecycleFault -ceq 'Preflight') { throw 'Task 9 injected preflight failure.' }
 $iscc = Resolve-InnoCompiler -RequestedPath $InnoCompilerPath
+if([string]::IsNullOrWhiteSpace($CodeSigningPfxPath)) {
+    Write-Warning 'No code signing identity was supplied; Windows will show an unknown-publisher warning for this release. See windows/CODE_SIGNING.md.'
+} else {
+    if([string]::IsNullOrWhiteSpace($CodeSigningPfxPassword)) {
+        throw 'A code signing .pfx was supplied without its password. Set AMMARTRADING_CODESIGN_PFX_PASSWORD or pass -CodeSigningPfxPassword.'
+    }
+    if(-not (Test-Path -LiteralPath $trustInstallerSource -PathType Leaf)) {
+        throw "The publisher-trust bootstrap is missing and a signed release cannot be trusted without it: $trustInstallerSource"
+    }
+    $signingCertificate = Import-AmmarTradingSigningIdentity `
+        -PfxPath $CodeSigningPfxPath `
+        -Password (ConvertTo-SecureString -String $CodeSigningPfxPassword -AsPlainText -Force)
+    Write-Host "Code signing identity: $($signingCertificate.Subject) [$($signingCertificate.Thumbprint)] valid until $($signingCertificate.NotAfter)"
+}
 New-Item -ItemType Directory -Path $publishRoot -Force | Out-Null
 New-Item -ItemType Directory -Path $productionOutputRoot,$faultOutputRoot,$faultProbeRoot -Force | Out-Null
 Invoke-NativeCommand -FilePath 'npm.cmd' -ArgumentList @('ci','--ignore-scripts') -WorkingDirectory $prototypeRoot
@@ -224,6 +299,33 @@ foreach($scriptName in $allowedScripts) {
 }
 $createdumpPath = Join-Path $publishRoot 'createdump.exe'
 if(Test-Path -LiteralPath $createdumpPath -PathType Leaf) { Remove-Item -LiteralPath $createdumpPath -Force }
+# The apphost is compiled against AssemblyName amarTrading.Sync.dll. Renaming that
+# DLL makes .NET exit immediately. Only the installer-facing exe name is canonicalized.
+$canonicalProductNames = @{
+    'amartrading.sync.exe' = 'AmmarTrading.Sync.exe'
+}
+foreach($publishedFile in @(Get-ChildItem -LiteralPath $publishRoot -File)) {
+    $canonicalName = $canonicalProductNames[$publishedFile.Name.ToLowerInvariant()]
+    if($canonicalName -and $publishedFile.Name -cne $canonicalName) {
+        $temporaryName = $canonicalName + '.rename'
+        Rename-Item -LiteralPath $publishedFile.FullName -NewName $temporaryName
+        Rename-Item -LiteralPath (Join-Path $publishRoot $temporaryName) -NewName $canonicalName
+    }
+}
+if($null -ne $signingCertificate) {
+    # Only our own binaries and scripts are signed. Re-signing the bundled .NET runtime would
+    # replace Microsoft's Authenticode signatures with a self-signed one, which is strictly worse.
+    $signedPayload = @(
+        @(Join-Path $publishRoot 'AmmarTrading.Sync.exe') +
+        @(Get-ChildItem -LiteralPath $publishRoot -File |
+            Where-Object { $_.Name -imatch '^ammartrading\.sync.*\.dll$' } |
+            ForEach-Object FullName) +
+        @(Get-AmmarTradingSignablePath -Root $publishedScripts) |
+            Sort-Object -Unique
+    )
+    Set-AmmarTradingCodeSignature -Path $signedPayload -Certificate $signingCertificate -TimestampUrl $TimestampUrl
+    Assert-AmmarTradingCodeSignature -Path $signedPayload -ExpectedThumbprint $signingCertificate.Thumbprint
+}
 $payloadManifestName = 'AmmarTrading.Sync.payload-manifest.txt'
 $payloadManifestPath = Join-Path $publishRoot $payloadManifestName
 $publishPrefixLength = $publishRoot.TrimEnd('\').Length + 1
@@ -313,6 +415,14 @@ if(-not (Test-Path -LiteralPath $stagedInstallerPath -PathType Leaf)) {
 if(-not (Test-Path -LiteralPath $stagedFaultInstallerPath -PathType Leaf)) {
     throw "Fault-injection installer was not produced: $stagedFaultInstallerPath"
 }
+$promotedTrustBootstrapPath = @()
+if($null -ne $signingCertificate) {
+    $stagedSetupExecutables = @($stagedInstallerPath,$stagedFaultInstallerPath)
+    Set-AmmarTradingCodeSignature -Path $stagedSetupExecutables -Certificate $signingCertificate -TimestampUrl $TimestampUrl
+    Assert-AmmarTradingCodeSignature -Path $stagedSetupExecutables -ExpectedThumbprint $signingCertificate.Thumbprint
+    $stagedTrustBootstrap = New-PublisherTrustBootstrap -Certificate $signingCertificate -StagingDirectory $buildRoot -TrustInstallerSource $trustInstallerSource
+    $promotedTrustBootstrapPath = $trustBootstrapPath
+}
 $installerHash = (Get-FileHash -LiteralPath $stagedInstallerPath -Algorithm SHA256).Hash.ToLowerInvariant()
 [System.IO.File]::WriteAllText(
     $stagedManifestPath,
@@ -321,24 +431,32 @@ $installerHash = (Get-FileHash -LiteralPath $stagedInstallerPath -Algorithm SHA2
 if((Get-Content -LiteralPath $stagedManifestPath -Raw).Trim() -cne "$installerHash *AmmarTrading Sync Setup.exe") {
     throw 'The staged SHA-256 manifest failed validation.'
 }
-Publish-ReleaseArtifacts -StagedInstaller $stagedInstallerPath -StagedManifest $stagedManifestPath -StagedFaultInstaller $stagedFaultInstallerPath -StagedFaultProbeHash $stagedFaultProbeHashPath -InstallerPath $installerPath -ManifestPath $manifestPath -FaultPath $faultInstallerPath -FaultProbeHashPath $faultProbeHashPath
+Publish-ReleaseArtifacts -StagedInstaller $stagedInstallerPath -StagedManifest $stagedManifestPath -StagedFaultInstaller $stagedFaultInstallerPath -StagedFaultProbeHash $stagedFaultProbeHashPath -InstallerPath $installerPath -ManifestPath $manifestPath -FaultPath $faultInstallerPath -FaultProbeHashPath $faultProbeHashPath -StagedTrustBootstrap $stagedTrustBootstrap -TrustBootstrapPath $promotedTrustBootstrapPath
 $releasePromoted = $true
 
 Write-Host "Installer: $installerPath"
 Write-Host "SHA-256: $installerHash"
+if($null -ne $signingCertificate) {
+    Write-Host "Publisher thumbprint: $($signingCertificate.Thumbprint.ToUpperInvariant())"
+    Write-Host 'Ship the whole artifacts\windows folder: the client runs Install-AmmarTradingCertificate.cmd once before setup.'
+}
 } catch {
-    Remove-CanonicalReleaseArtifacts -InstallerPath $installerPath -ManifestPath $manifestPath -FaultPath $faultInstallerPath -FaultProbeHashPath $faultProbeHashPath
-    Assert-CanonicalReleaseArtifactsAbsent -InstallerPath $installerPath -ManifestPath $manifestPath -FaultPath $faultInstallerPath -FaultProbeHashPath $faultProbeHashPath
+    Remove-CanonicalReleaseArtifacts -InstallerPath $installerPath -ManifestPath $manifestPath -FaultPath $faultInstallerPath -FaultProbeHashPath $faultProbeHashPath -TrustBootstrapPath $trustBootstrapPath
+    Assert-CanonicalReleaseArtifactsAbsent -InstallerPath $installerPath -ManifestPath $manifestPath -FaultPath $faultInstallerPath -FaultProbeHashPath $faultProbeHashPath -TrustBootstrapPath $trustBootstrapPath
     throw
 } finally {
     try {
+        if($null -ne $signingCertificate) {
+            $signingCertificate.Dispose()
+            $signingCertificate = $null
+        }
         if(Test-Path -LiteralPath $buildRoot -PathType Container) { Remove-Item -LiteralPath $buildRoot -Recurse -Force }
         if($releasePromoted -and $Task9TestLifecycleFault -ceq 'PostPromotionCleanup') {
             throw 'Task 9 injected post-promotion cleanup failure.'
         }
     } catch {
-        Remove-CanonicalReleaseArtifacts -InstallerPath $installerPath -ManifestPath $manifestPath -FaultPath $faultInstallerPath -FaultProbeHashPath $faultProbeHashPath
-        Assert-CanonicalReleaseArtifactsAbsent -InstallerPath $installerPath -ManifestPath $manifestPath -FaultPath $faultInstallerPath -FaultProbeHashPath $faultProbeHashPath
+        Remove-CanonicalReleaseArtifacts -InstallerPath $installerPath -ManifestPath $manifestPath -FaultPath $faultInstallerPath -FaultProbeHashPath $faultProbeHashPath -TrustBootstrapPath $trustBootstrapPath
+        Assert-CanonicalReleaseArtifactsAbsent -InstallerPath $installerPath -ManifestPath $manifestPath -FaultPath $faultInstallerPath -FaultProbeHashPath $faultProbeHashPath -TrustBootstrapPath $trustBootstrapPath
         throw
     }
 }

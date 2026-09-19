@@ -1,0 +1,20 @@
+﻿{
+    "Passed":  true,
+    "WorkbookPath":  "D:\\CodexWorker\\ammar-excel2019-repair-20260909\\output\\AmarTrading_Excel2019_Compatible.xlsx",
+    "QueriesBefore":  [
+                          "AmarTrading_Baskets",
+                          "AmarTrading_SyncStatus"
+                      ],
+    "QueriesAfter":  [
+                         "AmarTrading_Baskets",
+                         "AmarTrading_SyncStatus"
+                     ],
+    "ConnectionsBefore":  2,
+    "ConnectionsAfter":  2,
+    "ImportRowsBefore":  1062,
+    "AnalysisGroups":  4,
+    "FormulaErrors":  [
+
+                      ],
+    "Error":  null
+}

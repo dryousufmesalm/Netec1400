@@ -8,7 +8,7 @@ internal static class HostFatalPage
     {
         ArgumentNullException.ThrowIfNull(error);
         return new HostFatalPageContent(
-            "AmmarTrading Sync couldn't start",
-            "The secure Windows web component could not be initialized. Repair or install Microsoft Edge WebView2 Runtime, then reopen AmmarTrading Sync.");
+            "AmarTrading Sync couldn't start",
+            "The secure Windows web component could not be initialized. Repair or install Microsoft Edge WebView2 Runtime, then reopen AmarTrading Sync.");
     }
 }

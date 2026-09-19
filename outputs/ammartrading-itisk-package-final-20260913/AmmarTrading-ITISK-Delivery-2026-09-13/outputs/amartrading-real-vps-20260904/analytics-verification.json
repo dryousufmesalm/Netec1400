@@ -1,0 +1,31 @@
+﻿{
+    "Error":  null,
+    "Rows":  4,
+    "Accounts":  [
+                     {
+                         "ClosePL":  -2127.4899999999989,
+                         "Rows":  323,
+                         "Login":  "892525830",
+                         "ConfigStatus":  "OK"
+                     },
+                     {
+                         "ClosePL":  794.3099999999996,
+                         "Rows":  327,
+                         "Login":  "892525831",
+                         "ConfigStatus":  "OK"
+                     },
+                     {
+                         "ClosePL":  -3328.87,
+                         "Rows":  261,
+                         "Login":  "892525833",
+                         "ConfigStatus":  "OK"
+                     },
+                     {
+                         "ClosePL":  223.81,
+                         "Rows":  151,
+                         "Login":  "892525834",
+                         "ConfigStatus":  "OK"
+                     }
+                 ],
+    "Passed":  true
+}

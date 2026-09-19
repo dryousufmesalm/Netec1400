@@ -13,6 +13,7 @@ import argparse
 import base64
 import io
 import json
+import posixpath
 import re
 import sys
 import zipfile
@@ -27,7 +28,7 @@ def _xml(z: zipfile.ZipFile, name: str):
     return ET.fromstring(z.read(name))
 
 
-def _m_text(z: zipfile.ZipFile) -> str:
+def _m_text(z: zipfile.ZipFile) -> tuple[str, bool]:
     payload = None
     for name in z.namelist():
         if not name.startswith("customXml/") or not name.endswith(".xml"):
@@ -38,7 +39,7 @@ def _m_text(z: zipfile.ZipFile) -> str:
                 text = raw.decode(encoding)
             except UnicodeDecodeError:
                 continue
-            match = re.search(r"<DataMashup[^>]*>(.*?)</DataMashup>", text, re.S)
+            match = re.search(r"<(?:[A-Za-z_][\w.-]*:)?DataMashup[^>]*>(.*?)</(?:[A-Za-z_][\w.-]*:)?DataMashup>", text, re.S)
             if match:
                 payload = base64.b64decode(match.group(1))
                 break
@@ -53,8 +54,10 @@ def _m_text(z: zipfile.ZipFile) -> str:
     # members, even though the first archive is complete.
     end = payload.find(b"PK\x05\x06", start)
     archive = payload[start : end + 22] if end >= 0 else payload[start:]
+    declared_length = int.from_bytes(payload[4:8], "little") if len(payload) >= 8 else None
+    length_mismatch = declared_length is not None and declared_length != len(archive)
     inner = zipfile.ZipFile(io.BytesIO(archive))
-    return inner.read("Formulas/Section1.m").decode("utf-8", "replace")
+    return inner.read("Formulas/Section1.m").decode("utf-8", "replace"), length_mismatch
 
 
 def inspect(path: Path) -> dict:
@@ -82,37 +85,57 @@ def inspect(path: Path) -> dict:
             query_tables.append({"part": name, "name": root.attrib.get("name"),
                            "connectionId": root.attrib.get("connectionId"),
                            "fields": [f.attrib.get("name") for f in root.findall(".//x:queryTableField", NS)]})
-        m = _m_text(z)
+        m, mashup_length_mismatch = _m_text(z)
         embedded = set(re.findall(r"\bshared\s+([A-Za-z][A-Za-z0-9_]*)\s*=", m))
         paths = sorted(set(re.findall(r"Folder\.Files\(([^)]+)\)", m)))
         wired = []
-        for name in sorted(n for n in z.namelist() if n.startswith("xl/worksheets/_rels/") and n.endswith(".rels")):
+        # Excel stores the queryTable relationship on the table part (not on
+        # the worksheet relationship in native ListObject output).
+        for name in sorted(n for n in z.namelist() if n.startswith("xl/tables/_rels/") and n.endswith(".rels")):
             relroot = ET.fromstring(z.read(name))
             for rel in relroot:
                 if rel.attrib.get("Type", "").endswith("/queryTable"):
-                    wired.append({"worksheet_rels": name, "target": rel.attrib.get("Target")})
+                    wired.append({"table_rels": name, "target": rel.attrib.get("Target")})
         return {"file": str(path), "embedded_queries": sorted(embedded),
                 "connections": list(conn.values()), "worksheet_tables": worksheet_tables,
                 "query_tables": query_tables,
                 "wired_query_tables": wired,
                 "folder_files_arguments": paths,
+                "mashup_length_mismatch": mashup_length_mismatch,
                 "uses_onedrive_amartrading": bool(re.search(r"OneDriveRoot.{0,250}amartrading", m, re.I | re.S))}
 
 
 def failures(report: dict) -> list[str]:
     issues = []
     embedded = set(report["embedded_queries"])
+    if report["mashup_length_mismatch"]:
+        issues.append("DataMashup package length header does not match embedded archive")
     if embedded != EXPECTED:
         issues.append(f"embedded queries are {sorted(embedded)}, expected {sorted(EXPECTED)}")
     if len(report["connections"]) != 2:
         issues.append(f"workbook has {len(report['connections'])} connections; expected exactly 2")
     if len(report["wired_query_tables"]) != 2:
-        issues.append(f"workbook has {len(report['wired_query_tables'])} worksheet-wired query tables; expected exactly 2")
+        issues.append(f"workbook has {len(report['wired_query_tables'])} table-wired query tables; expected exactly 2")
+    locations = [c["location"] for c in report["connections"]]
+    if set(locations) != EXPECTED:
+        issues.append(f"connection locations are {sorted(set(locations))}, expected {sorted(EXPECTED)}")
     for c in report["connections"]:
         if c["location"] not in EXPECTED:
             issues.append(f"connection {c['id']} Location={c['location']!r} is not an expected query")
         if c["location"] and c["location"] not in (c["command"] or ""):
             issues.append(f"connection {c['id']} command does not select {c['location']}")
+        if c["location"] and c["command"] != f"SELECT * FROM [{c['location']}]":
+            issues.append(f"connection {c['id']} command is not exact SELECT * for {c['location']}")
+    query_parts = {q["part"] for q in report["query_tables"]}
+    for link in report["wired_query_tables"]:
+        target = link["target"].replace("\\", "/")
+        # Relationship bases are the source table part directory, not its
+        # `_rels` directory: xl/tables/_rels/table1.xml.rels + ../queryTables
+        # resolves to xl/queryTables.
+        source_part_dir = posixpath.dirname(posixpath.dirname(link["table_rels"]))
+        target = posixpath.normpath(posixpath.join(source_part_dir, target))
+        if target not in query_parts:
+            issues.append(f"{link['table_rels']} targets missing queryTable part {target}")
     for q in report["query_tables"]:
         ids = {c["id"]: c["location"] for c in report["connections"]}
         if q["connectionId"] not in ids:

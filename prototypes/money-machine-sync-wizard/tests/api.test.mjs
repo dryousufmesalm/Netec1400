@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { createWizardApi, WizardApiError } from "../src/api.js";
+import { WizardApiError } from "../src/api.js";
+import { createWizardApi } from "../src/legacyHttpWizardApi.js";
 
 test("the explicitly injected HTTP test adapter uses same-origin credentials", async () => {
   const calls = [];

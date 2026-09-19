@@ -1,0 +1,157 @@
+{
+  "file": "outputs/amartrading-excel-20260904/AmarTrading_Excel_Master_2026-09-04.xlsx",
+  "embedded_queries": [
+    "AmarTrading_Baskets",
+    "AmarTrading_SyncStatus"
+  ],
+  "connections": [
+    {
+      "id": "1",
+      "name": "Query - AmarTrading_Baskets",
+      "location": "AmarTrading_Baskets",
+      "command": "SELECT * FROM [AmarTrading_Baskets]"
+    },
+    {
+      "id": "2",
+      "name": "Query - AmarTrading_SyncStatus",
+      "location": "AmarTrading_SyncStatus",
+      "command": "SELECT * FROM [AmarTrading_SyncStatus]"
+    }
+  ],
+  "worksheet_tables": [
+    {
+      "part": "xl/tables/table1.xml",
+      "name": "SyncStatusTable",
+      "ref": "A1:L5"
+    },
+    {
+      "part": "xl/tables/table2.xml",
+      "name": "ManualFieldsTable",
+      "ref": "A1:H101"
+    },
+    {
+      "part": "xl/tables/table3.xml",
+      "name": "BasketDataTable",
+      "ref": "A1:BW5"
+    }
+  ],
+  "query_tables": [
+    {
+      "part": "xl/queryTables/queryTable1.xml",
+      "name": "ExternalData_1",
+      "connectionId": "2",
+      "fields": [
+        "AccountNumber",
+        "FolderAccountNumber",
+        "FolderAccountMismatch",
+        "Status",
+        "RowCount",
+        "SourceHash",
+        "DestinationHash",
+        "SourceLastWriteUtc",
+        "PublishedUtc",
+        "HeartbeatAgeHours",
+        "IsFresh",
+        "CloudDeliveryVerified"
+      ]
+    },
+    {
+      "part": "xl/queryTables/queryTable2.xml",
+      "name": "ExternalData_1",
+      "connectionId": "1",
+      "fields": [
+        "AccountNumber",
+        "BrokerName",
+        "BasketID",
+        "Symbol",
+        "SymbolNormalized",
+        "Timeframe",
+        "StartTime",
+        "EndTime",
+        "DurationSeconds",
+        "Direction",
+        "OrdersCount",
+        "TotalLots",
+        "FixedLots",
+        "MaxOrdersConcurrent",
+        "MaxTotalLots",
+        "MaxFloatingDrawdownAbs",
+        "MaxFloatingProfit",
+        "ClosePL",
+        "CloseReason",
+        "OutcomeClass",
+        "SpreadAtEntry",
+        "EquityAtEntry",
+        "HeadroomAtEntry",
+        "MinHeadroom",
+        "TimesNearKill",
+        "ExposureBlocks",
+        "PipsStep",
+        "TakeProfit",
+        "KillEquityLevel",
+        "MaxOrdersInBasket",
+        "MaxTotalLotsInBasket",
+        "EquityAtExit",
+        "BalanceAfter",
+        "TradeDate",
+        "RunID",
+        "RunStartTime",
+        "RunStartBalance",
+        "EAName",
+        "EAVersion",
+        "Magic",
+        "PointsPerPip",
+        "Tral",
+        "TralStart",
+        "MaxSpread",
+        "TimeStart",
+        "TimeEnd",
+        "OpenTime",
+        "NewBasketDelaySeconds",
+        "SpeedEA",
+        "UseBasketTrailingTP",
+        "TrailingStart",
+        "TrailingStep",
+        "KillSwitchEnable",
+        "KillCooldownMinutes",
+        "RegimeEnable",
+        "RegimeAction",
+        "RegimeADXPeriod",
+        "RegimeADXLevel",
+        "RegimeADXBars",
+        "RegimeRangeBars",
+        "RegimeRecoveryBars",
+        "EnableTradingDaysFilter",
+        "TradeMonday",
+        "TradeTuesday",
+        "TradeWednesday",
+        "TradeThursday",
+        "TradeFriday",
+        "EnableRecoveryStepUp",
+        "RecoveryWaitMinutes",
+        "RecoveryMaxTotalLotsInBasket",
+        "CsvSchemaVersion",
+        "FolderAccountNumber",
+        "RunKey",
+        "FolderAccountMismatch",
+        "ConfigFingerprint"
+      ]
+    }
+  ],
+  "wired_query_tables": [
+    {
+      "table_rels": "xl/tables/_rels/table1.xml.rels",
+      "target": "../queryTables/queryTable1.xml"
+    },
+    {
+      "table_rels": "xl/tables/_rels/table3.xml.rels",
+      "target": "../queryTables/queryTable2.xml"
+    }
+  ],
+  "folder_files_arguments": [
+    "FolderPath"
+  ],
+  "mashup_length_mismatch": false,
+  "uses_onedrive_amartrading": true,
+  "issues": []
+}

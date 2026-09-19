@@ -14,21 +14,32 @@ $ErrorActionPreference = 'Stop'
 function Get-AmmarTradingDestinationPath {
     param(
         [Parameter(Mandatory)][string]$OneDriveRoot,
-        [Parameter(Mandatory)][string]$AccountNumber
+        [Parameter(Mandatory)][string]$AccountNumber,
+        [string]$VpsId,
+        [string]$DestinationFolder
     )
 
-    Join-Path $OneDriveRoot (Join-Path 'amartrading' (Join-Path ("Account_{0}" -f $AccountNumber) 'Baskets.csv'))
+    $resolvedRoot = Resolve-AmmarTradingOneDriveRoot -Path $OneDriveRoot
+    $folder = if([string]::IsNullOrWhiteSpace($DestinationFolder)) { Join-Path $resolvedRoot 'amartrading' } else { [IO.Path]::GetFullPath([Environment]::ExpandEnvironmentVariables($DestinationFolder.Trim())) }
+    $rootPrefix = $resolvedRoot.TrimEnd([IO.Path]::DirectorySeparatorChar,[IO.Path]::AltDirectorySeparatorChar) + [IO.Path]::DirectorySeparatorChar
+    if(-not $folder.StartsWith($rootPrefix, [StringComparison]::OrdinalIgnoreCase)) { throw 'The destination folder must be inside the selected OneDrive root.' }
+    $accountPath = Join-Path ("Account_{0}" -f $AccountNumber) 'Baskets.csv'
+    $relative = if([string]::IsNullOrWhiteSpace($VpsId)) { $accountPath } else { Join-Path ("VPS_{0}" -f $VpsId) $accountPath }
+    Join-Path $folder $relative
 }
 
 function Get-AmmarTradingHeartbeatStatus {
     param(
         [Parameter(Mandatory)][string]$OneDriveRoot,
         [Parameter(Mandatory)][string]$AccountNumber,
+        [string]$VpsId,
+        [string]$DestinationFolder,
         [Parameter(Mandatory)][double]$FreshnessHours
     )
 
     $result = [ordered]@{
         AccountNumber = $AccountNumber
+        VpsId = if($VpsId){$VpsId}else{'legacy-unassigned'}
         Status = 'Error'
         StatusCode = 'HeartbeatError'
         IsFresh = $false
@@ -37,7 +48,7 @@ function Get-AmmarTradingHeartbeatStatus {
     }
     try {
         if([string]::IsNullOrWhiteSpace($AccountNumber)) { throw 'Expected account number is empty.' }
-        $destination = Get-AmmarTradingDestinationPath -OneDriveRoot $OneDriveRoot -AccountNumber $AccountNumber
+        $destination = Get-AmmarTradingDestinationPath -OneDriveRoot $OneDriveRoot -AccountNumber $AccountNumber -VpsId $VpsId -DestinationFolder $DestinationFolder
         $statusPath = Join-Path (Split-Path -Parent $destination) 'SyncStatus.json'
         if(-not (Test-Path -LiteralPath $statusPath -PathType Leaf)) {
             $result.StatusCode = 'MissingHeartbeat'
@@ -48,6 +59,7 @@ function Get-AmmarTradingHeartbeatStatus {
             $result.StatusCode = 'AccountMismatch'
             throw 'Heartbeat account does not match the expected folder account.'
         }
+        if($VpsId -and [string]$heartbeat.VpsId -cne $VpsId) { $result.StatusCode = 'VpsMismatch'; throw 'Heartbeat VPS identity does not match the configured VPS.' }
         if([string]$heartbeat.Status -cne 'Success') {
             $result.StatusCode = 'PublisherError'
             throw "Heartbeat status is '$($heartbeat.Status)' instead of Success."
@@ -157,8 +169,10 @@ function Get-AmmarTradingConfiguredSyncStatus {
             })
             continue
         }
-        $destination = Get-AmmarTradingDestinationPath -OneDriveRoot $configuredRoot -AccountNumber $accountNumber
-        $heartbeat = Get-AmmarTradingHeartbeatStatus -OneDriveRoot $configuredRoot -AccountNumber $accountNumber -FreshnessHours $FreshnessHours
+        $vpsId = if($configuration.PSObject.Properties['VpsId']) { ([string]$configuration.VpsId).Trim() } else { '' }
+        $destinationFolder = if($configuration.PSObject.Properties['DestinationFolder']) { ([string]$configuration.DestinationFolder).Trim() } else { '' }
+        $destination = Get-AmmarTradingDestinationPath -OneDriveRoot $configuredRoot -AccountNumber $accountNumber -VpsId $vpsId -DestinationFolder $destinationFolder
+        $heartbeat = Get-AmmarTradingHeartbeatStatus -OneDriveRoot $configuredRoot -AccountNumber $accountNumber -VpsId $vpsId -DestinationFolder $destinationFolder -FreshnessHours $FreshnessHours
         $localPublished = Test-Path -LiteralPath $destination -PathType Leaf
         $destinationItem = if($localPublished) { Get-Item -LiteralPath $destination -ErrorAction SilentlyContinue } else { $null }
         $sourceCsv = [Environment]::ExpandEnvironmentVariables(([string]$configuration.SourceCsv).Trim())
@@ -169,11 +183,15 @@ function Get-AmmarTradingConfiguredSyncStatus {
         $statusCode = if(-not $localPublished -and $heartbeat.StatusCode -ceq 'Fresh') { 'DestinationMissing' } else { [string]$heartbeat.StatusCode }
         $status = if($localPublished -and $heartbeat.Status -ceq 'Success') { 'Success' } else { 'Error' }
         $accounts.Add([pscustomobject][ordered]@{
+            VpsId = if($vpsId){$vpsId}else{'legacy-unassigned'}
+            VpsName = if($configuration.PSObject.Properties['VpsName']) { [string]$configuration.VpsName } else { '' }
             AccountNumber = $accountNumber
+            AccountKey = ('{0}|{1}' -f $(if($vpsId){$vpsId}else{'legacy-unassigned'}),$accountNumber)
             BrokerName = if($null -eq $identity) { '' } else { [string]$identity.BrokerName }
             SchemaVersion = if($null -eq $identity) { '' } else { [string]$identity.SchemaVersion }
             SourceCsv = $sourceCsv
             Destination = $destination
+            DestinationFolder = if([string]::IsNullOrWhiteSpace($destinationFolder)) { Join-Path $configuredRoot 'amartrading' } else { $destinationFolder }
             LocalPublished = $localPublished
             LastWriteUtc = if($null -eq $destinationItem) { $null } else { $destinationItem.LastWriteTimeUtc.ToString('o') }
             Freshness = if([bool]$heartbeat.IsFresh) { 'Fresh' } elseif($heartbeat.StatusCode -ceq 'StaleHeartbeat') { 'Stale' } else { 'Unknown' }
