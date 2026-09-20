@@ -75,6 +75,9 @@ function Assert-ReleasePayload {
 
     $required = @(
         'AmmarTrading.Sync.exe',
+        'AmmarTrading.Sync.dll',
+        'AmmarTrading.Sync.deps.json',
+        'AmmarTrading.Sync.runtimeconfig.json',
         'AmmarTrading.Sync.payload-manifest.txt',
         'Assets\Web\index.html',
         'Scripts\Install-BasketsSyncTask.ps1',
@@ -87,6 +90,17 @@ function Assert-ReleasePayload {
     foreach($relativePath in $required) {
         if(-not (Test-Path -LiteralPath (Join-Path $PublishDirectory $relativePath) -PathType Leaf)) {
             throw "Release payload is missing: $relativePath"
+        }
+    }
+
+    $legacyCompanionNames = @(
+        'amarTrading.Sync.dll',
+        'amarTrading.Sync.deps.json',
+        'amarTrading.Sync.runtimeconfig.json'
+    ) | ForEach-Object { $_.ToLowerInvariant() }
+    foreach($file in @(Get-ChildItem -LiteralPath $PublishDirectory -File -Recurse -Force)) {
+        if($legacyCompanionNames -contains $file.Name.ToLowerInvariant()) {
+            throw "Legacy release companion name is forbidden: $($file.Name)"
         }
     }
 
@@ -299,19 +313,6 @@ foreach($scriptName in $allowedScripts) {
 }
 $createdumpPath = Join-Path $publishRoot 'createdump.exe'
 if(Test-Path -LiteralPath $createdumpPath -PathType Leaf) { Remove-Item -LiteralPath $createdumpPath -Force }
-# The apphost is compiled against AssemblyName amarTrading.Sync.dll. Renaming that
-# DLL makes .NET exit immediately. Only the installer-facing exe name is canonicalized.
-$canonicalProductNames = @{
-    'amartrading.sync.exe' = 'AmmarTrading.Sync.exe'
-}
-foreach($publishedFile in @(Get-ChildItem -LiteralPath $publishRoot -File)) {
-    $canonicalName = $canonicalProductNames[$publishedFile.Name.ToLowerInvariant()]
-    if($canonicalName -and $publishedFile.Name -cne $canonicalName) {
-        $temporaryName = $canonicalName + '.rename'
-        Rename-Item -LiteralPath $publishedFile.FullName -NewName $temporaryName
-        Rename-Item -LiteralPath (Join-Path $publishRoot $temporaryName) -NewName $canonicalName
-    }
-}
 if($null -ne $signingCertificate) {
     # Only our own binaries and scripts are signed. Re-signing the bundled .NET runtime would
     # replace Microsoft's Authenticode signatures with a self-signed one, which is strictly worse.

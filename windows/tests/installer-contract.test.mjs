@@ -9,6 +9,7 @@ const windowsRoot = path.resolve(testsRoot, "..");
 const build = await readFile(path.join(windowsRoot, "scripts", "Build-AmmarTradingSync.ps1"), "utf8");
 const acceptance = await readFile(path.join(windowsRoot, "scripts", "Test-AmmarTradingSyncAcceptance.ps1"), "utf8");
 const installer = await readFile(path.join(windowsRoot, "installer", "AmmarTradingSync.iss"), "utf8");
+const appProject = await readFile(path.join(windowsRoot, "src", "AmmarTrading.Sync.App", "AmmarTrading.Sync.App.csproj"), "utf8");
 
 test("acceptance owns its isolated install root and validates containment before mutation", () => {
   const topLevelParameters = acceptance.slice(0, acceptance.indexOf("$ErrorActionPreference"));
@@ -40,6 +41,30 @@ test("published and installed executable payloads use explicit allowlists", () =
   assert.match(build, /Remove-Item -LiteralPath \$createdumpPath -Force/);
   assert.match(build, /\$allowedExecutables\s*=\s*@\('AmmarTrading\.Sync\.exe'\)/);
   assert.match(acceptance, /\$allowedInstalledExecutables\s*=\s*@\('AmmarTrading\.Sync\.exe','unins000\.exe'\)/);
+});
+
+test("release payload uses unified apphost companions and rejects legacy names", () => {
+  assert.match(appProject, /<AssemblyName>AmmarTrading\.Sync<\/AssemblyName>/);
+  const releasePayloadAssertion = build.slice(
+    build.indexOf("function Assert-ReleasePayload"),
+    build.indexOf("function Remove-CanonicalReleaseArtifacts"),
+  );
+  for (const companion of [
+    "AmmarTrading.Sync.exe",
+    "AmmarTrading.Sync.dll",
+    "AmmarTrading.Sync.deps.json",
+    "AmmarTrading.Sync.runtimeconfig.json",
+  ]) {
+    assert.match(releasePayloadAssertion, new RegExp(`['\"]${companion.replaceAll(".", "\\.")}['\"]`));
+  }
+  for (const legacy of [
+    "amarTrading.Sync.dll",
+    "amarTrading.Sync.deps.json",
+    "amarTrading.Sync.runtimeconfig.json",
+  ]) {
+    assert.match(releasePayloadAssertion, new RegExp(`${legacy.replaceAll(".", "\\.")}.*ToLowerInvariant`, "s"));
+  }
+  assert.doesNotMatch(build, /canonicalProductNames|apphost is compiled against AssemblyName/i);
 });
 
 test("acceptance cleanup is anchored to the exact AppId and attempted root", () => {
