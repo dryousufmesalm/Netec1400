@@ -97,9 +97,9 @@ function Assert-ReleasePayload {
         'amarTrading.Sync.dll',
         'amarTrading.Sync.deps.json',
         'amarTrading.Sync.runtimeconfig.json'
-    ) | ForEach-Object { $_.ToLowerInvariant() }
+    )
     foreach($file in @(Get-ChildItem -LiteralPath $PublishDirectory -File -Recurse -Force)) {
-        if($legacyCompanionNames -contains $file.Name.ToLowerInvariant()) {
+        if($legacyCompanionNames -ccontains $file.Name) {
             throw "Legacy release companion name is forbidden: $($file.Name)"
         }
     }

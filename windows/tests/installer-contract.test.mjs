@@ -62,8 +62,14 @@ test("release payload uses unified apphost companions and rejects legacy names",
     "amarTrading.Sync.deps.json",
     "amarTrading.Sync.runtimeconfig.json",
   ]) {
-    assert.match(releasePayloadAssertion, new RegExp(`${legacy.replaceAll(".", "\\.")}.*ToLowerInvariant`, "s"));
+    assert.match(releasePayloadAssertion, new RegExp(`['\"]${legacy.replaceAll(".", "\\.")}['\"]`));
   }
+  const legacyCompanionCheck = releasePayloadAssertion.slice(
+    releasePayloadAssertion.indexOf("$legacyCompanionNames"),
+    releasePayloadAssertion.indexOf("$forbiddenExtensions"),
+  );
+  assert.match(legacyCompanionCheck, /\$legacyCompanionNames\s+-ccontains\s+\$file\.Name/);
+  assert.doesNotMatch(legacyCompanionCheck, /ToLowerInvariant/);
   assert.doesNotMatch(build, /canonicalProductNames|apphost is compiled against AssemblyName/i);
 });
 
