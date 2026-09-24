@@ -190,12 +190,20 @@ try {
             Assert-RequestProperties -Request $request -Allowed @('accountNumbers')
             if(-not (Test-Path -LiteralPath $configPath -PathType Leaf)) { throw 'No account configuration is available.' }
             $syncScript = Join-Path $PSScriptRoot 'Sync-BasketsToOneDrive.ps1'
-            . $syncScript -AsLibrary -ConfigPath $configPath -RuntimeRoot $canonicalRuntimeRoot
             [string[]]$accountNumbers = if($null -eq $request.PSObject.Properties['accountNumbers']) { @() } else { @($request.accountNumbers | ForEach-Object { ([string]$_).Trim() }) }
             if(@($accountNumbers | Where-Object { $_ -notmatch '^\d{4,20}$' }).Count -gt 0 -or @($accountNumbers | Select-Object -Unique).Count -ne @($accountNumbers).Count) { throw 'The account selection is invalid.' }
-            $syncParameters = @{ ConfigPath=$configPath; StableCheckSeconds=2; MaxRetries=1; RuntimeRoot=$canonicalRuntimeRoot }
-            if(@($accountNumbers).Count -gt 0) { $syncParameters['AccountNumbers'] = $accountNumbers }
-            $results = @(Invoke-MoneyMachineCsvSync @syncParameters)
+            $syncInvocation = [pscustomobject]@{
+                ConfigPath = $configPath
+                RuntimeRoot = $canonicalRuntimeRoot
+                AccountNumbers = $accountNumbers
+            }
+            $results = @(& {
+                param($LibraryPath,$Invocation)
+                . $LibraryPath -AsLibrary -ConfigPath $Invocation.ConfigPath -RuntimeRoot $Invocation.RuntimeRoot
+                $syncParameters = @{ ConfigPath=$Invocation.ConfigPath; StableCheckSeconds=2; MaxRetries=1; RuntimeRoot=$Invocation.RuntimeRoot }
+                if(@($Invocation.AccountNumbers).Count -gt 0) { $syncParameters['AccountNumbers'] = @($Invocation.AccountNumbers) }
+                Invoke-MoneyMachineCsvSync @syncParameters
+            } $syncScript $syncInvocation)
             if(@($results | Where-Object Status -eq 'Error').Count -gt 0) { throw 'One or more configured accounts could not be synchronized.' }
             [pscustomobject]@{ Status='Success'; Results=$results; CloudDeliveryVerified=$false }
             break

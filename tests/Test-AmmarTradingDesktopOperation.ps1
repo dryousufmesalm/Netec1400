@@ -16,6 +16,7 @@ $requestRoot = Join-Path $runtimeRoot 'requests'
 $fixturePath = Join-Path $PSScriptRoot 'fixtures\AGOLD___Baskets_v3.csv'
 $testOneDriveAccountKey = 'HKCU:\Software\Microsoft\OneDrive\Accounts\AmmarTradingTest_' + [guid]::NewGuid().ToString('N')
 $previousOneDrive = $env:OneDrive
+$script:lastDesktopOperationStdout = ''
 $powerShell = if(Test-Path -LiteralPath (Join-Path $PSHOME 'pwsh.exe')) {
     Join-Path $PSHOME 'pwsh.exe'
 } else {
@@ -54,6 +55,7 @@ function Invoke-DesktopOperation {
         $lines = @(& $powerShell -NoProfile -NonInteractive -File $EntryPoint -Operation $Operation -RequestPath $requestPath -RuntimeRoot $runtimeRoot 2>$stderrPath)
         $exitCode = $LASTEXITCODE
         $stdout = $lines -join [Environment]::NewLine
+        $script:lastDesktopOperationStdout = $stdout
         Assert-True -Condition (-not [string]::IsNullOrWhiteSpace($stdout)) -Message "$Operation must emit a JSON response."
         $parsed = $stdout | ConvertFrom-Json -ErrorAction Stop
         Assert-True -Condition ($stdout.Trim().StartsWith('{') -and $stdout.Trim().EndsWith('}')) -Message "$Operation must emit exactly one JSON object."
@@ -116,6 +118,8 @@ try {
         }) | Export-Csv -LiteralPath (Join-Path $runtimeRoot 'accounts.csv') -NoTypeInformation -Encoding utf8
 
         $sync = Invoke-DesktopOperation -Operation SyncNow -Request ([pscustomobject]@{ accountNumbers=@($manual[0].AccountNumber) })
+        Assert-True -Condition ($script:lastDesktopOperationStdout.Trim().StartsWith('{') -and $script:lastDesktopOperationStdout.Trim().EndsWith('}')) -Message 'SyncNow must keep the entry-point AsLibrary switch false and emit one JSON object.'
+        Assert-True -Condition ($sync.Status -ceq 'Success') -Message 'SyncNow must return a top-level success response.'
         Assert-True -Condition (@($sync.Results | Where-Object Status -eq 'Success').Count -eq 1) -Message 'SyncNow must publish the configured test account.'
 
         $status = Invoke-DesktopOperation -Operation Status -Request ([pscustomobject]@{})
