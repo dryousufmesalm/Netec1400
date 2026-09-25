@@ -47,7 +47,7 @@ function Get-BasketsSyncTaskDefinition {
     if([string]::IsNullOrWhiteSpace($PrincipalUser)) { throw 'Task principal user is required.' }
 
     if([string]::IsNullOrWhiteSpace($RuntimeRoot)) { $RuntimeRoot = Split-Path -Parent $ResolvedConfig }
-    $baseArguments = '-NoProfile -NonInteractive -ExecutionPolicy Bypass -File "{0}" -ConfigPath "{1}" -RuntimeRoot "{2}"' -f $SyncScript,$ResolvedConfig,$RuntimeRoot
+    $baseArguments = '-NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File "{0}" -ConfigPath "{1}" -RuntimeRoot "{2}"' -f $SyncScript,$ResolvedConfig,$RuntimeRoot
     $dailyAction = New-ScheduledTaskAction -Execute $PowerShellPath -Argument $baseArguments -WorkingDirectory $WorkingDirectory
     $catchupAction = New-ScheduledTaskAction -Execute $PowerShellPath -Argument "$baseArguments -StartupCatchup" -WorkingDirectory $WorkingDirectory
     $dailyTrigger = New-ScheduledTaskTrigger -Daily -At $DailyTime

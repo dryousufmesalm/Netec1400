@@ -13,4 +13,8 @@ if($scriptText -notmatch '\$principalUser\s*=\s*\(& whoami\)\.Trim\(\)' -or $scr
     throw 'Installer must resolve the current Windows identity and use it for the task principal.'
 }
 
+if($scriptText -notmatch '-WindowStyle\s+Hidden') {
+    throw 'Installer must register scheduled PowerShell actions with -WindowStyle Hidden so sync does not flash a console window.'
+}
+
 Write-Host 'Scheduled-task installer identity test passed.'
