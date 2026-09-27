@@ -452,6 +452,7 @@ public sealed class PowerShellOperations : IAmmarTradingOperations
     {
         code = string.Empty;
         message = string.Empty;
+        stdout = stdout?.Trim() ?? string.Empty;
         if (string.IsNullOrWhiteSpace(stdout) || Encoding.UTF8.GetByteCount(stdout) > 4096)
         {
             return false;
