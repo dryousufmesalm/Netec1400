@@ -109,10 +109,22 @@ export function canContinueFromAccounts(state) {
   return state.selectedDiscoveryIds.every((id) => eligibleIds.has(id));
 }
 
+export function resolveVpsName(state) {
+  const typed = String(state?.vpsName ?? "").trim();
+  if (typed) return typed;
+  const status = state?.systemStatus;
+  const fromStatus = String(
+    value(status, "vpsName", "VpsName")
+      || value(status, "computerName", "ComputerName")
+      || "",
+  ).trim();
+  return fromStatus || "This VPS";
+}
+
 export function buildSetupPayload(state) {
   const selectedIds = new Set(state.selectedDiscoveryIds);
   return {
-    vpsName: state.vpsName.trim(),
+    vpsName: resolveVpsName(state),
     oneDriveRoot: state.oneDriveRoot,
     destinationFolder: state.destinationFolder || defaultDestinationFolder(state.oneDriveRoot),
     accounts: state.accounts
@@ -157,13 +169,15 @@ export function reduceWizard(state, action) {
     }
     case "SYSTEM_LOADED": {
       const status = action.status ?? {};
-      const suggestedName = String(value(status, "vpsName", "VpsName")
-        ?? value(status, "computerName", "ComputerName")
-        ?? "This VPS");
+      const suggestedName = String(
+        value(status, "vpsName", "VpsName")
+          || value(status, "computerName", "ComputerName")
+          || "This VPS",
+      ).trim() || "This VPS";
       return {
         ...state,
         systemStatus: status,
-        vpsName: state.vpsName || suggestedName,
+        vpsName: String(state.vpsName ?? "").trim() || suggestedName,
         error: null,
       };
     }

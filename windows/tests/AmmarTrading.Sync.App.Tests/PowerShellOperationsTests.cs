@@ -1,3 +1,4 @@
+using System.Runtime.CompilerServices;
 using System.Security.AccessControl;
 using System.Security.Principal;
 using System.Text.Json;
@@ -20,6 +21,19 @@ public sealed class PowerShellOperationsTests : IDisposable
         File.WriteAllText(
             Path.Combine(_testRoot, "app", "Scripts", "Invoke-AmmarTradingDesktopOperation.ps1"),
             "# fixed test entry point");
+    }
+
+    [Fact]
+    public void PowerShellOperations_type_initializer_does_not_throw()
+    {
+        var exception = Record.Exception(() =>
+            RuntimeHelpers.RunClassConstructor(typeof(PowerShellOperations).TypeHandle));
+
+        Assert.Null(exception);
+
+        // Constructing previously failed during static Regex NonBacktracking initialization.
+        var operations = CreateOperations(FakeProcessRunner.Returns(Success("{}")));
+        Assert.NotNull(operations);
     }
 
     [Fact]

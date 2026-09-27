@@ -5,7 +5,6 @@ using System.Security.Principal;
 using System.Runtime.InteropServices;
 using System.Text;
 using System.Text.Json;
-using System.Text.RegularExpressions;
 using AmmarTrading.Sync.Core.Services;
 using Microsoft.Win32.SafeHandles;
 
@@ -58,12 +57,9 @@ public sealed class PowerShellOperationException : SafeOperationException
 public sealed class PowerShellOperations : IAmmarTradingOperations
 {
     private const int MaximumResponseBytes = 1024 * 1024;
-    private static readonly Regex SafeDesktopFailureCode = new(
-        "^[A-Za-z][A-Za-z0-9]{0,63}$",
-        RegexOptions.CultureInvariant | RegexOptions.NonBacktracking);
-    private static readonly Regex SafeDesktopFailureMessage = new(
-        "^[A-Za-z0-9 .,'()-]{1,200}$",
-        RegexOptions.CultureInvariant | RegexOptions.NonBacktracking);
+    // Manual validators: RegexOptions.NonBacktracking rejects these character-class
+    // patterns ({0,63}/{1,200}) for exceeding the automata node limit and crashes
+    // PowerShellOperations type initialization, which blocks Sync startup.
 
     private static readonly TimeSpan DefaultShortTimeout = TimeSpan.FromSeconds(30);
     private static readonly TimeSpan DefaultSetupTimeout = TimeSpan.FromSeconds(120);
@@ -456,6 +452,7 @@ public sealed class PowerShellOperations : IAmmarTradingOperations
     {
         code = string.Empty;
         message = string.Empty;
+        stdout = stdout?.Trim() ?? string.Empty;
         if (string.IsNullOrWhiteSpace(stdout) || Encoding.UTF8.GetByteCount(stdout) > 4096)
         {
             return false;
@@ -491,8 +488,8 @@ public sealed class PowerShellOperations : IAmmarTradingOperations
                 return false;
             }
 
-            if (!SafeDesktopFailureCode.IsMatch(parsedCode) ||
-                !SafeDesktopFailureMessage.IsMatch(parsedMessage))
+            if (!IsSafeDesktopFailureCode(parsedCode) ||
+                !IsSafeDesktopFailureMessage(parsedMessage))
             {
                 return false;
             }
@@ -506,6 +503,56 @@ public sealed class PowerShellOperations : IAmmarTradingOperations
             return false;
         }
     }
+
+    private static bool IsSafeDesktopFailureCode(string value)
+    {
+        if (value.Length is < 1 or > 64)
+        {
+            return false;
+        }
+
+        if (!IsAsciiLetter(value[0]))
+        {
+            return false;
+        }
+
+        for (var index = 1; index < value.Length; index++)
+        {
+            if (!IsAsciiLetterOrDigit(value[index]))
+            {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    private static bool IsSafeDesktopFailureMessage(string value)
+    {
+        if (value.Length is < 1 or > 200)
+        {
+            return false;
+        }
+
+        foreach (var character in value)
+        {
+            if (IsAsciiLetterOrDigit(character) ||
+                character is ' ' or '.' or ',' or '\'' or '(' or ')' or '-')
+            {
+                continue;
+            }
+
+            return false;
+        }
+
+        return true;
+    }
+
+    private static bool IsAsciiLetter(char character) =>
+        character is (>= 'A' and <= 'Z') or (>= 'a' and <= 'z');
+
+    private static bool IsAsciiLetterOrDigit(char character) =>
+        IsAsciiLetter(character) || character is >= '0' and <= '9';
 
     private static bool TryReadJsonString(JsonElement root, string pascalName, string camelName, out string value)
     {

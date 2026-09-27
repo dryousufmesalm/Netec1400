@@ -1782,7 +1782,10 @@ function Invoke-AmmarTradingBatchSetup {
     )
 
     $stages = [System.Collections.Generic.List[object]]::new()
-    $vpsName = ([string]$Request.VpsName).Trim()
+    # Prefer camelCase from the wizard payload; fall back to PascalCase for older callers.
+    $vpsNameProperty = $Request.PSObject.Properties['vpsName']
+    if($null -eq $vpsNameProperty) { $vpsNameProperty = $Request.PSObject.Properties['VpsName'] }
+    $vpsName = if($null -eq $vpsNameProperty) { '' } else { ([string]$vpsNameProperty.Value).Trim() }
     if([string]::IsNullOrWhiteSpace($vpsName)) { throw 'VPS name is required.' }
     if($vpsName.Length -gt 100) { throw 'VPS name must be 100 characters or fewer.' }
     $vpsIdentity = Get-AmmarTradingVpsIdentity -RuntimeRoot $RuntimeRoot -VpsName $vpsName

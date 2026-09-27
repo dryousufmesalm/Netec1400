@@ -50,6 +50,9 @@ function arrayField(record, camelName, pascalName) {
 
 function safeMessage(error) {
   if (/OneDrive/i.test(error?.message ?? "")) return "OneDrive is not ready. Sign in to OneDrive on this VPS, then try again.";
+  if (/VPS name/i.test(error?.message ?? "")) {
+    return "Enter a VPS name on the System step (for example this computer name), then apply setup again.";
+  }
   if (/schema|csv|account|selection|discovery/i.test(error?.message ?? "")) return error.message;
   return error?.message || "AmarTrading Sync could not complete that action. Try again or export a support report.";
 }
@@ -478,7 +481,12 @@ export function App() {
         return;
       }
 
-      const vpsName = field(systemStatus, "computerName", "ComputerName", "This VPS");
+      const vpsName = String(
+        field(systemStatus, "computerName", "ComputerName", "")
+          || field(systemStatus, "vpsName", "VpsName", "")
+          || "This VPS",
+      ).trim() || "This VPS";
+      dispatch({ type: "VPS_NAME_CHANGED", vpsName });
       const payload = buildAutomaticSetupPayload({ vpsName, accounts: eligible, oneDriveRoot, destinationFolder: defaultDestinationFolder(oneDriveRoot) });
       setActivity("Checking the MT4 files, then enabling automatic sync…");
       const validation = await wizardApi.validateSelection(payload);

@@ -1,3 +1,4 @@
+using System.IO;
 using System.Windows;
 using AmmarTrading.Sync.App.Hosting;
 using AmmarTrading.Sync.App.Services;
@@ -39,8 +40,26 @@ public partial class App : System.Windows.Application
                 _window.Dispatcher.BeginInvoke(() => WindowActivation.BringToForeground(_window)));
             _window.Show();
         }
-        catch
+        catch (Exception error)
         {
+            try
+            {
+                var crashDirectory = Path.Combine(
+                    Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+                    "AmarTrading",
+                    "Sync",
+                    "Logs");
+                Directory.CreateDirectory(crashDirectory);
+                File.WriteAllText(
+                    Path.Combine(crashDirectory, "startup-failure.txt"),
+                    DateTimeOffset.UtcNow.ToString("o") + Environment.NewLine +
+                    error + Environment.NewLine);
+            }
+            catch
+            {
+                // Best-effort crash capture must never replace the user-facing failure path.
+            }
+
             System.Windows.MessageBox.Show(
                 "AmarTrading Sync could not start. Reinstall the application, then try again.",
                 "AmarTrading Sync",
