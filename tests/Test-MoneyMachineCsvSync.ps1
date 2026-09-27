@@ -255,15 +255,44 @@ try {
 
     $installerPath = Join-Path (Split-Path -Parent $ScriptPath) 'Install-BasketsSyncTask.ps1'
     . $installerPath -AsLibrary -ConfigPath $testConfigPath
-    Assert-BasketsSyncTaskPrerequisites -PowerShellPath $windowsPowerShell
-    $taskDefinition = Get-BasketsSyncTaskDefinition -ResolvedConfig (Resolve-Path -LiteralPath $testConfigPath).Path -SyncScript $ScriptPath -PowerShellPath $windowsPowerShell -WorkingDirectory (Split-Path -Parent $ScriptPath) -DailyTime ([datetime]::Today.AddHours(23).AddMinutes(59)) -TaskName 'MoneyMachine-Test' -PrincipalUser ((& whoami).Trim())
+    $wscriptPath = Join-Path $env:WINDIR 'System32\wscript.exe'
+    $launcherRoot = Join-Path $tempRoot 'launchers'
+    $dailyLauncher = Join-Path $launcherRoot 'MoneyMachine-Test-Daily.vbs'
+    $catchupLauncher = Join-Path $launcherRoot 'MoneyMachine-Test-StartupCatchup.vbs'
+    Assert-BasketsSyncTaskPrerequisites -PowerShellPath $windowsPowerShell -WScriptPath $wscriptPath
+    $taskDefinition = Get-BasketsSyncTaskDefinition `
+        -ResolvedConfig (Resolve-Path -LiteralPath $testConfigPath).Path `
+        -SyncScript $ScriptPath `
+        -PowerShellPath $windowsPowerShell `
+        -WScriptPath $wscriptPath `
+        -WorkingDirectory (Split-Path -Parent $ScriptPath) `
+        -DailyLauncherPath $dailyLauncher `
+        -CatchupLauncherPath $catchupLauncher `
+        -DailyTime ([datetime]::Today.AddHours(23).AddMinutes(59)) `
+        -TaskName 'MoneyMachine-Test' `
+        -PrincipalUser ((& whoami).Trim())
     if(-not [IO.Path]::IsPathRooted($taskDefinition.DailyAction.Execute) -or -not [IO.Path]::IsPathRooted($taskDefinition.DailyAction.WorkingDirectory)) { throw 'Task action executable and working directory must be absolute.' }
-    if($taskDefinition.DailyAction.Arguments -notmatch [regex]::Escape($ScriptPath) -or $taskDefinition.DailyAction.Arguments -notmatch [regex]::Escape((Resolve-Path -LiteralPath $testConfigPath).Path)) { throw 'Task action must contain absolute script and config paths.' }
+    if($taskDefinition.DailyAction.Execute -ne $wscriptPath) { throw 'Task action must execute wscript.exe so the sync console stays fully hidden.' }
+    if($taskDefinition.DailyAction.Arguments -notmatch '//B\s+//Nologo' -or $taskDefinition.DailyAction.Arguments -notmatch [regex]::Escape($dailyLauncher)) { throw 'Task action must launch the hidden .vbs with //B //Nologo.' }
+    $dailyLauncherText = Get-Content -LiteralPath $dailyLauncher -Raw
+    if($dailyLauncherText -notmatch [regex]::Escape($ScriptPath) -or $dailyLauncherText -notmatch [regex]::Escape((Resolve-Path -LiteralPath $testConfigPath).Path)) { throw 'Hidden launcher must contain absolute script and config paths.' }
+    if($dailyLauncherText -notmatch ',\s*0,\s*False' -or $dailyLauncherText -notmatch '-WindowStyle Hidden') { throw 'Hidden launcher must use WScript window style 0 and keep -WindowStyle Hidden.' }
     if([string]$taskDefinition.DailyTrigger.Repetition.Interval -ne 'PT5M') { throw 'Daily task must repeat every five minutes for live monitoring.' }
     if([string]$taskDefinition.Settings.MultipleInstances -ne 'IgnoreNew' -or $taskDefinition.Settings.RestartCount -ne 3) { throw 'Task settings must use IgnoreNew and three retries.' }
 
     $defaultStartBefore = (Get-Date).AddSeconds(30)
-    $defaultDefinition = Get-BasketsSyncTaskDefinition -ResolvedConfig (Resolve-Path -LiteralPath $testConfigPath).Path -SyncScript $ScriptPath -PowerShellPath $windowsPowerShell -WorkingDirectory (Split-Path -Parent $ScriptPath) -TaskName 'MoneyMachine-Test-DefaultStart' -PrincipalUser ((& whoami).Trim())
+    $defaultDailyLauncher = Join-Path $launcherRoot 'MoneyMachine-Test-DefaultStart-Daily.vbs'
+    $defaultCatchupLauncher = Join-Path $launcherRoot 'MoneyMachine-Test-DefaultStart-StartupCatchup.vbs'
+    $defaultDefinition = Get-BasketsSyncTaskDefinition `
+        -ResolvedConfig (Resolve-Path -LiteralPath $testConfigPath).Path `
+        -SyncScript $ScriptPath `
+        -PowerShellPath $windowsPowerShell `
+        -WScriptPath $wscriptPath `
+        -WorkingDirectory (Split-Path -Parent $ScriptPath) `
+        -DailyLauncherPath $defaultDailyLauncher `
+        -CatchupLauncherPath $defaultCatchupLauncher `
+        -TaskName 'MoneyMachine-Test-DefaultStart' `
+        -PrincipalUser ((& whoami).Trim())
     $defaultStart = [datetime]$defaultDefinition.DailyTrigger.StartBoundary
     $defaultStartAfter = (Get-Date).AddMinutes(2)
     if($defaultStart -lt $defaultStartBefore -or $defaultStart -gt $defaultStartAfter) { throw 'Default monitoring schedule must begin within two minutes of installation.' }
