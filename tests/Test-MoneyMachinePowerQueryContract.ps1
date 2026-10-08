@@ -27,6 +27,13 @@ foreach($query in @(
     # be inside the try expression so the fallback table is actually reached;
     # `try Folder.Files(...)` followed by Table.Buffer is a subtle regression.
     if($query.Source -notmatch 'try\s+Table\.Buffer\s*\(\s*Folder\.Files') { throw "$($query.Name) query must buffer Folder.Files inside its try/fallback guard." }
+    if($query.Source -notmatch 'LatestPerAccount') { throw "$($query.Name) query must keep only the latest source file per FolderAccountNumber." }
+    if($query.Source -notmatch 'PathKey') { throw "$($query.Name) query must dedupe identical OneDrive paths when amartrading and AmmarTrading resolve to the same tree." }
+    if($query.Source -notmatch 'DateModified') { throw "$($query.Name) query must rank candidate files by DateModified." }
+    if($query.Source -notmatch 'VpsRank') { throw "$($query.Name) query must prefer VPS_* account folders over flat legacy Account_* folders." }
+    if($query.Source -notmatch 'Table\.Group' -or $query.Source -notmatch 'Table\.FirstN') {
+        throw "$($query.Name) query must use Table.Group/Table.FirstN so latest-file selection is reliable on Excel 2019."
+    }
 }
 
 $expectedFingerprintFields = @(
@@ -45,6 +52,13 @@ if(($actualFingerprintFields -join '|') -cne ($expectedFingerprintFields -join '
 if($basketSource -notmatch 'Text\.From\s*\(\s*value\s*,\s*"en-US"\s*\)') { throw 'ConfigFingerprint conversion must use the en-US invariant culture.' }
 if($basketSource -notmatch 'FinalColumns\s*=\s*List\.Combine\s*\(\s*\{\s*ExpectedColumns\s*,\s*\{"VpsId","VpsName","FolderAccountNumber","AccountKey","RunKey","FolderAccountMismatch","ConfigFingerprint"\}\s*\}\s*\)') {
     throw 'Basket query final columns must include VPS identity and reporting keys after the source fields.'
+}
+# Account Analysis MATCH/XLOOKUP keys are AccountNumber|RunID.
+if($basketSource -notmatch '\[AccountNumber\]\s*&\s*"\|"\s*&\s*\[RunID\]') {
+    throw 'Basket RunKey must remain AccountNumber|RunID for Account Analysis formulas.'
+}
+if($basketSource -match '\[VpsId\]\s*&\s*"\|"\s*&\s*\[AccountNumber\]\s*&\s*"\|"\s*&\s*\[RunID\]') {
+    throw 'Basket RunKey must not include VpsId; Account Analysis formulas key on AccountNumber|RunID only.'
 }
 foreach($token in @('SyncStatus.json','PublishedUtc','HeartbeatAgeHours','Duration.TotalHours','FreshnessHours = 26','IsFresh','CloudDeliveryVerified')) {
     if($statusSource -notmatch [regex]::Escape($token)) { throw "Sync-status query is missing contract token: $token" }
