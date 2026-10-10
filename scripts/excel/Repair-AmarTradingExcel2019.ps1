@@ -111,19 +111,28 @@ try {
         for($j = 0; $j -lt $latestFields.Count; $j++) { Set-Formula $analysis.Cells.Item($row,9+$j) (Latest-Formula $latestFields[$j] $row) }
         Set-Formula $analysis.Cells.Item($row,33) (Manual-Formula 8 $row)
 
+        # Prefer RunKey (AccountNumber|RunID). Array "=" inside AGGREGATE does not coerce
+        # text↔number the way SUMIFS/COUNTIFS do, which left Max/2nd/3rd DD blank while
+        # Net Profit still matched. Force text on both sides with &"".
         $acct = "`$A$row"; $run = "`$B$row"
-        $criteria = "((BasketDataTable[AccountNumber]=$acct)*(BasketDataTable[RunID]=$run))"
-        Set-Formula $analysis.Cells.Item($row,34) "=IFERROR(SUMIFS(BasketDataTable[ClosePL],BasketDataTable[AccountNumber],$acct,BasketDataTable[RunID],$run),0)"
+        $runKey = "($acct&`"|`"&$run)"
+        $runKeyMatch = "(BasketDataTable[RunKey]&`"`"=$runKey)"
+        $acctMatch = "((BasketDataTable[AccountNumber]&`"`")=($acct&`"`"))"
+        $runMatch = "((BasketDataTable[RunID]&`"`")=($run&`"`"))"
+        $criteria = "($runKeyMatch)"
+        $criteriaLegacy = "($acctMatch*$runMatch)"
+        Set-Formula $analysis.Cells.Item($row,34) "=IFERROR(SUMIF(BasketDataTable[RunKey],$runKey,BasketDataTable[ClosePL]),0)"
         Set-Formula $analysis.Cells.Item($row,35) "=IFERROR(SUMPRODUCT(($criteria)*(BasketDataTable[TradeDate]<>`"`")/COUNTIFS(BasketDataTable[AccountNumber],BasketDataTable[AccountNumber],BasketDataTable[RunID],BasketDataTable[RunID],BasketDataTable[TradeDate],BasketDataTable[TradeDate])),0)"
         Set-Formula $analysis.Cells.Item($row,36) "=IFERROR(AH$row/AI$row,0)"
-        $helperCols = @('BP','BQ','BR','BS','BT','BU','BV','BW','BX','BY')
-        $rankFormula = { param([int]$k) "=IF(`$AO$row>=$k,IFERROR(AGGREGATE(14,6,BasketDataTable[MaxFloatingDrawdownAbs]/((BasketDataTable[AccountNumber]=`$A$row)*(BasketDataTable[RunID]=`$B$row)),$k),`"`") ,`"`")" }
+        # Ranked individual-basket MaxFloatingDrawdownAbs (positive magnitude) for this run.
+        $rankFormula = { param([int]$k) "=IF(`$AO$row>=$k,IFERROR(AGGREGATE(14,6,BasketDataTable[MaxFloatingDrawdownAbs]/($runKeyMatch),$k),IFERROR(AGGREGATE(14,6,BasketDataTable[MaxFloatingDrawdownAbs]/($criteriaLegacy),$k),`"`")),`"`")" }
         for($k = 1; $k -le 10; $k++) { Set-Formula $analysis.Cells.Item($row,67+$k) (&$rankFormula $k) }
         Set-Formula $analysis.Cells.Item($row,37) "=BP$row"
         Set-Formula $analysis.Cells.Item($row,38) "=BQ$row"
         Set-Formula $analysis.Cells.Item($row,39) "=BR$row"
-        Set-Formula $analysis.Cells.Item($row,40) "=IFERROR(AVERAGE(BP${row}:BY${row}),0)"
-        Set-Formula $analysis.Cells.Item($row,41) "=COUNTIFS(BasketDataTable[AccountNumber],$acct,BasketDataTable[RunID],$run)"
+        # Average only retrieved top ranks (COUNT ignores blank/text helpers).
+        Set-Formula $analysis.Cells.Item($row,40) "=IFERROR(SUM(BP${row}:BY${row})/MAX(1,COUNT(BP${row}:BY${row})),0)"
+        Set-Formula $analysis.Cells.Item($row,41) "=IFERROR(COUNTIF(BasketDataTable[RunKey],$runKey),0)"
         Set-Formula $analysis.Cells.Item($row,42) "=COUNTIFS(BasketDataTable[AccountNumber],$acct,BasketDataTable[RunID],$run,BasketDataTable[ClosePL],`">0`")"
         Set-Formula $analysis.Cells.Item($row,43) "=SUMIFS(BasketDataTable[ClosePL],BasketDataTable[AccountNumber],$acct,BasketDataTable[RunID],$run,BasketDataTable[ClosePL],`">0`")"
         Set-Formula $analysis.Cells.Item($row,44) "=COUNTIFS(BasketDataTable[AccountNumber],$acct,BasketDataTable[RunID],$run,BasketDataTable[ClosePL],`"<0`")"

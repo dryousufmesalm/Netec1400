@@ -84,7 +84,7 @@ let
         {"EquityAtEntry", type number},{"HeadroomAtEntry", type number},{"MinHeadroom", type number},{"TimesNearKill", Int64.Type},
         {"ExposureBlocks", Int64.Type},{"PipsStep", Int64.Type},{"TakeProfit", type number},{"KillEquityLevel", type number},
         {"MaxOrdersInBasket", Int64.Type},{"MaxTotalLotsInBasket", type number},{"EquityAtExit", type number},{"BalanceAfter", type number},
-        {"TradeDate", type date},{"RunStartTime", type datetime},{"RunStartBalance", type number},{"Magic", Int64.Type},
+        {"TradeDate", type date},{"RunID", type text},{"RunStartTime", type datetime},{"RunStartBalance", type number},{"Magic", Int64.Type},
         {"PointsPerPip", Int64.Type},{"Tral", Int64.Type},{"TralStart", Int64.Type},{"MaxSpread", Int64.Type},
         {"TimeStart", Int64.Type},{"TimeEnd", Int64.Type},{"OpenTime", Int64.Type},{"NewBasketDelaySeconds", Int64.Type},
         {"SpeedEA", Int64.Type},{"UseBasketTrailingTP", Int64.Type},{"TrailingStart", type number},{"TrailingStep", type number},
