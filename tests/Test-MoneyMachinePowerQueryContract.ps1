@@ -92,7 +92,7 @@ public static class MoneyMachineTestNativeWindow {
         $excel.DisplayAlerts = $false
         [void][MoneyMachineTestNativeWindow]::GetWindowThreadProcessId([IntPtr]$excel.Hwnd, [ref]$excelProcessId)
         $workbook = $excel.Workbooks.Open((Resolve-Path -LiteralPath $WorkbookPath).Path, 0, $true)
-        foreach($queryName in @('AmarTrading_Baskets','AmarTrading_SyncStatus')) {
+        foreach($queryName in @('AmarTrading_Baskets','AmarTrading_SyncStatus','AmarTrading_AccountRuns')) {
             try { $null = $workbook.Queries.Item($queryName) } catch { throw "Workbook query is missing: $queryName" }
         }
         $basketTable = $workbook.Worksheets.Item('Basket Data').ListObjects.Item('BasketDataTable')

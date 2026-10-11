@@ -18,8 +18,10 @@ if(-not (Test-Path -LiteralPath $OneDriveRoot -PathType Container)) { throw "One
 $queryFiles = [ordered]@{
     # File names retain the product-family prefix. Workbook query names are
     # canonical AmarTrading_* names and must match the OLE DB query targets.
+    # AccountRuns depends on AmarTrading_Baskets (referenced by name in M).
     AmarTrading_Baskets = Join-Path $resolvedQueryRoot 'MoneyMachine_Baskets.m'
     AmarTrading_SyncStatus = Join-Path $resolvedQueryRoot 'MoneyMachine_SyncStatus.m'
+    AmarTrading_AccountRuns = Join-Path $resolvedQueryRoot 'MoneyMachine_AccountRuns.m'
 }
 foreach($path in $queryFiles.Values) {
     if(-not (Test-Path -LiteralPath $path -PathType Leaf)) { throw "Power Query source not found: $path" }
@@ -64,9 +66,9 @@ function Remove-AmarTradingQueryConnections {
     # the six possible legacy/canonical query targets before recreating the two
     # required tables, leaving unrelated workbook connections untouched.
     $queryNames = @(
-        'MoneyMachine_Baskets','MoneyMachine_SyncStatus',
-        'AmarTrading_Baskets','AmarTrading_SyncStatus',
-        'amartrading_baskets','amartrading_syncstatus'
+        'MoneyMachine_Baskets','MoneyMachine_SyncStatus','MoneyMachine_AccountRuns',
+        'AmarTrading_Baskets','AmarTrading_SyncStatus','AmarTrading_AccountRuns',
+        'amartrading_baskets','amartrading_syncstatus','amartrading_accountruns'
     )
     for($index = $Workbook.Connections.Count; $index -ge 1; $index--) {
         $connection = $Workbook.Connections.Item($index)
@@ -107,7 +109,7 @@ try {
     # cannot remain reachable from an old table connection.
     for($index = $workbook.Queries.Count; $index -ge 1; $index--) {
         $existingQuery = $workbook.Queries.Item($index)
-        if($existingQuery.Name -match '^(MoneyMachine|AmarTrading)_(Baskets|SyncStatus)$') {
+        if($existingQuery.Name -match '^(MoneyMachine|AmarTrading)_(Baskets|SyncStatus|AccountRuns)$') {
             $existingQuery.Delete()
         }
     }
@@ -120,9 +122,17 @@ try {
         $statusSheet = $workbook.Worksheets.Add()
         $statusSheet.Name = 'Sync Status'
     }
+    try { $runsSheet = $workbook.Worksheets.Item('Account Runs') }
+    catch {
+        $runsSheet = $workbook.Worksheets.Add()
+        $runsSheet.Name = 'Account Runs'
+    }
+    # Keys-only PQ sheet: Refresh All may replace A:C here, never Account Analysis formulas.
+    $runsSheet.Visible = $false
     $targets = [ordered]@{
         AmarTrading_Baskets = [pscustomobject]@{ Sheet=$workbook.Worksheets.Item('Basket Data'); Table='BasketDataTable' }
         AmarTrading_SyncStatus = [pscustomobject]@{ Sheet=$statusSheet; Table='SyncStatusTable' }
+        AmarTrading_AccountRuns = [pscustomobject]@{ Sheet=$runsSheet; Table='AccountRunsTable' }
     }
     Remove-AmarTradingQueryConnections -Workbook $workbook
     $connectionTemplate = 'OLEDB;Provider=Microsoft.Mashup.OleDb.1;Data Source=$Workbook$;Location={0};Extended Properties=""'

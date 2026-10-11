@@ -1,0 +1,54 @@
+﻿{
+    "Passed":  true,
+    "Steps":  [
+                  "before_ok",
+                  "refresh_pass_1_ok",
+                  "refresh_pass_2_ok"
+              ],
+    "Error":  null,
+    "Before":  {
+                   "Row":  5,
+                   "Account":  "18335349",
+                   "RunId":  "18335349_1400_XAUUSD_1790000000",
+                   "AccountFormula":  "=IF(ROWS($A$5:A5)\u003eROWS(AccountRunsTable),\"\",INDEX(AccountRunsTable[AccountNumber],ROWS($A$5:A5)))",
+                   "HelperFormula":  "=IF($A5=\"\",\"\",IF($AO5\u003e=1,IFERROR(AGGREGATE(14,6,BasketDataTable[MaxFloatingDrawdownAbs]/((BasketDataTable[RunKey]\u0026\"\"=($A5\u0026\"|\"\u0026$B5))),1),IFERROR(AGGREGATE(14,6,BasketDataTable[MaxFloatingDrawdownAbs]/((((BasketDataTable[AccountNumber]\u0026\"\")=($A5\u0026\"\"))*((BasketDataTable[RunID]\u0026\"\")=($B5\u0026\"\")))),1),\"\")),\"\"))",
+                   "MaxDd":  486.79,
+                   "SecondDd":  93.94,
+                   "ThirdDd":  56.71,
+                   "AvgTop10":  78.294000000000011,
+                   "TotalBaskets":  25,
+                   "NetProfit":  210.14
+               },
+    "AfterPass1":  {
+                       "Row":  5,
+                       "Account":  "18335349",
+                       "RunId":  "18335349_1400_XAUUSD_1790000000",
+                       "AccountFormula":  "=IF(ROWS($A$5:A5)\u003eROWS(AccountRunsTable),\"\",INDEX(AccountRunsTable[AccountNumber],ROWS($A$5:A5)))",
+                       "HelperFormula":  "=IF($A5=\"\",\"\",IF($AO5\u003e=1,IFERROR(AGGREGATE(14,6,BasketDataTable[MaxFloatingDrawdownAbs]/((BasketDataTable[RunKey]\u0026\"\"=($A5\u0026\"|\"\u0026$B5))),1),IFERROR(AGGREGATE(14,6,BasketDataTable[MaxFloatingDrawdownAbs]/((((BasketDataTable[AccountNumber]\u0026\"\")=($A5\u0026\"\"))*((BasketDataTable[RunID]\u0026\"\")=($B5\u0026\"\")))),1),\"\")),\"\"))",
+                       "MaxDd":  486.79,
+                       "SecondDd":  93.94,
+                       "ThirdDd":  56.71,
+                       "AvgTop10":  78.294000000000011,
+                       "TotalBaskets":  25,
+                       "NetProfit":  210.14
+                   },
+    "AfterPass2":  {
+                       "Row":  5,
+                       "Account":  "18335349",
+                       "RunId":  "18335349_1400_XAUUSD_1790000000",
+                       "AccountFormula":  "=IF(ROWS($A$5:A5)\u003eROWS(AccountRunsTable),\"\",INDEX(AccountRunsTable[AccountNumber],ROWS($A$5:A5)))",
+                       "HelperFormula":  "=IF($A5=\"\",\"\",IF($AO5\u003e=1,IFERROR(AGGREGATE(14,6,BasketDataTable[MaxFloatingDrawdownAbs]/((BasketDataTable[RunKey]\u0026\"\"=($A5\u0026\"|\"\u0026$B5))),1),IFERROR(AGGREGATE(14,6,BasketDataTable[MaxFloatingDrawdownAbs]/((((BasketDataTable[AccountNumber]\u0026\"\")=($A5\u0026\"\"))*((BasketDataTable[RunID]\u0026\"\")=($B5\u0026\"\")))),1),\"\")),\"\"))",
+                       "MaxDd":  486.79,
+                       "SecondDd":  93.94,
+                       "ThirdDd":  56.71,
+                       "AvgTop10":  78.294000000000011,
+                       "TotalBaskets":  25,
+                       "NetProfit":  210.14
+                   },
+    "AccountRunsRows":  6,
+    "QueryNames":  [
+                       "AmarTrading_Baskets",
+                       "AmarTrading_SyncStatus",
+                       "AmarTrading_AccountRuns"
+                   ]
+}

@@ -19,7 +19,7 @@ if(-not $removal.Success) { throw 'Installer must delete existing workbook queri
 
 $body = $removal.Groups['Body'].Value
 if($body -notmatch '\$workbook\.Queries\.Item\(\$index\)') { throw 'Alias cleanup must resolve each existing query by collection index.' }
-if($body -notmatch '\.Name\s+-match\s+''\^\(MoneyMachine\|AmarTrading\)_\(Baskets\|SyncStatus\)\$''') {
+if($body -notmatch '\.Name\s+-match\s+''\^\(MoneyMachine\|AmarTrading\)_\(Baskets\|SyncStatus\|AccountRuns\)\$''') {
     throw 'Alias cleanup must use the case-insensitive MoneyMachine/AmarTrading query-name matcher.'
 }
 if($body -notmatch '\.Delete\(\)') { throw 'Alias cleanup must delete every matching existing query.' }
