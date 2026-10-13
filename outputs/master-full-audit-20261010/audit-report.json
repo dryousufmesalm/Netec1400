@@ -1,0 +1,271 @@
+﻿{
+    "Passed":  true,
+    "GeneratedAt":  "2026-10-10T13:08:55.8306470+03:00",
+    "OneDriveRoot":  "D:\\CodexWorker\\master-full-audit-39ce\\fixture",
+    "LatestCsvPerAccount":  {
+                                "892525833":  "D:\\CodexWorker\\master-full-audit-39ce\\fixture\\amartrading\\Account_892525833\\Baskets.csv",
+                                "892525831":  "D:\\CodexWorker\\master-full-audit-39ce\\fixture\\amartrading\\Account_892525831\\Baskets.csv",
+                                "892525834":  "D:\\CodexWorker\\master-full-audit-39ce\\fixture\\amartrading\\Account_892525834\\Baskets.csv",
+                                "18335349":  "D:\\CodexWorker\\master-full-audit-39ce\\fixture\\amartrading\\VPS_newvps01\\Account_18335349\\Baskets.csv",
+                                "36097370":  "D:\\CodexWorker\\master-full-audit-39ce\\fixture\\amartrading\\VPS_auditvps01\\Account_36097370\\Baskets.csv",
+                                "892525830":  "D:\\CodexWorker\\master-full-audit-39ce\\fixture\\amartrading\\Account_892525830\\Baskets.csv"
+                            },
+    "GroupsChecked":  6,
+    "Failures":  [
+
+                 ],
+    "Warnings":  [
+
+                 ],
+    "GroupResults":  [
+                         {
+                             "Key":  "18335349|18335349_1400_XAUUSD_1790000000",
+                             "Actual":  {
+                                            "Row":  5,
+                                            "Account":  "18335349",
+                                            "RunId":  "18335349_1400_XAUUSD_1790000000",
+                                            "NetProfit":  210.14,
+                                            "TradingDays":  1,
+                                            "MaxDd":  486.79,
+                                            "SecondDd":  93.94,
+                                            "ThirdDd":  56.71,
+                                            "AvgTop10":  78.294000000000011,
+                                            "TotalBaskets":  25,
+                                            "WinCount":  25,
+                                            "LossCount":  0,
+                                            "AvgBasket":  8.4056,
+                                            "KillCount":  0,
+                                            "TimesNearKill":  0,
+                                            "FixedLots":  0.1,
+                                            "WinRate":  1,
+                                            "ConfigStatus":  "OK"
+                                        },
+                             "Ok":  true,
+                             "Mismatches":  [
+
+                                            ],
+                             "Expected":  {
+                                              "NetProfit":  210.14,
+                                              "Rows":  25,
+                                              "MaxDd":  486.79,
+                                              "SecondDd":  93.94,
+                                              "ThirdDd":  56.71,
+                                              "AvgTop10":  78.294000000000011,
+                                              "WinCount":  25,
+                                              "LossCount":  0,
+                                              "WinRate":  1
+                                          }
+                         },
+                         {
+                             "Key":  "36097370|36097370_1400_XAUUSD_1787281222",
+                             "Actual":  {
+                                            "Row":  6,
+                                            "Account":  "36097370",
+                                            "RunId":  "36097370_1400_XAUUSD_1787281222",
+                                            "NetProfit":  -1762.8099999999995,
+                                            "TradingDays":  3,
+                                            "MaxDd":  1362.97,
+                                            "SecondDd":  108.24,
+                                            "ThirdDd":  106.69,
+                                            "AvgTop10":  227.05100000000002,
+                                            "TotalBaskets":  164,
+                                            "WinCount":  77,
+                                            "LossCount":  85,
+                                            "AvgBasket":  -10.748841463414632,
+                                            "KillCount":  9,
+                                            "TimesNearKill":  24,
+                                            "FixedLots":  0.01,
+                                            "WinRate":  0.46951219512195119,
+                                            "ConfigStatus":  "Configuration changed during run"
+                                        },
+                             "Ok":  true,
+                             "Mismatches":  [
+
+                                            ],
+                             "Expected":  {
+                                              "NetProfit":  -1762.8099999999995,
+                                              "Rows":  164,
+                                              "MaxDd":  1362.97,
+                                              "SecondDd":  108.24,
+                                              "ThirdDd":  106.69,
+                                              "AvgTop10":  227.05100000000002,
+                                              "WinCount":  77,
+                                              "LossCount":  85,
+                                              "WinRate":  0.46951219512195119
+                                          }
+                         },
+                         {
+                             "Key":  "892525830|892525830_1400_XAUUSD_1787893638",
+                             "Actual":  {
+                                            "Row":  7,
+                                            "Account":  "892525830",
+                                            "RunId":  "892525830_1400_XAUUSD_1787893638",
+                                            "NetProfit":  -2127.4899999999989,
+                                            "TradingDays":  6,
+                                            "MaxDd":  5008.4,
+                                            "SecondDd":  1994.56,
+                                            "ThirdDd":  1486.24,
+                                            "AvgTop10":  1316.6119999999996,
+                                            "TotalBaskets":  323,
+                                            "WinCount":  316,
+                                            "LossCount":  6,
+                                            "AvgBasket":  -6.5866563467492227,
+                                            "KillCount":  1,
+                                            "TimesNearKill":  1,
+                                            "FixedLots":  0.04,
+                                            "WinRate":  0.978328173374613,
+                                            "ConfigStatus":  "OK"
+                                        },
+                             "Ok":  true,
+                             "Mismatches":  [
+
+                                            ],
+                             "Expected":  {
+                                              "NetProfit":  -2127.4899999999989,
+                                              "Rows":  323,
+                                              "MaxDd":  5008.4,
+                                              "SecondDd":  1994.56,
+                                              "ThirdDd":  1486.24,
+                                              "AvgTop10":  1316.6119999999996,
+                                              "WinCount":  316,
+                                              "LossCount":  6,
+                                              "WinRate":  0.978328173374613
+                                          }
+                         },
+                         {
+                             "Key":  "892525831|892525831_1400_XAUUSD_1788139132",
+                             "Actual":  {
+                                            "Row":  8,
+                                            "Account":  "892525831",
+                                            "RunId":  "892525831_1400_XAUUSD_1788139132",
+                                            "NetProfit":  794.3099999999996,
+                                            "TradingDays":  5,
+                                            "MaxDd":  586.35,
+                                            "SecondDd":  525.97,
+                                            "ThirdDd":  512.66,
+                                            "AvgTop10":  281.32499999999993,
+                                            "TotalBaskets":  327,
+                                            "WinCount":  322,
+                                            "LossCount":  4,
+                                            "AvgBasket":  2.4290825688073383,
+                                            "KillCount":  0,
+                                            "TimesNearKill":  0,
+                                            "FixedLots":  0.01,
+                                            "WinRate":  0.98470948012232418,
+                                            "ConfigStatus":  "OK"
+                                        },
+                             "Ok":  true,
+                             "Mismatches":  [
+
+                                            ],
+                             "Expected":  {
+                                              "NetProfit":  794.3099999999996,
+                                              "Rows":  327,
+                                              "MaxDd":  586.35,
+                                              "SecondDd":  525.97,
+                                              "ThirdDd":  512.66,
+                                              "AvgTop10":  281.32499999999993,
+                                              "WinCount":  322,
+                                              "LossCount":  4,
+                                              "WinRate":  0.98470948012232418
+                                          }
+                         },
+                         {
+                             "Key":  "892525833|892525833_1400_XAUUSD_1788139132",
+                             "Actual":  {
+                                            "Row":  9,
+                                            "Account":  "892525833",
+                                            "RunId":  "892525833_1400_XAUUSD_1788139132",
+                                            "NetProfit":  -3328.87,
+                                            "TradingDays":  5,
+                                            "MaxDd":  5021.68,
+                                            "SecondDd":  2007.2,
+                                            "ThirdDd":  1495.56,
+                                            "AvgTop10":  1097.9190000000003,
+                                            "TotalBaskets":  261,
+                                            "WinCount":  253,
+                                            "LossCount":  8,
+                                            "AvgBasket":  -12.754291187739463,
+                                            "KillCount":  1,
+                                            "TimesNearKill":  1,
+                                            "FixedLots":  0.04,
+                                            "WinRate":  0.96934865900383138,
+                                            "ConfigStatus":  "OK"
+                                        },
+                             "Ok":  true,
+                             "Mismatches":  [
+
+                                            ],
+                             "Expected":  {
+                                              "NetProfit":  -3328.87,
+                                              "Rows":  261,
+                                              "MaxDd":  5021.68,
+                                              "SecondDd":  2007.2,
+                                              "ThirdDd":  1495.56,
+                                              "AvgTop10":  1097.9190000000003,
+                                              "WinCount":  253,
+                                              "LossCount":  8,
+                                              "WinRate":  0.96934865900383138
+                                          }
+                         },
+                         {
+                             "Key":  "892525834|892525834_1400_XAUUSD_1787961419",
+                             "Actual":  {
+                                            "Row":  10,
+                                            "Account":  "892525834",
+                                            "RunId":  "892525834_1400_XAUUSD_1787961419",
+                                            "NetProfit":  223.81,
+                                            "TradingDays":  5,
+                                            "MaxDd":  145.37,
+                                            "SecondDd":  87.58,
+                                            "ThirdDd":  38.64,
+                                            "AvgTop10":  43.196999999999996,
+                                            "TotalBaskets":  151,
+                                            "WinCount":  150,
+                                            "LossCount":  0,
+                                            "AvgBasket":  1.4821854304635762,
+                                            "KillCount":  0,
+                                            "TimesNearKill":  0,
+                                            "FixedLots":  0.01,
+                                            "WinRate":  0.99337748344370858,
+                                            "ConfigStatus":  "OK"
+                                        },
+                             "Ok":  true,
+                             "Mismatches":  [
+
+                                            ],
+                             "Expected":  {
+                                              "NetProfit":  223.81,
+                                              "Rows":  151,
+                                              "MaxDd":  145.37,
+                                              "SecondDd":  87.58,
+                                              "ThirdDd":  38.64,
+                                              "AvgTop10":  43.196999999999996,
+                                              "WinCount":  150,
+                                              "LossCount":  0,
+                                              "WinRate":  0.99337748344370858
+                                          }
+                         }
+                     ],
+    "FormulaSamples":  {
+                           "MaxDdHelper":  "=IF($AO5\u003e=1,IFERROR(AGGREGATE(14,6,BasketDataTable[MaxFloatingDrawdownAbs]/((BasketDataTable[RunKey]\u0026\"\"=($A5\u0026\"|\"\u0026$B5))),1),IFERROR(AGGREGATE(14,6,BasketDataTable[MaxFloatingDrawdownAbs]/((((BasketDataTable[AccountNumber]\u0026\"\")=($A5\u0026\"\"))*((BasketDataTable[RunID]\u0026\"\")=($B5\u0026\"\")))),1),\"\")),\"\")",
+                           "LatestFixedLots":  "=IFERROR(LOOKUP(2,1/((BasketDataTable[RunKey]\u0026\"\")=($A5\u0026\"|\"\u0026$B5)),BasketDataTable[FixedLots]),\"\")",
+                           "NetProfit":  "=IFERROR(SUMIF(BasketDataTable[RunKey],($A5\u0026\"|\"\u0026$B5),BasketDataTable[ClosePL]),0)",
+                           "WinCount":  "=COUNTIFS(BasketDataTable[RunKey],($A5\u0026\"|\"\u0026$B5),BasketDataTable[ClosePL],\"\u003e0\")"
+                       },
+    "DataQuality":  {
+                        "ImportedRows":  "1251",
+                        "AnalysisCoverage":  "OK",
+                        "DuplicateKeys":  "OK"
+                    },
+    "Findings":  [
+                     "All sampled Account Analysis formulas use RunKey or text-coerced matching (no bare AccountNumber=$A / RunID=$B array equals).",
+                     "Basket Data row count matches sum of latest Baskets.csv rows (1251); latest-file-per-account OK (stale flat duplicates excluded).",
+                     "Sync Status rows: 2",
+                     "Checked 6 Account Analysis groups against latest Baskets.csv ground truth."
+                 ],
+    "BasketRows":  1251,
+    "CsvRowSumLatest":  1251,
+    "SyncStatusRows":  2,
+    "FailedGroups":  0
+}

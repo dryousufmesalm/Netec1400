@@ -40,16 +40,17 @@ function Set-ArrayFormula {
 
 function Latest-Formula {
     param([string]$Field, [int]$Row)
+    # RunKey + text coercion — same class of bug as ranked DD (array "=" does not coerce).
     $acct = "`$A$Row"
     $run = "`$B$Row"
-    "=IFERROR(LOOKUP(2,1/((BasketDataTable[AccountNumber]=$acct)*(BasketDataTable[RunID]=$run)),BasketDataTable[$Field]),`"`")"
+    "=IFERROR(LOOKUP(2,1/((BasketDataTable[RunKey]&`"`")=($acct&`"|`"&$run)),BasketDataTable[$Field]),`"`")"
 }
 
 function First-Formula {
     param([string]$Field, [int]$Row)
     $acct = "`$A$Row"
     $run = "`$B$Row"
-    "=IFERROR(INDEX(BasketDataTable[$Field],AGGREGATE(15,6,(ROW(BasketDataTable[$Field])-ROW(BasketDataTable[#Headers]))/((BasketDataTable[AccountNumber]=$acct)*(BasketDataTable[RunID]=$run)),1)),`"`")"
+    "=IFERROR(INDEX(BasketDataTable[$Field],AGGREGATE(15,6,(ROW(BasketDataTable[$Field])-ROW(BasketDataTable[#Headers]))/((BasketDataTable[RunKey]&`"`")=($acct&`"|`"&$run)),1)),`"`")"
 }
 
 function Manual-Formula {
@@ -122,7 +123,8 @@ try {
         $criteria = "($runKeyMatch)"
         $criteriaLegacy = "($acctMatch*$runMatch)"
         Set-Formula $analysis.Cells.Item($row,34) "=IFERROR(SUMIF(BasketDataTable[RunKey],$runKey,BasketDataTable[ClosePL]),0)"
-        Set-Formula $analysis.Cells.Item($row,35) "=IFERROR(SUMPRODUCT(($criteria)*(BasketDataTable[TradeDate]<>`"`")/COUNTIFS(BasketDataTable[AccountNumber],BasketDataTable[AccountNumber],BasketDataTable[RunID],BasketDataTable[RunID],BasketDataTable[TradeDate],BasketDataTable[TradeDate])),0)"
+        # Unique trading-day count via SUMPRODUCT can land on 5.999999; ROUND for a clean integer.
+        Set-Formula $analysis.Cells.Item($row,35) "=IFERROR(ROUND(SUMPRODUCT(($criteria)*(BasketDataTable[TradeDate]<>`"`")/COUNTIFS(BasketDataTable[AccountNumber],BasketDataTable[AccountNumber],BasketDataTable[RunID],BasketDataTable[RunID],BasketDataTable[TradeDate],BasketDataTable[TradeDate])),0),0)"
         Set-Formula $analysis.Cells.Item($row,36) "=IFERROR(AH$row/AI$row,0)"
         # Ranked individual-basket MaxFloatingDrawdownAbs (positive magnitude) for this run.
         $rankFormula = { param([int]$k) "=IF(`$AO$row>=$k,IFERROR(AGGREGATE(14,6,BasketDataTable[MaxFloatingDrawdownAbs]/($runKeyMatch),$k),IFERROR(AGGREGATE(14,6,BasketDataTable[MaxFloatingDrawdownAbs]/($criteriaLegacy),$k),`"`")),`"`")" }
@@ -133,14 +135,14 @@ try {
         # Average only retrieved top ranks (COUNT ignores blank/text helpers).
         Set-Formula $analysis.Cells.Item($row,40) "=IFERROR(SUM(BP${row}:BY${row})/MAX(1,COUNT(BP${row}:BY${row})),0)"
         Set-Formula $analysis.Cells.Item($row,41) "=IFERROR(COUNTIF(BasketDataTable[RunKey],$runKey),0)"
-        Set-Formula $analysis.Cells.Item($row,42) "=COUNTIFS(BasketDataTable[AccountNumber],$acct,BasketDataTable[RunID],$run,BasketDataTable[ClosePL],`">0`")"
-        Set-Formula $analysis.Cells.Item($row,43) "=SUMIFS(BasketDataTable[ClosePL],BasketDataTable[AccountNumber],$acct,BasketDataTable[RunID],$run,BasketDataTable[ClosePL],`">0`")"
-        Set-Formula $analysis.Cells.Item($row,44) "=COUNTIFS(BasketDataTable[AccountNumber],$acct,BasketDataTable[RunID],$run,BasketDataTable[ClosePL],`"<0`")"
-        Set-Formula $analysis.Cells.Item($row,45) "=-SUMIFS(BasketDataTable[ClosePL],BasketDataTable[AccountNumber],$acct,BasketDataTable[RunID],$run,BasketDataTable[ClosePL],`"<0`")"
+        Set-Formula $analysis.Cells.Item($row,42) "=COUNTIFS(BasketDataTable[RunKey],$runKey,BasketDataTable[ClosePL],`">0`")"
+        Set-Formula $analysis.Cells.Item($row,43) "=SUMIFS(BasketDataTable[ClosePL],BasketDataTable[RunKey],$runKey,BasketDataTable[ClosePL],`">0`")"
+        Set-Formula $analysis.Cells.Item($row,44) "=COUNTIFS(BasketDataTable[RunKey],$runKey,BasketDataTable[ClosePL],`"<0`")"
+        Set-Formula $analysis.Cells.Item($row,45) "=-SUMIFS(BasketDataTable[ClosePL],BasketDataTable[RunKey],$runKey,BasketDataTable[ClosePL],`"<0`")"
         Set-Formula $analysis.Cells.Item($row,46) "=IFERROR(AH$row/AO$row,0)"
-        Set-Formula $analysis.Cells.Item($row,47) "=SUMIFS(BasketDataTable[TimesNearKill],BasketDataTable[AccountNumber],$acct,BasketDataTable[RunID],$run)"
-        Set-Formula $analysis.Cells.Item($row,48) "=COUNTIFS(BasketDataTable[AccountNumber],$acct,BasketDataTable[RunID],$run,BasketDataTable[CloseReason],`"KILL`")"
-        for($j = 1; $j -le 10; $j++) { Set-Formula $analysis.Cells.Item($row,48+$j) "=COUNTIFS(BasketDataTable[AccountNumber],$acct,BasketDataTable[RunID],$run,BasketDataTable[MaxOrdersConcurrent],`">=$j`")" }
+        Set-Formula $analysis.Cells.Item($row,47) "=SUMIF(BasketDataTable[RunKey],$runKey,BasketDataTable[TimesNearKill])"
+        Set-Formula $analysis.Cells.Item($row,48) "=COUNTIFS(BasketDataTable[RunKey],$runKey,BasketDataTable[CloseReason],`"KILL`")"
+        for($j = 1; $j -le 10; $j++) { Set-Formula $analysis.Cells.Item($row,48+$j) "=COUNTIFS(BasketDataTable[RunKey],$runKey,BasketDataTable[MaxOrdersConcurrent],`">=$j`")" }
         Set-Formula $analysis.Cells.Item($row,59) "=SUMPRODUCT($criteria*(BasketDataTable[MaxTotalLotsInBasket]>0)*(BasketDataTable[MaxTotalLots]>=BasketDataTable[MaxTotalLotsInBasket]))"
         Set-Formula $analysis.Cells.Item($row,60) "=IFERROR(AH$row/AN$row,0)"
         Set-Formula $analysis.Cells.Item($row,61) "=IFERROR(AQ$row/AP$row,0)"
