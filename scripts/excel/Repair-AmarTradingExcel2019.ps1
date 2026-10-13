@@ -80,37 +80,43 @@ try {
     $result.ImportRowsBefore = $data.ListRows.Count
     if($result.ImportRowsBefore -lt 1) { throw 'BasketDataTable has no imported rows.' }
 
-    # Preserve the imported group keys currently loaded by Power Query. These
-    # are values, so Excel 2019 does not need dynamic-array enumeration.
-    $groups = [ordered]@{}
-    for($i = 1; $i -le $data.ListRows.Count; $i++) {
-        $acct = [string]$data.ListColumns.Item('AccountNumber').DataBodyRange.Cells.Item($i,1).Value2
-        $run = [string]$data.ListColumns.Item('RunID').DataBodyRange.Cells.Item($i,1).Value2
-        if($acct -ne '') { $groups["$acct|$run"] = @($acct,$run) }
+    # Account/run keys come from AccountRunsTable (PQ → hidden "Account Runs" sheet).
+    # Metric formulas live only on Account Analysis and are never inside a query table,
+    # so Refresh All cannot clear them. Prefill fixed formula rows; empty keys stay blank.
+    $runs = $null
+    try { $runs = $book.Worksheets.Item('Account Runs').ListObjects.Item('AccountRunsTable') } catch { }
+    if(-not $runs) { throw 'AccountRunsTable is missing. Install AmarTrading_AccountRuns before repairing analysis formulas.' }
+    $result.AnalysisGroups = [int]$runs.ListRows.Count
+    if($result.AnalysisGroups -lt 1) { throw 'AccountRunsTable has no rows after refresh.' }
+
+    function Wrap-IfAccount([int]$Row, [string]$Formula) {
+        $body = $Formula.TrimStart('=')
+        "=IF(`$A$Row=`"`",`"`",$body)"
     }
-    if($groups.Count -eq 0) { throw 'No account/run groups were found in BasketDataTable.' }
-    $result.AnalysisGroups = $groups.Count
 
     $analysis.Range('A4:BY104').ClearContents()
-    $analysis.Range('A4').Value2 = 'Account/run analysis (Excel 2019 compatible). Refresh All updates imported data; current account/run groups are listed below.'
+    $analysis.Range('A4').Value2 = 'Account/run keys follow Refresh All via Account Runs (Power Query). DD and other metrics are formulas outside any PQ load range and are not cleared by Refresh All.'
     $analysis.Range('A4:BO4').Merge()
-    $row = 5
-    foreach($pair in $groups.Values) {
-        $analysis.Cells.Item($row,1).NumberFormat = '@'
-        $analysis.Cells.Item($row,2).NumberFormat = '@'
-        $analysis.Cells.Item($row,1).Value2 = $pair[0]
-        $analysis.Cells.Item($row,2).Value2 = $pair[1]
+    $maxRows = 100
+    for($offset = 0; $offset -lt $maxRows; $offset++) {
+        $row = 5 + $offset
+        # Do not use Text (@) format on formula key cells — Excel stores the formula as literal text.
+        $analysis.Cells.Item($row,1).NumberFormat = 'General'
+        $analysis.Cells.Item($row,2).NumberFormat = 'General'
+        # Keys pulled from AccountRunsTable — not static values written once at repair time.
+        Set-Formula $analysis.Cells.Item($row,1) "=IF(ROWS(`$A`$5:A$row)>ROWS(AccountRunsTable),`"`",INDEX(AccountRunsTable[AccountNumber],ROWS(`$A`$5:A$row)))"
+        Set-Formula $analysis.Cells.Item($row,2) "=IF(ROWS(`$A`$5:A$row)>ROWS(AccountRunsTable),`"`",INDEX(AccountRunsTable[RunID],ROWS(`$A`$5:A$row)))"
 
-        Set-Formula $analysis.Cells.Item($row,3)  (Manual-Formula 4 $row)
-        Set-Formula $analysis.Cells.Item($row,4) "=IFERROR(INDEX(BasketDataTable[StartTime],MATCH(`$A$row&`"|`"&`$B$row,BasketDataTable[RunKey],0)),`"`")"
-        Set-Formula $analysis.Cells.Item($row,5)  (Manual-Formula 5 $row)
-        Set-Formula $analysis.Cells.Item($row,6)  (Latest-Formula 'RunStartBalance' $row)
-        Set-Formula $analysis.Cells.Item($row,7)  (Manual-Formula 6 $row)
-        Set-Formula $analysis.Cells.Item($row,8)  (Manual-Formula 7 $row)
+        Set-Formula $analysis.Cells.Item($row,3)  (Wrap-IfAccount $row (Manual-Formula 4 $row))
+        Set-Formula $analysis.Cells.Item($row,4) (Wrap-IfAccount $row "=IFERROR(INDEX(BasketDataTable[StartTime],MATCH(`$A$row&`"|`"&`$B$row,BasketDataTable[RunKey],0)),`"`")")
+        Set-Formula $analysis.Cells.Item($row,5)  (Wrap-IfAccount $row (Manual-Formula 5 $row))
+        Set-Formula $analysis.Cells.Item($row,6)  (Wrap-IfAccount $row (Latest-Formula 'RunStartBalance' $row))
+        Set-Formula $analysis.Cells.Item($row,7)  (Wrap-IfAccount $row (Manual-Formula 6 $row))
+        Set-Formula $analysis.Cells.Item($row,8)  (Wrap-IfAccount $row (Manual-Formula 7 $row))
 
         $latestFields = @('FixedLots','PipsStep','TakeProfit','Tral','TralStart','MaxSpread','TimeStart','TimeEnd','OpenTime','SpeedEA','NewBasketDelaySeconds','UseBasketTrailingTP','TrailingStart','TrailingStep','KillSwitchEnable','KillEquityLevel','KillCooldownMinutes','MaxOrdersInBasket','MaxTotalLotsInBasket','RegimeEnable','RegimeAction','EnableRecoveryStepUp','RecoveryWaitMinutes','RecoveryMaxTotalLotsInBasket')
-        for($j = 0; $j -lt $latestFields.Count; $j++) { Set-Formula $analysis.Cells.Item($row,9+$j) (Latest-Formula $latestFields[$j] $row) }
-        Set-Formula $analysis.Cells.Item($row,33) (Manual-Formula 8 $row)
+        for($j = 0; $j -lt $latestFields.Count; $j++) { Set-Formula $analysis.Cells.Item($row,9+$j) (Wrap-IfAccount $row (Latest-Formula $latestFields[$j] $row)) }
+        Set-Formula $analysis.Cells.Item($row,33) (Wrap-IfAccount $row (Manual-Formula 8 $row))
 
         # Prefer RunKey (AccountNumber|RunID). Array "=" inside AGGREGATE does not coerce
         # text↔number the way SUMIFS/COUNTIFS do, which left Max/2nd/3rd DD blank while
@@ -122,39 +128,38 @@ try {
         $runMatch = "((BasketDataTable[RunID]&`"`")=($run&`"`"))"
         $criteria = "($runKeyMatch)"
         $criteriaLegacy = "($acctMatch*$runMatch)"
-        Set-Formula $analysis.Cells.Item($row,34) "=IFERROR(SUMIF(BasketDataTable[RunKey],$runKey,BasketDataTable[ClosePL]),0)"
+        Set-Formula $analysis.Cells.Item($row,34) (Wrap-IfAccount $row "=IFERROR(SUMIF(BasketDataTable[RunKey],$runKey,BasketDataTable[ClosePL]),0)")
         # Unique trading-day count via SUMPRODUCT can land on 5.999999; ROUND for a clean integer.
-        Set-Formula $analysis.Cells.Item($row,35) "=IFERROR(ROUND(SUMPRODUCT(($criteria)*(BasketDataTable[TradeDate]<>`"`")/COUNTIFS(BasketDataTable[AccountNumber],BasketDataTable[AccountNumber],BasketDataTable[RunID],BasketDataTable[RunID],BasketDataTable[TradeDate],BasketDataTable[TradeDate])),0),0)"
-        Set-Formula $analysis.Cells.Item($row,36) "=IFERROR(AH$row/AI$row,0)"
+        Set-Formula $analysis.Cells.Item($row,35) (Wrap-IfAccount $row "=IFERROR(ROUND(SUMPRODUCT(($criteria)*(BasketDataTable[TradeDate]<>`"`")/COUNTIFS(BasketDataTable[AccountNumber],BasketDataTable[AccountNumber],BasketDataTable[RunID],BasketDataTable[RunID],BasketDataTable[TradeDate],BasketDataTable[TradeDate])),0),0)")
+        Set-Formula $analysis.Cells.Item($row,36) (Wrap-IfAccount $row "=IFERROR(AH$row/AI$row,0)")
         # Ranked individual-basket MaxFloatingDrawdownAbs (positive magnitude) for this run.
-        $rankFormula = { param([int]$k) "=IF(`$AO$row>=$k,IFERROR(AGGREGATE(14,6,BasketDataTable[MaxFloatingDrawdownAbs]/($runKeyMatch),$k),IFERROR(AGGREGATE(14,6,BasketDataTable[MaxFloatingDrawdownAbs]/($criteriaLegacy),$k),`"`")),`"`")" }
+        $rankFormula = { param([int]$k) "=IF(`$A$row=`"`",`"`",IF(`$AO$row>=$k,IFERROR(AGGREGATE(14,6,BasketDataTable[MaxFloatingDrawdownAbs]/($runKeyMatch),$k),IFERROR(AGGREGATE(14,6,BasketDataTable[MaxFloatingDrawdownAbs]/($criteriaLegacy),$k),`"`")),`"`"))" }
         for($k = 1; $k -le 10; $k++) { Set-Formula $analysis.Cells.Item($row,67+$k) (&$rankFormula $k) }
-        Set-Formula $analysis.Cells.Item($row,37) "=BP$row"
-        Set-Formula $analysis.Cells.Item($row,38) "=BQ$row"
-        Set-Formula $analysis.Cells.Item($row,39) "=BR$row"
+        Set-Formula $analysis.Cells.Item($row,37) (Wrap-IfAccount $row "=BP$row")
+        Set-Formula $analysis.Cells.Item($row,38) (Wrap-IfAccount $row "=BQ$row")
+        Set-Formula $analysis.Cells.Item($row,39) (Wrap-IfAccount $row "=BR$row")
         # Average only retrieved top ranks (COUNT ignores blank/text helpers).
-        Set-Formula $analysis.Cells.Item($row,40) "=IFERROR(SUM(BP${row}:BY${row})/MAX(1,COUNT(BP${row}:BY${row})),0)"
-        Set-Formula $analysis.Cells.Item($row,41) "=IFERROR(COUNTIF(BasketDataTable[RunKey],$runKey),0)"
-        Set-Formula $analysis.Cells.Item($row,42) "=COUNTIFS(BasketDataTable[RunKey],$runKey,BasketDataTable[ClosePL],`">0`")"
-        Set-Formula $analysis.Cells.Item($row,43) "=SUMIFS(BasketDataTable[ClosePL],BasketDataTable[RunKey],$runKey,BasketDataTable[ClosePL],`">0`")"
-        Set-Formula $analysis.Cells.Item($row,44) "=COUNTIFS(BasketDataTable[RunKey],$runKey,BasketDataTable[ClosePL],`"<0`")"
-        Set-Formula $analysis.Cells.Item($row,45) "=-SUMIFS(BasketDataTable[ClosePL],BasketDataTable[RunKey],$runKey,BasketDataTable[ClosePL],`"<0`")"
-        Set-Formula $analysis.Cells.Item($row,46) "=IFERROR(AH$row/AO$row,0)"
-        Set-Formula $analysis.Cells.Item($row,47) "=SUMIF(BasketDataTable[RunKey],$runKey,BasketDataTable[TimesNearKill])"
-        Set-Formula $analysis.Cells.Item($row,48) "=COUNTIFS(BasketDataTable[RunKey],$runKey,BasketDataTable[CloseReason],`"KILL`")"
-        for($j = 1; $j -le 10; $j++) { Set-Formula $analysis.Cells.Item($row,48+$j) "=COUNTIFS(BasketDataTable[RunKey],$runKey,BasketDataTable[MaxOrdersConcurrent],`">=$j`")" }
-        Set-Formula $analysis.Cells.Item($row,59) "=SUMPRODUCT($criteria*(BasketDataTable[MaxTotalLotsInBasket]>0)*(BasketDataTable[MaxTotalLots]>=BasketDataTable[MaxTotalLotsInBasket]))"
-        Set-Formula $analysis.Cells.Item($row,60) "=IFERROR(AH$row/AN$row,0)"
-        Set-Formula $analysis.Cells.Item($row,61) "=IFERROR(AQ$row/AP$row,0)"
-        Set-Formula $analysis.Cells.Item($row,62) "=IFERROR(AS$row/AR$row,0)"
-        Set-Formula $analysis.Cells.Item($row,63) "=IFERROR(AP$row/AO$row,0)"
-        Set-Formula $analysis.Cells.Item($row,64) "=IFERROR(AR$row/AO$row,0)"
-        Set-Formula $analysis.Cells.Item($row,65) "=(BI$row*BK$row)-(BJ$row*BL$row)"
-        Set-Formula $analysis.Cells.Item($row,66) "=IFERROR(AJ$row/AN$row,0)"
-        Set-Formula $analysis.Cells.Item($row,67) "=IF(AO$row=0,`"No basket data`",IF(SUMPRODUCT($criteria*(BasketDataTable[ConfigFingerprint]<>`"`")/COUNTIFS(BasketDataTable[AccountNumber],BasketDataTable[AccountNumber],BasketDataTable[RunID],BasketDataTable[RunID],BasketDataTable[ConfigFingerprint],BasketDataTable[ConfigFingerprint]))>1,`"Configuration changed during run`",`"OK`"))"
-        $analysis.Range('BP:BY').EntireColumn.Hidden = $true
-        $row++
+        Set-Formula $analysis.Cells.Item($row,40) (Wrap-IfAccount $row "=IFERROR(SUM(BP${row}:BY${row})/MAX(1,COUNT(BP${row}:BY${row})),0)")
+        Set-Formula $analysis.Cells.Item($row,41) (Wrap-IfAccount $row "=IFERROR(COUNTIF(BasketDataTable[RunKey],$runKey),0)")
+        Set-Formula $analysis.Cells.Item($row,42) (Wrap-IfAccount $row "=COUNTIFS(BasketDataTable[RunKey],$runKey,BasketDataTable[ClosePL],`">0`")")
+        Set-Formula $analysis.Cells.Item($row,43) (Wrap-IfAccount $row "=SUMIFS(BasketDataTable[ClosePL],BasketDataTable[RunKey],$runKey,BasketDataTable[ClosePL],`">0`")")
+        Set-Formula $analysis.Cells.Item($row,44) (Wrap-IfAccount $row "=COUNTIFS(BasketDataTable[RunKey],$runKey,BasketDataTable[ClosePL],`"<0`")")
+        Set-Formula $analysis.Cells.Item($row,45) (Wrap-IfAccount $row "=-SUMIFS(BasketDataTable[ClosePL],BasketDataTable[RunKey],$runKey,BasketDataTable[ClosePL],`"<0`")")
+        Set-Formula $analysis.Cells.Item($row,46) (Wrap-IfAccount $row "=IFERROR(AH$row/AO$row,0)")
+        Set-Formula $analysis.Cells.Item($row,47) (Wrap-IfAccount $row "=SUMIF(BasketDataTable[RunKey],$runKey,BasketDataTable[TimesNearKill])")
+        Set-Formula $analysis.Cells.Item($row,48) (Wrap-IfAccount $row "=COUNTIFS(BasketDataTable[RunKey],$runKey,BasketDataTable[CloseReason],`"KILL`")")
+        for($j = 1; $j -le 10; $j++) { Set-Formula $analysis.Cells.Item($row,48+$j) (Wrap-IfAccount $row "=COUNTIFS(BasketDataTable[RunKey],$runKey,BasketDataTable[MaxOrdersConcurrent],`">=$j`")") }
+        Set-Formula $analysis.Cells.Item($row,59) (Wrap-IfAccount $row "=SUMPRODUCT($criteria*(BasketDataTable[MaxTotalLotsInBasket]>0)*(BasketDataTable[MaxTotalLots]>=BasketDataTable[MaxTotalLotsInBasket]))")
+        Set-Formula $analysis.Cells.Item($row,60) (Wrap-IfAccount $row "=IFERROR(AH$row/AN$row,0)")
+        Set-Formula $analysis.Cells.Item($row,61) (Wrap-IfAccount $row "=IFERROR(AQ$row/AP$row,0)")
+        Set-Formula $analysis.Cells.Item($row,62) (Wrap-IfAccount $row "=IFERROR(AS$row/AR$row,0)")
+        Set-Formula $analysis.Cells.Item($row,63) (Wrap-IfAccount $row "=IFERROR(AP$row/AO$row,0)")
+        Set-Formula $analysis.Cells.Item($row,64) (Wrap-IfAccount $row "=IFERROR(AR$row/AO$row,0)")
+        Set-Formula $analysis.Cells.Item($row,65) (Wrap-IfAccount $row "=(BI$row*BK$row)-(BJ$row*BL$row)")
+        Set-Formula $analysis.Cells.Item($row,66) (Wrap-IfAccount $row "=IFERROR(AJ$row/AN$row,0)")
+        Set-Formula $analysis.Cells.Item($row,67) (Wrap-IfAccount $row "=IF(AO$row=0,`"No basket data`",IF(SUMPRODUCT($criteria*(BasketDataTable[ConfigFingerprint]<>`"`")/COUNTIFS(BasketDataTable[AccountNumber],BasketDataTable[AccountNumber],BasketDataTable[RunID],BasketDataTable[RunID],BasketDataTable[ConfigFingerprint],BasketDataTable[ConfigFingerprint]))>1,`"Configuration changed during run`",`"OK`"))")
     }
+    $analysis.Range('BP:BY').EntireColumn.Hidden = $true
 
     $quality = $book.Worksheets.Item('Data Quality')
     $quality.Range('B4').Formula = '=COUNTIF(''Account Analysis''!$A$5:$A$104,"<>")'
@@ -162,13 +167,13 @@ try {
     $quality.Range('A10:C12').ClearContents()
     $quality.Range('A10').Value2 = 'Analysis group coverage'
     $quality.Range('B10').Formula = '=IF(SUMPRODUCT((BasketDataTable[AccountNumber]<>"")*(COUNTIFS(''Account Analysis''!$A$5:$A$104,BasketDataTable[AccountNumber],''Account Analysis''!$B$5:$B$104,BasketDataTable[RunID])=0))>0,"INCOMPLETE ANALYSIS - add account/run","OK")'
-    $quality.Range('C10').Value2 = 'Every imported account/run pair must have a matching Account Analysis row.'
+    $quality.Range('C10').Value2 = 'Account Analysis A:B pull from AccountRunsTable after Refresh All.'
     $quality.Range('A11').Value2 = 'Duplicate analysis keys'
     $quality.Range('B11').Formula = '=IF(SUMPRODUCT((''Account Analysis''!$A$5:$A$104<>"")*(COUNTIFS(''Account Analysis''!$A$5:$A$104,''Account Analysis''!$A$5:$A$104,''Account Analysis''!$B$5:$B$104,''Account Analysis''!$B$5:$B$104)>1))>0,"DUPLICATE ACCOUNT/RUN","OK")'
     $quality.Range('C11').Value2 = 'Account and Run ID together must be unique.'
     $quality.Range('A12').Value2 = 'Excel compatibility'
     $quality.Range('B12').Value2 = 'Excel 2019 formulas'
-    $quality.Range('C12').Value2 = 'Analysis rows are prefilled for current groups; copy a complete row through hidden drawdown helpers for a new group.'
+    $quality.Range('C12').Value2 = 'DD/metric formulas are outside PQ tables; Account Runs query supplies keys. Refresh All must not clear formula cells.'
 
     # Do not force a full workbook calculation here. Excel 2019 recalculates
     # these formulas when the client opens the saved workbook; forcing the
