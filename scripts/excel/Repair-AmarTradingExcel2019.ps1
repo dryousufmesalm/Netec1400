@@ -118,6 +118,9 @@ try {
         for($j = 0; $j -lt $latestFields.Count; $j++) { Set-Formula $analysis.Cells.Item($row,9+$j) (Wrap-IfAccount $row (Latest-Formula $latestFields[$j] $row)) }
         Set-Formula $analysis.Cells.Item($row,33) (Wrap-IfAccount $row (Manual-Formula 8 $row))
 
+        # Prefer RunKey (AccountNumber|RunID). Array "=" inside AGGREGATE does not coerce
+        # text↔number the way SUMIFS/COUNTIFS do, which left Max/2nd/3rd DD blank while
+        # Net Profit still matched. Force text on both sides with &"".
         $acct = "`$A$row"; $run = "`$B$row"
         $runKey = "($acct&`"|`"&$run)"
         $runKeyMatch = "(BasketDataTable[RunKey]&`"`"=$runKey)"
@@ -126,13 +129,16 @@ try {
         $criteria = "($runKeyMatch)"
         $criteriaLegacy = "($acctMatch*$runMatch)"
         Set-Formula $analysis.Cells.Item($row,34) (Wrap-IfAccount $row "=IFERROR(SUMIF(BasketDataTable[RunKey],$runKey,BasketDataTable[ClosePL]),0)")
+        # Unique trading-day count via SUMPRODUCT can land on 5.999999; ROUND for a clean integer.
         Set-Formula $analysis.Cells.Item($row,35) (Wrap-IfAccount $row "=IFERROR(ROUND(SUMPRODUCT(($criteria)*(BasketDataTable[TradeDate]<>`"`")/COUNTIFS(BasketDataTable[AccountNumber],BasketDataTable[AccountNumber],BasketDataTable[RunID],BasketDataTable[RunID],BasketDataTable[TradeDate],BasketDataTable[TradeDate])),0),0)")
         Set-Formula $analysis.Cells.Item($row,36) (Wrap-IfAccount $row "=IFERROR(AH$row/AI$row,0)")
+        # Ranked individual-basket MaxFloatingDrawdownAbs (positive magnitude) for this run.
         $rankFormula = { param([int]$k) "=IF(`$A$row=`"`",`"`",IF(`$AO$row>=$k,IFERROR(AGGREGATE(14,6,BasketDataTable[MaxFloatingDrawdownAbs]/($runKeyMatch),$k),IFERROR(AGGREGATE(14,6,BasketDataTable[MaxFloatingDrawdownAbs]/($criteriaLegacy),$k),`"`")),`"`"))" }
         for($k = 1; $k -le 10; $k++) { Set-Formula $analysis.Cells.Item($row,67+$k) (&$rankFormula $k) }
         Set-Formula $analysis.Cells.Item($row,37) (Wrap-IfAccount $row "=BP$row")
         Set-Formula $analysis.Cells.Item($row,38) (Wrap-IfAccount $row "=BQ$row")
         Set-Formula $analysis.Cells.Item($row,39) (Wrap-IfAccount $row "=BR$row")
+        # Average only retrieved top ranks (COUNT ignores blank/text helpers).
         Set-Formula $analysis.Cells.Item($row,40) (Wrap-IfAccount $row "=IFERROR(SUM(BP${row}:BY${row})/MAX(1,COUNT(BP${row}:BY${row})),0)")
         Set-Formula $analysis.Cells.Item($row,41) (Wrap-IfAccount $row "=IFERROR(COUNTIF(BasketDataTable[RunKey],$runKey),0)")
         Set-Formula $analysis.Cells.Item($row,42) (Wrap-IfAccount $row "=COUNTIFS(BasketDataTable[RunKey],$runKey,BasketDataTable[ClosePL],`">0`")")
